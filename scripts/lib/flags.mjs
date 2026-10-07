@@ -28,6 +28,33 @@ export function sanitizerFlags({ asan, tsan }) {
     return [];
 }
 
+/*
+ * Stack protector is off for the freestanding flavor.
+ *
+ * The compiler emits references to __stack_chk_guard and __stack_chk_fail
+ * (a libSystem/libc symbol on macOS, a TLS slot on x86_64 Linux). Neither
+ * is something a libc-free translation unit can provide correctly: the
+ * guard must hold a per-process random value, and on macOS the symbol is
+ * shared process-wide, so defining our own would interpose on libSystem's
+ * and weaken the protection for everything else in the process.
+ *
+ * The alternative -- a vm-owned guard initialised by rt at startup -- is
+ * possible but needs the interposition question answered first, and buys
+ * little today: vm has no unbounded stack buffers, and its one formatter
+ * is bounded by construction.
+ *
+ * Leaving it enabled and whitelisting the symbols in the audit was the
+ * other option, and was rejected: the audit's value comes from being
+ * strict, and a benign-looking entry in the allowlist is how a real libc
+ * dependency gets in unnoticed later.
+ */
+const FREESTANDING_BASE = [
+    ...COMMON,
+    "-ffreestanding",
+    "-nostdinc",
+    "-fno-stack-protector",
+];
+
 /**
  * Build the include path list.
  *
@@ -53,10 +80,10 @@ export function includeFlags(root, flavor) {
 }
 
 export function flagsFor({ flavor, opts, toolchain, root, extra = [] }) {
-    const base = flavor === "freestanding"
-        ? [...COMMON, "-ffreestanding", "-nostdinc",
-           ...freestandingInclude(toolchain.cc, toolchain.isClang)]
-        : [...COMMON];
+    const base =
+        flavor === "freestanding"
+            ? [...FREESTANDING_BASE, ...freestandingInclude(toolchain.cc, toolchain.isClang)]
+            : [...COMMON];
 
     return [
         ...base,

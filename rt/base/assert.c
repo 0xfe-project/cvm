@@ -3,29 +3,43 @@
  *
  * The out-of-line half of cvm_assert (see base/assert.h).
  *
- * This lives in the rt layer because reporting a failure means writing to
- * a file descriptor and aborting the process — both platform operations.
- * rt is the one layer allowed to use libc, so this uses stdio for now.
+ * Reporting a failure means formatting a message and writing it to a file
+ * descriptor, then terminating the process — all platform operations, so
+ * this lives in rt rather than being inlined into vm.
  *
- * The eventual PAL version writes with write(2) and raises SIGABRT
- * directly, which drops the stdio dependency and lets rt itself become
- * freestanding. Nothing outside this file depends on that choice.
+ * The message is built with our own formatter (base/format.h) instead of
+ * printf, which keeps the shape of the output under our control and means
+ * the failure path does not depend on stdio being in a sane state.
  */
 
 #include "base/assert.h"
 
-#include <stdio.h>
-#include <stdlib.h>
+#include "base/format.h"
+#include "rt.h"
+
+/* Room for the condition text plus the location. Assertions are short;
+ * a longer one is truncated rather than costing unbounded stack. */
+#define ASSERT_MESSAGE_CAP 512
 
 void rt_assert_fail(str file, u32 line, str expr) {
-    /* str is not NUL-terminated: every write is length-delimited. */
-    fputs("assertion failed: ", stderr);
-    fwrite(expr.ptr, 1, expr.len, stderr);
-    fputc('\n', stderr);
+    u8 buf[ASSERT_MESSAGE_CAP];
+    CvmFmt f;
 
-    fputs("    at ", stderr);
-    fwrite(file.ptr, 1, file.len, stderr);
-    fprintf(stderr, ":%u\n", line);
+    fmt_init(&f, buf, sizeof(buf));
+    fmt_lit(&f, "assertion failed: ");
+    fmt_str(&f, expr);
+    fmt_lit(&f, "\n    at ");
+    fmt_str(&f, file);
+    fmt_lit(&f, ":");
+    fmt_u32(&f, line);
+    fmt_lit(&f, "\n");
 
-    abort();
+    if (f.truncated) {
+        /* Say so rather than emitting a plausible-looking half line. */
+        static const u8 note[] = "    (message truncated)\n";
+        rt_channel_write(rt_channel_stderr(), (span_const){note, sizeof(note) - 1});
+    }
+
+    rt_channel_write(rt_channel_stderr(), (span_const){buf, f.len});
+    rt_abort();
 }
