@@ -1,0 +1,356 @@
+/*
+ * vm/gc/heap.c
+ *
+ * Heap layout and growth. See vm/gc/heap.h for the shape of the thing.
+ */
+
+#include "gc/heap.h"
+
+#include <stdatomic.h>
+
+#include "base/math.h"
+#include "base/types.h"
+#include "gc/bytemap.h"
+#include "gc/layout.h"
+#include "gc/meta.h"
+#include "log.h"
+#include "rt.h"
+
+/* ------------------------------------------------------------------ */
+/* reservations                                                        */
+/* ------------------------------------------------------------------ */
+
+bool cvm_region_reserve(CvmRegion* region, usize bytes, usize align) {
+    region->base = NULL;
+    region->size = 0;
+    region->start = NULL;
+    region->usable = 0;
+
+    if (bytes == 0) {
+        return true; /* an empty region is not a failure */
+    }
+
+    /*
+     * Ask for an extra `align - 1` bytes so that aligning the start up
+     * still leaves the full `bytes` usable. Without this a 32 KiB block
+     * alignment could cost a whole block of the reservation.
+     */
+    usize request = bytes + align - 1;
+    u8* base = rt_mem_reserve(request);
+    if (base == NULL) {
+        return false;
+    }
+    if (!rt_mem_commit(base, request)) {
+        rt_mem_release(base, request);
+        return false;
+    }
+
+    u8* start = (u8*)cvm_align_up((usize)base, align);
+
+    region->base = base;
+    region->size = request;
+    region->start = start;
+    region->usable = bytes;
+    return true;
+}
+
+void cvm_region_release(CvmRegion* region) {
+    if (region->base != NULL) {
+        rt_mem_release(region->base, region->size);
+    }
+    region->base = NULL;
+    region->size = 0;
+    region->start = NULL;
+    region->usable = 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sizing                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * How much metadata the whole reservation needs, for the maximum block
+ * count. Metadata is sized for the maximum and its end pointer moves as
+ * the heap grows, so a growing heap never relocates metadata — which
+ * matters because the tables are addressed by arithmetic on their base.
+ */
+static usize block_meta_bytes(u32 max_blocks) {
+    return (usize)max_blocks * sizeof(BlockMeta);
+}
+
+static usize line_meta_bytes(u32 max_blocks) {
+    return (usize)max_blocks * CVM_LINE_COUNT * sizeof(LineMeta);
+}
+
+static usize bytemap_bytes(u32 max_blocks) {
+    /* one slot per allocation granularity, over the whole payload */
+    usize payload = (usize)max_blocks * CVM_BLOCK_SIZE;
+    return bytemap_bytes_for(payload);
+}
+
+/*
+ * A block's payload plus its share of the metadata is what a block really
+ * costs, and that is the figure block counts have to be derived from:
+ * sizing from the payload alone would under-reserve the metadata.
+ */
+static u32 clamp_blocks(usize blocks) {
+    if (blocks == 0) {
+        blocks = 1;
+    }
+    if (blocks > (usize)CVM_MAX_BLOCK_COUNT) {
+        blocks = (usize)CVM_MAX_BLOCK_COUNT;
+    }
+    return (u32)blocks;
+}
+
+/*
+ * The two directions are not symmetric, and getting them the wrong way
+ * round is a bug either way:
+ *
+ *   - the maximum must round down, or the reservation would exceed what
+ *     was asked for;
+ *   - the initial count must round up, or the heap would start slightly
+ *     below the requested minimum. A block is 34956 bytes including
+ *     metadata, so 1 MiB is 29.99 blocks: rounding down gives 29 blocks
+ *     and a heap 34 KiB short of the minimum.
+ */
+static u32 blocks_for_max(usize bytes) {
+    return clamp_blocks(bytes / cvm_heap_space_per_block());
+}
+
+static u32 blocks_for_min(usize bytes) {
+    usize per_block = cvm_heap_space_per_block();
+    return clamp_blocks(cvm_div_round_up(bytes, per_block));
+}
+
+/* ------------------------------------------------------------------ */
+/* init                                                                */
+/* ------------------------------------------------------------------ */
+
+bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
+    /* Start from a clean slate so a failed init leaves nothing half-set. */
+    heap->blocks = (CvmRegion){0};
+    heap->block_meta_region = (CvmRegion){0};
+    heap->line_meta_region = (CvmRegion){0};
+    heap->bytemap_region = (CvmRegion){0};
+    heap->heap_start = NULL;
+    heap->heap_end = NULL;
+    heap->heap_size = 0;
+    heap->block_meta_start = NULL;
+    heap->block_meta_end = NULL;
+    heap->line_meta_start = NULL;
+    heap->line_meta_end = NULL;
+    heap->bytemap = NULL;
+    heap->block_count = 0;
+    heap->max_block_count = 0;
+    heap->max_heap_size = 0;
+    heap->max_mark_time_ratio = CVM_MARK_TIME_RATIO_DEFAULT;
+    heap->min_free_ratio = CVM_FREE_RATIO_DEFAULT;
+
+    if (min_size < CVM_MIN_HEAP_SIZE) {
+        min_size = CVM_MIN_HEAP_SIZE;
+    }
+
+    /* 0 means "unlimited": take as much as the reservation will allow. */
+    if (max_size == 0 || max_size == CVM_UNLIMITED_HEAP_SIZE) {
+        max_size = CVM_MAX_HEAP_SIZE;
+    }
+    if (max_size < min_size) {
+        return false;
+    }
+
+    u32 max_blocks = blocks_for_max(max_size);
+    u32 initial_blocks = blocks_for_min(min_size);
+    if (initial_blocks == 0) {
+        initial_blocks = 1;
+    }
+    if (max_blocks <= 1) {
+        /* A one-block heap cannot hold a superblock, so nothing above the
+         * large-object threshold could ever be allocated. */
+        return false;
+    }
+
+    if (!rt_mutex_init(&heap->grow_lock)) {
+        return false;
+    }
+
+    /*
+     * Reserve every region before committing to any of them, so that a
+     * failure part-way through releases everything rather than leaking
+     * the earlier reservations.
+     */
+    bool ok = cvm_region_reserve(&heap->block_meta_region, block_meta_bytes(max_blocks),
+                                 _Alignof(BlockMeta)) &&
+              cvm_region_reserve(&heap->line_meta_region, line_meta_bytes(max_blocks),
+                                 _Alignof(LineMeta)) &&
+              cvm_region_reserve(&heap->bytemap_region, bytemap_bytes(max_blocks),
+                                 CVM_ALLOC_ALIGNMENT) &&
+              cvm_region_reserve(&heap->blocks, (usize)max_blocks * CVM_BLOCK_SIZE,
+                                 CVM_BLOCK_SIZE);
+
+    if (!ok) {
+        cvm_heap_destroy(heap);
+        return false;
+    }
+
+    heap->max_block_count = max_blocks;
+    heap->max_heap_size = (usize)max_blocks * CVM_BLOCK_SIZE;
+
+    heap->block_meta_start = (BlockMeta*)heap->block_meta_region.start;
+    heap->line_meta_start = (LineMeta*)heap->line_meta_region.start;
+
+    heap->bytemap = bytemap_init(heap->bytemap_region.start, heap->blocks.start,
+                                 heap->max_heap_size);
+
+    /*
+     * Start with the initial number of blocks usable. The end pointers
+     * are what define "in use", so this is just the initial value of the
+     * arithmetic that cvm_heap_extend repeats.
+     */
+    heap->block_count = 0;
+    heap->heap_start = heap->blocks.start;
+    heap->heap_end = heap->heap_start;
+    heap->block_meta_end = heap->block_meta_start;
+    heap->line_meta_end = heap->line_meta_start;
+    heap->heap_size = 0;
+
+    u32 first = 0;
+    if (!cvm_heap_extend(heap, initial_blocks, &first)) {
+        cvm_heap_destroy(heap);
+        return false;
+    }
+
+    CVM_LOG_INFO(m) {
+        fmt_lit(&m.fmt, "heap: ");
+        fmt_u32(&m.fmt, heap->block_count);
+        fmt_lit(&m.fmt, " of ");
+        fmt_u32(&m.fmt, heap->max_block_count);
+        fmt_lit(&m.fmt, " blocks, block=");
+        fmt_u32(&m.fmt, (u32)CVM_BLOCK_SIZE);
+        fmt_lit(&m.fmt, " line=");
+        fmt_u32(&m.fmt, (u32)CVM_LINE_SIZE);
+    }
+
+    return true;
+}
+
+void cvm_heap_destroy(CvmHeap* heap) {
+    cvm_region_release(&heap->blocks);
+    cvm_region_release(&heap->block_meta_region);
+    cvm_region_release(&heap->line_meta_region);
+    cvm_region_release(&heap->bytemap_region);
+
+    heap->heap_start = NULL;
+    heap->heap_end = NULL;
+    heap->block_meta_start = NULL;
+    heap->block_meta_end = NULL;
+    heap->line_meta_start = NULL;
+    heap->line_meta_end = NULL;
+    heap->bytemap = NULL;
+    heap->block_count = 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* growth                                                              */
+/* ------------------------------------------------------------------ */
+
+bool cvm_heap_extend(CvmHeap* heap, u32 blocks, u32* out_first_block) {
+    if (blocks == 0) {
+        return true;
+    }
+
+    rt_mutex_lock(&heap->grow_lock);
+
+    if (heap->block_count + blocks > heap->max_block_count) {
+        rt_mutex_unlock(&heap->grow_lock);
+        return false;
+    }
+
+    u32 first = heap->block_count;
+
+    /*
+     * A block's metadata is not zeroed by the reservation if the region
+     * was reused, and a BlockMeta full of rubbish would look like a block
+     * in some arbitrary state. Clear it explicitly.
+     */
+    for (u32 i = 0; i < blocks; i++) {
+        BlockMeta* meta = heap->block_meta_start + (usize)(first + i);
+        block_meta_clear(meta);
+    }
+
+    for (u32 i = 0; i < blocks; i++) {
+        LineMeta* lines = heap->line_meta_start + (usize)(first + i) * CVM_LINE_COUNT;
+        for (u32 l = 0; l < CVM_LINE_COUNT; l++) {
+            line_meta_unmark(&lines[l]);
+        }
+    }
+
+    /*
+     * The bytemap slots for the new blocks are already free: the
+     * reservation starts zeroed and CVM_OM_FREE is zero. That is relied
+     * on rather than re-cleared, so the encoding of "free" must stay 0 —
+     * which gc/meta.h asserts by pinning the enum values.
+     */
+    _Static_assert((int)CVM_OM_FREE == 0,
+                   "the bytemap relies on a fresh reservation reading as "
+                   "free, so CVM_OM_FREE must be zero");
+
+    heap->block_count += blocks;
+    heap->heap_end = heap->heap_start + (usize)heap->block_count * CVM_BLOCK_SIZE;
+    heap->block_meta_end = heap->block_meta_start + heap->block_count;
+    heap->line_meta_end =
+        heap->line_meta_start + (usize)heap->block_count * CVM_LINE_COUNT;
+    heap->heap_size = (usize)heap->block_count * CVM_SPACE_USED_PER_BLOCK;
+
+    if (out_first_block != NULL) {
+        *out_first_block = first;
+    }
+
+    rt_mutex_unlock(&heap->grow_lock);
+
+    CVM_LOG_DEBUG(m) {
+        fmt_lit(&m.fmt, "heap grown by ");
+        fmt_u32(&m.fmt, blocks);
+        fmt_lit(&m.fmt, " blocks, now ");
+        fmt_u32(&m.fmt, heap->block_count);
+    }
+
+    return true;
+}
+
+bool cvm_heap_should_grow(CvmHeap* heap, u64 mark_time_ns, u64 total_time_ns,
+                          u32 free_blocks) {
+    /*
+     * Two independent reasons, either sufficient. The reference uses the
+     * same pair:
+     *
+     *   - marking is eating too large a share of the program's time, so
+     *     the heap is too small for the allocation rate;
+     *   - free blocks are running out, so the next allocation is at risk.
+     *
+     * Growing only on the second would let a program sit at 100% mark
+     * time indefinitely, which is a heap that never stops collecting.
+     */
+    if (total_time_ns > 0) {
+        f64 ratio = (f64)mark_time_ns / (f64)total_time_ns;
+        if (ratio >= heap->max_mark_time_ratio) {
+            return true;
+        }
+    }
+
+    f64 free_ratio = (f64)free_blocks / (f64)heap->block_count;
+    return free_ratio < heap->min_free_ratio;
+}
+
+u32 cvm_heap_growth_increment(CvmHeap const* heap) {
+    f64 rate = (heap->heap_size < CVM_EARLY_GROWTH_THRESHOLD) ? CVM_EARLY_GROWTH_RATE
+                                                              : CVM_GROWTH_RATE;
+
+    u32 extra = (u32)((f64)heap->block_count * (rate - 1.0));
+    if (extra == 0) {
+        extra = 1; /* always make progress */
+    }
+
+    u32 remaining = heap->max_block_count - heap->block_count;
+    return (extra > remaining) ? remaining : extra;
+}

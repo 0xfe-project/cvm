@@ -112,6 +112,33 @@ opaque_mut rt_mem_alloc(usize bytes);
 /* Release memory from rt_mem_alloc. NULL is accepted and ignored. */
 void rt_mem_free(opaque_mut p);
 
+/*
+ * Reserve a range of address space, and commit it.
+ *
+ * This is what the GC heap is built on, and the distinction from
+ * rt_mem_alloc is the whole point: a heap whose blocks are individually
+ * allocated cannot be described by address arithmetic, because there is
+ * no relationship between one block's address and the next.
+ *
+ * reserve returns NULL on failure. The memory is not usable until
+ * rt_mem_commit succeeds for the range. On systems that over-commit
+ * (every POSIX), reserve already gives usable memory and commit is a
+ * no-op; on Windows the two are genuinely separate, which is why the
+ * split exists in the ABI rather than being folded into one call.
+ */
+opaque_mut rt_mem_reserve(usize bytes);
+bool rt_mem_commit(opaque_mut base, usize bytes);
+
+/* Return the whole reservation. The size must match the reservation. */
+void rt_mem_release(opaque_mut base, usize bytes);
+
+/*
+ * Granularity of the smallest independently usable mapping. Used to size
+ * a reservation so that it can be aligned up without wasting a whole
+ * extra page.
+ */
+usize rt_mem_page_size(void);
+
 /* ------------------------------------------------------------------ */
 /* threads and synchronisation                                         */
 /* ------------------------------------------------------------------ */
