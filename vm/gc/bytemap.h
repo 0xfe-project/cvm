@@ -43,6 +43,19 @@ _Static_assert(sizeof(Bytemap) == 2 * sizeof(usize),
                "the bytemap header must be exactly two words, so that the "
                "slot array follows at a known offset");
 
+/*
+ * The two pieces the inlined allocation path needs: the address the table
+ * starts at, and the table itself. Kept together here so that the
+ * invariant tying them to the context is stated once.
+ */
+CVM_INLINE u8* bytemap_base(Bytemap const* b) {
+    return b->first;
+}
+
+CVM_INLINE u8* bytemap_slots(Bytemap* b) {
+    return b->slots;
+}
+
 /* One past the last slot. */
 CVM_INLINE ObjectMeta* bytemap_end(Bytemap* b) {
     return b->slots + b->count;

@@ -107,6 +107,24 @@ struct CvmTypeDescriptor {
 #define CVM_ALLOC_ALIGNMENT ((usize)(2 * CVM_WORD_SIZE))
 
 /*
+ * Largest object the inlined bump path will serve.
+ *
+ * The inlined path bumps within a run of lines, so it can only produce an
+ * object that fits inside one line. Bigger objects take the slow path,
+ * which knows about whole-block and chunk allocation. The threshold is
+ * part of the ABI because generated code embeds the comparison; gc/layout.h
+ * asserts that it matches the line size.
+ */
+#define CVM_INLINE_ALLOC_MAX ((usize)256)
+
+/*
+ * The object metadata state the inlined path writes: "an object starts
+ * here". The full state machine is in gc/meta.h; that header asserts these
+ * values agree, so the duplication cannot drift.
+ */
+#define CVM_OBJECT_SLOT_ALLOCATED ((u8)0x2)
+
+/*
  * Every GC heap object begins with this header. Allocation returns
  * a pointer to the header; user payload follows immediately after.
  */
@@ -214,6 +232,19 @@ typedef struct CvmVMContext {
     u8* bump_end;          /* end of the current bump region */
 
     /*
+     * Heap base and the object metadata table, so the inlined path can
+     * mark its own allocation without a call. The table holds one byte per
+     * allocation slot; the indexing rule mirrors gc/bytemap.h, which is
+     * where the authoritative version lives.
+     *
+     * These are needed here because the fast path must mark what it
+     * allocates: an object the metadata does not describe is invisible to
+     * the collector, which is the bug this field was added to fix.
+     */
+    u8* heap_base;
+    u8* object_meta;
+
+    /*
      * The runtime's own record for this thread (vm/context.h). A context
      * is embedded in its thread node, so this points back at the
      * container. It is an explicit field rather than a reliance on the
@@ -279,17 +310,52 @@ CVM_INLINE opaque_mut cvm_alloc(CvmTypeDescriptor const* type) {
     usize size = cvm_align_up(sizeof(CvmGcHeader) + type->size, CVM_ALLOC_ALIGNMENT);
     u8* p = ctx->bump_ptr;
 
-    if (CVM_UNLIKELY(p + size > ctx->bump_end)) {
+    if (CVM_UNLIKELY(size > CVM_INLINE_ALLOC_MAX || p + size > ctx->bump_end)) {
         return cvm_alloc_slow(type, size);
     }
     ctx->bump_ptr = p + size;
     CVM_PREFETCH(p + 64);
 
+    /*
+     * Zero before publishing. Generated code assumes a fresh object has
+     * zeroed fields, which is what lets a type with pointer fields start
+     * out valid rather than full of rubbish the marker would follow.
+     */
+    for (usize i = 0; i < size; i++) {
+        p[i] = 0;
+    }
+
     CvmGcHeader* hdr = (CvmGcHeader*)p;
     hdr->type = type;
     hdr->flags = 0;
+
+    /* Mark the slot. Without this the object exists but the collector
+     * cannot see it, which is silent and fatal. */
+    ctx->object_meta[(usize)(p - ctx->heap_base) / CVM_ALLOC_ALIGNMENT] =
+        CVM_OBJECT_SLOT_ALLOCATED;
+
     return (opaque_mut)(hdr + 1); /* payload follows the header */
 }
+
+/*
+ * Address convention.
+ *
+ * An object *starts* at its header. cvm_alloc returns a pointer to the
+ * payload, which is sizeof(CvmGcHeader) past the start, because that is
+ * what generated code and user types see.
+ *
+ * The bytemap and every other piece of collector bookkeeping index the
+ * object by its start, not by its payload. So a collector that has a
+ * payload pointer converts first:
+ *
+ *     CvmGcHeader const *h = cvm_header_of(payload);
+ *     ObjectMeta *meta = bytemap_get(bytemap, (u8 const *)h);
+ *
+ * The conversion is not extra work: the collector needs the header anyway
+ * to read the type descriptor. Getting this wrong is invisible until
+ * something looks up a slot and finds it free — which is exactly how the
+ * bug that established this convention was found.
+ */
 
 /* Payload pointer <-> header helpers.
  * Read flavor keeps const; write flavor is the explicit exception

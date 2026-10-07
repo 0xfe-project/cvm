@@ -20,11 +20,13 @@
 #include "vendor/greatest.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 
 #include "base/types.h"
 #include "context.h"
 #include "cvm/gc.h"
 #include "rt.h"
+#include "gc/world.h"
 #include "safepoint.h"
 
 /*
@@ -409,6 +411,12 @@ GREATEST_MAIN_DEFS();
 
 int main(int argc, char** argv) {
     cvm_threads_init();
+
+    /* Registration requires a heap: a registered thread may allocate. */
+    if (!cvm_world_init(4 * 1024 * 1024, 16 * 1024 * 1024)) {
+        fprintf(stderr, "could not bring up the heap\n");
+        return 1;
+    }
     cvm_safepoint_init();
 
     GREATEST_MAIN_BEGIN();

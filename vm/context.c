@@ -16,6 +16,8 @@
 
 #include "base/types.h"
 #include "cvm/gc.h"
+#include "gc/bytemap.h"
+#include "gc/world.h"
 #include "log.h"
 #include "safepoint.h"
 #include "rt.h"
@@ -67,6 +69,16 @@ bool cvm_thread_attach(void) {
         return false;
     }
 
+    if (!cvm_world_ready()) {
+        /*
+         * A registered thread is a thread that may allocate, so it needs a
+         * heap. Registering without one would put a context with no
+         * bytemap into the registry, and the first allocation would write
+         * through a null metadata pointer.
+         */
+        return false;
+    }
+
     /* Idempotent: a second attach from the same thread keeps the first
      * node, so a re-entrant call cannot orphan the original. */
     if (cvm_tls_ctx != NULL) {
@@ -111,6 +123,21 @@ bool cvm_thread_attach(void) {
      * registry lock. See the lock-order note in vm/safepoint.c.
      */
     cvm_safepoint_poll();
+
+    /*
+     * Only now that the thread is registered and stopped if a collection
+     * is running may it be given allocators pointing into the heap.
+     */
+    CvmWorld* world = cvm_world();
+    cvm_allocator_init(&node->allocator, &world->block_alloc, world->heap.bytemap,
+                       &world->heap);
+    cvm_large_init(&node->large_allocator, &world->block_alloc, world->heap.bytemap,
+                   &world->heap);
+
+    /* The pieces the inlined allocation path needs to mark what it
+     * allocates; see CvmVMContext. */
+    node->ctx.heap_base = bytemap_base(world->heap.bytemap);
+    node->ctx.object_meta = bytemap_slots(world->heap.bytemap);
 
     CVM_LOG_DEBUG(m) {
         fmt_lit(&m.fmt, "thread ");

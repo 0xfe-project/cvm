@@ -111,6 +111,17 @@ typedef enum ObjectFlag {
 
 typedef u8 ObjectMeta;
 
+/*
+ * The inlined allocation path writes a slot state directly, because it
+ * cannot afford a call. These assertions are what keep the two spellings
+ * from drifting apart.
+ */
+_Static_assert((u8)CVM_OM_ALLOCATED == CVM_OBJECT_SLOT_ALLOCATED,
+               "the inlined allocation path and ObjectMeta must agree on "
+               "what 'allocated' is");
+_Static_assert(sizeof(ObjectMeta) == sizeof(u8),
+               "the inlined path indexes the metadata table as bytes");
+
 CVM_INLINE bool object_meta_is_free(ObjectMeta const* m) {
     return *m == (u8)CVM_OM_FREE;
 }

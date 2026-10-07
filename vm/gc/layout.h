@@ -64,6 +64,15 @@
 #define CVM_LARGE_OBJECT_MIN_SIZE ((usize)1 << CVM_LARGE_OBJECT_MIN_BITS) /* 8 KiB */
 
 /*
+ * One free list per chunk size between the large-object threshold and a
+ * block: 8 KiB, 16 KiB and 24 KiB. A 32 KiB chunk is a whole block and
+ * goes back to the block allocator instead, which is why the count is one
+ * less than the number of multiples.
+ */
+#define CVM_LARGE_FREE_LIST_COUNT                                                      \
+    ((1u << (CVM_BLOCK_SIZE_BITS - CVM_LARGE_OBJECT_MIN_BITS)) - 1u)
+
+/*
  * Blocks held back from the free lists so the sweeper always has
  * somewhere to work. Without this, a heap that fills completely leaves
  * the sweeper unable to allocate the space it needs to finish, which is a
@@ -112,6 +121,9 @@ _Static_assert(CVM_BLOCK_SIZE % CVM_LINE_SIZE == 0,
                "block size must be a whole number of lines");
 _Static_assert(CVM_ALLOC_ALIGNMENT % CVM_WORD_SIZE == 0,
                "allocation alignment must be a whole number of words");
+_Static_assert(CVM_INLINE_ALLOC_MAX == CVM_LINE_SIZE,
+               "the inlined allocation path bumps within a run of lines, so "
+               "its size limit must be exactly the line size");
 _Static_assert(CVM_LINE_SIZE % CVM_ALLOC_ALIGNMENT == 0,
                "a line must hold a whole number of allocation slots, "
                "otherwise object metadata would straddle line boundaries");

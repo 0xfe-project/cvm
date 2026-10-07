@@ -36,6 +36,8 @@
 
 #include "base/types.h"
 #include "cvm/gc.h"
+#include "gc/alloc.h"
+#include "gc/large.h"
 #include "rt.h"
 
 /*
@@ -66,6 +68,14 @@ typedef struct CvmThreadNode {
      * thread is blocked, so it has to be atomic.
      */
     _Atomic bool parked;
+
+    /*
+     * This thread's allocation state: the line cursor lives in the context
+     * (generated code bumps it directly), and everything else the fallback
+     * path needs lives here.
+     */
+    CvmAllocator allocator;
+    CvmLargeAllocator large_allocator;
 } CvmThreadNode;
 
 /* ------------------------------------------------------------------ */

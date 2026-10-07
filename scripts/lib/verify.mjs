@@ -165,6 +165,9 @@ const PROBE_HEADERS = [
     "gc/heap.h",
     "gc/block_range.h",
     "gc/block_alloc.h",
+    "gc/alloc.h",
+    "gc/large.h",
+    "gc/world.h",
     "gc/block_list.h",
 ];
 
