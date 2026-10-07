@@ -1,0 +1,22 @@
+{
+  "name": "cvm",
+  "version": "0.0.0",
+  "private": true,
+  "description": "cvm — a precise-GC runtime whose compilation target is C",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:debug": "node scripts/build.mjs --debug",
+    "clean": "node scripts/build.mjs --clean",
+    "test": "node scripts/build.mjs --test && node scripts/run-tests.mjs",
+    "test:asan": "node scripts/build.mjs --test --asan && node scripts/run-tests.mjs",
+    "test:tsan": "node scripts/build.mjs --test --tsan && node scripts/run-tests.mjs",
+    "verify": "node scripts/build.mjs --verify-freestanding",
+    "fmt": "node scripts/fmt.mjs",
+    "fmt:check": "node scripts/fmt.mjs --check",
+    "ci": "pnpm run fmt:check && pnpm run build && pnpm run verify && pnpm run test"
+  }
+}
