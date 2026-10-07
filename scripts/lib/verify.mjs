@@ -64,6 +64,7 @@ const PROBE_HEADERS = [
     "cvm/gc.h",
     "gc/layout.h",
     "gc/meta.h",
+    "gc/bytemap.h",
 ];
 
 export function checkFreestanding({
