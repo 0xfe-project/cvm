@@ -136,6 +136,15 @@ sweep leaving `coalesce_me` blocks behind, when coalescing ran ahead of
 sweeping. A mark leaking past a sweep is a bug that otherwise shows up as
 a stale object being handed out twice, much later and much less obviously.
 
+There is one more, narrower check, and its scope is worth stating because
+it reads as broader than it is: `object_meta_assert_valid_allocation`, in
+the allocator's slow path, asserts that every slot a new object covers was
+free. It fires if the free-line list hands out a line still in use. It does
+*not* cover the inlined fast path, which is most allocations, because that
+path lives in a freestanding header that deliberately does not include the
+metadata header. Confirmed to fire by marking a slot allocated that the
+next allocation would cover.
+
 What the plan above also asked for, and what is not there:
 
 - that every allocated slot lies inside a block marked in use

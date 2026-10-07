@@ -97,15 +97,6 @@ void cvm_allocator_init(CvmAllocator* alloc, CvmBlockAllocator* blocks,
 void cvm_allocator_clear(CvmAllocator* alloc);
 
 /*
- * Hand a recycled block to this thread.
- *
- * The sweeper produces partially free blocks; rather than returning them
- * to the global pool, it gives them to the threads that will use them,
- * which avoids a round trip through a shared lock.
- */
-void cvm_allocator_recycle_block(CvmAllocator* alloc, BlockMeta* block);
-
-/*
  * The allocation fallback, called from the inlined fast path.
  *
  * Returns a payload pointer whose header is already written, or does not

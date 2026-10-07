@@ -80,11 +80,6 @@ void cvm_allocator_clear(CvmAllocator* alloc) {
     }
 }
 
-void cvm_allocator_recycle_block(CvmAllocator* alloc, BlockMeta* block) {
-    block_list_push(&alloc->recycled_blocks, alloc->heap->block_meta_start, block);
-    atomic_fetch_add_explicit(&alloc->recycled_block_count, 1, memory_order_relaxed);
-}
-
 /* ------------------------------------------------------------------ */
 /* finishing an allocation                                             */
 /* ------------------------------------------------------------------ */
@@ -110,6 +105,36 @@ static opaque_mut publish(CvmAllocator* alloc, u8* start, usize size,
     for (usize i = 0; i < size; i++) {
         start[i] = 0;
     }
+
+#if defined(CVM_DEBUG)
+    /*
+     * Every slot this allocation covers must have been free. If one was
+     * not, either the free-line list handed out a line that is still in
+     * use, or two threads are bumping into the same region — both of which
+     * corrupt silently and show up much later as an object whose contents
+     * changed underneath it.
+     *
+     * Not applied to large objects. Their interior slots are deliberately
+     * left free — a precise collector never produces an interior pointer,
+     * so an interior slot that reads free is not a claim that the memory
+     * is available. Large objects are tracked by the large allocator's free
+     * lists instead.
+     *
+     * Scope, because this reads as though it covered every allocation and
+     * does not: it runs on the slow path only. The inlined path in cvm/gc.h
+     * moves the bump cursor and writes the header itself, and cvm/gc.h does
+     * not include gc/meta.h — a deliberate piece of layering, since gc.h is
+     * what generated code pulls in. So most allocations, being fast-path,
+     * are not validated here. Extending the check to them means making the
+     * slot predicate reachable from the freestanding header, which is a
+     * coupling worth making only if a bug calls for it.
+     *
+     * Confirmed to fire: marking a slot as allocated that the next
+     * allocation will cover trips it with the slot's index. It only covers
+     * the slow path, and it says so here rather than reading as more.
+     */
+    object_meta_assert_valid_allocation(bytemap_get(alloc->bytemap, start), size);
+#endif
 
     CvmGcHeader* header = (CvmGcHeader*)start;
     header->type = type;
