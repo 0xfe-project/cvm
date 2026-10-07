@@ -109,10 +109,37 @@ static void clear_run(CvmBlockAllocator* alloc, BlockMeta* first, u32 count) {
     (void)alloc;
 }
 
-/* Hand a block to a caller, recording that it is now in use. */
-static void take_for_use(BlockMeta* meta) {
-    cvm_assert(block_meta_is_free(meta));
-    cvm_assert(block_meta_debug_state(meta) == (u8)CVM_DBG_FREE_IN_COLLECTION);
+/*
+ * Hand a block to a caller, recording that it is now in use.
+ *
+ * The state it must arrive in is "free, as part of a sweep": the free
+ * lists are rebuilt by sweeping, so every block on them came from there.
+ * A block that arrives in any other state was put on a free list without
+ * being freed, which is the bug this check exists to catch — and a
+ * check that only says "not the expected state" is much harder to act on
+ * than one that says which block and what it was.
+ */
+static void take_for_use(BlockMeta* meta_start, BlockMeta* meta) {
+    u8 state = block_meta_debug_state(meta);
+
+    if (!block_meta_is_free(meta) || state != (u8)CVM_DBG_FREE_IN_COLLECTION) {
+        CVM_LOG_ERROR(m) {
+            fmt_lit(&m.fmt, "block ");
+            fmt_u32(&m.fmt, block_meta_index_of(meta_start, meta));
+            fmt_lit(&m.fmt, " handed out in state ");
+            fmt_u32(&m.fmt, (u32)state);
+            fmt_lit(&m.fmt, ", free=");
+            fmt_bool(&m.fmt, block_meta_is_free(meta));
+            fmt_lit(&m.fmt, " (expected free, state ");
+            fmt_u32(&m.fmt, (u32)CVM_DBG_FREE_IN_COLLECTION);
+            fmt_lit(&m.fmt, ")");
+        }
+        cvm_assert_msg(block_meta_is_free(meta),
+                       "a block on a free list is not marked free");
+        cvm_assert_msg(state == (u8)CVM_DBG_FREE_IN_COLLECTION,
+                       "a block reached a free list without being freed");
+    }
+
     block_meta_set_debug_state(meta, CVM_DBG_IN_USE);
     block_meta_set_flag(meta, CVM_BLOCK_SIMPLE);
 }
@@ -209,7 +236,7 @@ static BlockMeta* get_free_block_slow(CvmBlockAllocator* alloc) {
         alloc->smallest.cursor = run + 1;
         alloc->smallest.limit = run + (1u << index);
 
-        take_for_use(run);
+        take_for_use(alloc->meta_start, run);
         atomic_fetch_sub_explicit(&alloc->free_block_count, 1, memory_order_relaxed);
         return run;
     }
@@ -239,7 +266,7 @@ static BlockMeta* get_free_block_slow(CvmBlockAllocator* alloc) {
     }
 
     if (block != NULL) {
-        take_for_use(block);
+        take_for_use(alloc->meta_start, block);
         atomic_fetch_sub_explicit(&alloc->free_block_count, 1, memory_order_relaxed);
     }
     return block;
@@ -256,7 +283,7 @@ BlockMeta* cvm_block_alloc_get_block(CvmBlockAllocator* alloc) {
     }
 
     BlockMeta* block = alloc->smallest.cursor;
-    take_for_use(block);
+    take_for_use(alloc->meta_start, block);
     alloc->smallest.cursor++;
 
     cvm_block_alloc_release(alloc);
@@ -348,6 +375,34 @@ void cvm_block_alloc_add_free_superblock(CvmBlockAllocator* alloc, BlockMeta* fi
                                          u32 count) {
     clear_run(alloc, first, count);
     split_and_add(alloc, first, count);
+    atomic_fetch_add_explicit(&alloc->free_block_count, count, memory_order_relaxed);
+}
+
+/* Split a run into power-of-two pieces, staged on local lists. */
+static void split_and_add_local(CvmBlockAllocator* alloc, LocalBlockList* lists,
+                                BlockMeta* run, u32 count) {
+    u32 remaining = count;
+    u32 power = 1;
+    BlockMeta* current = run;
+
+    while (remaining > 0) {
+        if ((power & remaining) != 0) {
+            local_block_list_push(&lists[size_to_list_index(power)], alloc->meta_start,
+                                  current);
+            remaining -= power;
+            current += power;
+        }
+        power <<= 1;
+    }
+}
+
+void cvm_block_alloc_add_free_superblock_local(CvmBlockAllocator* alloc,
+                                               LocalBlockList* lists, BlockMeta* first,
+                                               u32 count) {
+    cvm_assert(count > 0);
+
+    clear_run(alloc, first, count);
+    split_and_add_local(alloc, lists, first, count);
     atomic_fetch_add_explicit(&alloc->free_block_count, count, memory_order_relaxed);
 }
 

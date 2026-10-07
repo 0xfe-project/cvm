@@ -31,6 +31,8 @@
 #include "gc/block_alloc.h"
 #include "gc/block_list.h"
 #include "gc/bytemap.h"
+#include "gc/collect.h"
+#include "gc/sweeper.h"
 #include "gc/heap.h"
 #include "gc/meta.h"
 #include "context.h"
@@ -63,6 +65,19 @@ void cvm_allocator_clear(CvmAllocator* alloc) {
     alloc->large_block_start = NULL;
     alloc->large_cursor = NULL;
     alloc->large_limit = NULL;
+
+    /*
+     * The bump cursor lives in the context, not here, so clearing this
+     * struct is not enough. Leaving it pointing into a block that is
+     * about to be swept is exactly the bug this function exists to
+     * prevent: the thread would keep bump-allocating into a block the
+     * sweeper is about to hand to someone else.
+     */
+    CvmVMContext* ctx = cvm_ctx();
+    if (ctx != NULL) {
+        ctx->bump_ptr = NULL;
+        ctx->bump_end = NULL;
+    }
 }
 
 void cvm_allocator_recycle_block(CvmAllocator* alloc, BlockMeta* block) {
@@ -155,7 +170,7 @@ static bool allocator_new_block(CvmAllocator* alloc) {
          * and the bump region starts at its first free line rather than
          * at the block start. */
         i8 line_index = block_meta_first_free_line(block);
-        cvm_assert(line_index >= 0 && line_index < (i8)CVM_LINE_COUNT);
+        cvm_assert((i32)line_index >= 0 && (i32)line_index < CVM_LINE_INDEX_LIMIT);
 
         u8* line = block_line_address(block_start, (u32)line_index);
         FreeLineMeta* meta = (FreeLineMeta*)line;
@@ -298,31 +313,25 @@ static u8* try_alloc(CvmAllocator* alloc, usize size) {
 /*
  * The allocation retry loop.
  *
- * ---------------------------------------------------------------------
- * Where collection goes
- * ---------------------------------------------------------------------
- *
- * The full sequence, once the collector exists, is:
+ * The sequence, and why it is this order:
  *
  *   1. try to allocate
- *   2. if sweeping is still in progress, help sweep, then retry
- *   3. collect, then retry
+ *   2. if a sweep is in progress, sweep a batch and try again
+ *   3. collect, then try again
  *   4. grow the heap
  *
- * The order matters for latency: step 2 does work rather than waiting,
- * and only then does a thread stop the world. A thread that jumped
- * straight to step 3 would collect constantly under a load that a little
- * sweeping would have absorbed.
+ * Step 2 is what makes sweeping concurrent pay off. A thread that cannot
+ * allocate does a little of the sweeping that is holding it back, rather
+ * than blocking until someone else finishes; and because it sweeps the
+ * same blocks the sweep is working through, an allocation-heavy thread
+ * speeds up its own progress. Jumping straight to step 3 would collect
+ * constantly under a load that a batch or two of sweeping would have
+ * absorbed.
  *
- * Steps 2 and 3 are absent because the sweeper and the collector are the
- * next steps, and neither has anything to call yet. What remains is the
- * loop they will be inserted into: try, then grow. The comment is here
- * rather than in a commit message because this is the exact place the
- * insertion happens.
- *
- * Without collection, a program that drops objects still grows the heap
- * rather than reusing them, so this is not a state anyone should run a
- * workload on. It is a complete allocator waiting for a collector.
+ * Step 4 is the last resort: a collection ran and there is still no room,
+ * so the heap is genuinely too small. One block is always enough for a
+ * small object — it is at most a line, and a block holds 128 lines — so
+ * growing by one is always sufficient to make progress.
  */
 opaque_mut cvm_alloc_slow(CvmTypeDescriptor const* type, usize size) {
     /*
@@ -349,20 +358,41 @@ opaque_mut cvm_alloc_slow(CvmTypeDescriptor const* type, usize size) {
             return publish(alloc, payload, size, type);
         }
 
-        /* (2) help sweep; (3) collect. Both land here. */
+        /* (2) Help sweep, if a sweep is in progress. */
+        if (!cvm_sweep_is_done(heap)) {
+            cvm_sweep_drive(heap, node, CVM_LAZY_SWEEP_MIN_BATCH);
+            payload = try_alloc(alloc, size);
+            if (payload != NULL) {
+                return publish(alloc, payload, size, type);
+            }
+        }
 
-        /*
-         * One block is always enough for a small object: it is at most a
-         * line, and a block holds 128 lines.
-         */
+        /* (3) Collect. A false return means someone else did, in which
+         * case the heap has just been collected and retrying is right. */
+        if (!cvm_gc_collect(heap)) {
+            continue;
+        }
+
+        payload = try_alloc(alloc, size);
+        if (payload != NULL) {
+            return publish(alloc, payload, size, type);
+        }
+
+        if (!cvm_sweep_is_done(heap)) {
+            cvm_sweep_drive(heap, node, CVM_LAZY_SWEEP_MIN_BATCH);
+            payload = try_alloc(alloc, size);
+            if (payload != NULL) {
+                return publish(alloc, payload, size, type);
+            }
+        }
+
+        /* (4) Grow. */
         u32 first = 0;
         if (!cvm_heap_extend(heap, 1, &first)) {
             rt_fatal(STR_LITERAL("out of heap space"));
         }
 
         BlockMeta* fresh = cvm_heap_block_meta(heap, first);
-        /* Newly grown blocks are handed over as if swept: that is the
-         * contract cvm_block_alloc_add_free_superblock asserts. */
         block_meta_set_debug_state(fresh, CVM_DBG_FREE);
         cvm_block_alloc_add_free_superblock(alloc->block_alloc, fresh, 1);
     }

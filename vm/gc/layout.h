@@ -44,7 +44,18 @@
 #define CVM_LINE_SIZE ((usize)1 << CVM_LINE_SIZE_BITS)   /* 256 B */
 #define CVM_MAX_BLOCK_COUNT ((usize)1 << CVM_BLOCK_COUNT_BITS)
 
-#define CVM_LINE_COUNT (CVM_BLOCK_SIZE / CVM_LINE_SIZE)     /* 128 */
+#define CVM_LINE_COUNT (CVM_BLOCK_SIZE / CVM_LINE_SIZE) /* 128 */
+
+/*
+ * Upper bound for a line index, as a wide type.
+ *
+ * Line indices are stored in an i8 and run from 0 to CVM_LINE_COUNT - 1.
+ * Comparing one against CVM_LINE_COUNT requires a wider type: casting the
+ * count to i8 gives -128, so `index < (i8)CVM_LINE_COUNT` is false for
+ * every legal index and the check silently stops checking. Use this
+ * instead, and the mistake cannot be made.
+ */
+#define CVM_LINE_INDEX_LIMIT ((i32)CVM_LINE_COUNT)
 #define CVM_WORDS_IN_LINE (CVM_LINE_SIZE / CVM_WORD_SIZE)   /* 32 */
 #define CVM_WORDS_IN_BLOCK (CVM_BLOCK_SIZE / CVM_WORD_SIZE) /* 4096 */
 

@@ -306,4 +306,54 @@ void rt_rwlock_unlock_write(RtRwlock* l) {
     (void)pthread_rwlock_unlock(rwlock_of(l));
 }
 
+/* ------------------------------------------------------------------ */
+/* counting semaphore                                                  */
+/* ------------------------------------------------------------------ */
+
+bool rt_sem_init(RtSem* sem, u32 initial) {
+    if (!rt_mutex_init(&sem->mutex) || !rt_cond_init(&sem->cond)) {
+        return false;
+    }
+    sem->count = initial;
+    return true;
+}
+
+void rt_sem_destroy(RtSem* sem) {
+    rt_cond_destroy(&sem->cond);
+    rt_mutex_destroy(&sem->mutex);
+}
+
+void rt_sem_post(RtSem* sem) {
+    rt_mutex_lock(&sem->mutex);
+    sem->count++;
+    rt_cond_signal(&sem->cond);
+    rt_mutex_unlock(&sem->mutex);
+}
+
+void rt_sem_wait(RtSem* sem) {
+    rt_mutex_lock(&sem->mutex);
+    while (sem->count == 0) {
+        rt_cond_wait(&sem->cond, &sem->mutex);
+    }
+    sem->count--;
+    rt_mutex_unlock(&sem->mutex);
+}
+
+bool rt_sem_trywait(RtSem* sem) {
+    rt_mutex_lock(&sem->mutex);
+    bool got = sem->count > 0;
+    if (got) {
+        sem->count--;
+    }
+    rt_mutex_unlock(&sem->mutex);
+    return got;
+}
+
+u32 rt_sem_count(RtSem* sem) {
+    rt_mutex_lock(&sem->mutex);
+    u32 n = sem->count;
+    rt_mutex_unlock(&sem->mutex);
+    return n;
+}
+
 #endif /* !_WIN32 */

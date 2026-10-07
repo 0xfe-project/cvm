@@ -126,6 +126,23 @@ void cvm_block_alloc_add_free_blocks(CvmBlockAllocator* alloc, BlockMeta* first,
 void cvm_block_alloc_add_free_superblock(CvmBlockAllocator* alloc, BlockMeta* first,
                                          u32 count);
 
+/*
+ * The same, but staging the pieces on local lists instead of the shared
+ * ones.
+ *
+ * A sweeper produces many small free runs, and pushing each straight to
+ * the shared lists means a compare-exchange loop per run, contending with
+ * every other sweeper. Staging them locally and pushing the whole batch
+ * once at the end of the sweep is what the local lists are for.
+ *
+ * The run is cleared the same way as the shared path. That is not
+ * optional: forgetting it is how blocks came to reach a free list still
+ * marked "needs sweeping", which the allocator's assertion catches.
+ */
+void cvm_block_alloc_add_free_superblock_local(CvmBlockAllocator* alloc,
+                                               LocalBlockList* lists, BlockMeta* first,
+                                               u32 count);
+
 /* Reset for a new collection: empty lists, no cursor, no run. */
 void cvm_block_alloc_clear(CvmBlockAllocator* alloc);
 

@@ -48,6 +48,7 @@ bool cvm_world_init(usize min_size, usize max_size) {
      */
     cvm_block_alloc_init(&w->block_alloc, w->heap.block_meta_start,
                          w->heap.block_count);
+    w->heap.block_alloc = &w->block_alloc;
 
     w->ready = true;
     return true;

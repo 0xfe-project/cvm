@@ -275,16 +275,44 @@ bool rt_cond_wait_timeout(RtCond* c, RtMutex* m, u64 timeout_ns);
 void rt_cond_signal(RtCond* c);
 void rt_cond_broadcast(RtCond* c);
 
+/* ------------------------------------------------------------------ */
+/* counting semaphore                                                  */
+/* ------------------------------------------------------------------ */
+
 /*
- * No semaphore type.
+ * A counting semaphore: a counter plus a mutex and a condition variable.
  *
- * The reference builds them from POSIX named semaphores, because macOS
+ * The reference builds these from POSIX named semaphores, because macOS
  * does not implement unnamed ones (sem_init returns ENOSYS). Named
  * semaphores bring a name in a global namespace and a lifetime that
- * outlives the process if it is killed at the wrong moment. A counter plus
- * a mutex and a condition variable does the same job with none of that,
- * and every wake-up the collector needs is expressible that way.
+ * outlives the process if it is killed at the wrong moment. A counter
+ * does the same job with neither, and every wake-up the collector needs
+ * is a count: "this many more threads should run".
+ *
+ * `post` is what makes it more than a condition variable — the count
+ * survives between waits, so a post that arrives before a wait is not
+ * lost.
  */
+typedef struct RtSem {
+    RtMutex mutex;
+    RtCond cond;
+    u32 count;
+} RtSem;
+
+bool rt_sem_init(RtSem* sem, u32 initial);
+void rt_sem_destroy(RtSem* sem);
+
+/* Increment and wake one waiter. */
+void rt_sem_post(RtSem* sem);
+
+/* Decrement, blocking while the count is zero. */
+void rt_sem_wait(RtSem* sem);
+
+/* Decrement if the count is non-zero; false if it was zero. */
+bool rt_sem_trywait(RtSem* sem);
+
+/* Current count, for diagnostics and tests. */
+u32 rt_sem_count(RtSem* sem);
 
 /* ------------------------------------------------------------------ */
 /* reader-writer lock                                                  */

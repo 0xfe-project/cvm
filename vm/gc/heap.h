@@ -46,6 +46,8 @@
 
 #include "base/types.h"
 #include "gc/bytemap.h"
+#include "gc/block_alloc.h"
+#include "gc/block_range.h"
 #include "gc/grey_packet.h"
 #include "gc/layout.h"
 #include "gc/meta.h"
@@ -77,6 +79,11 @@ void cvm_region_release(CvmRegion* region);
 /* ------------------------------------------------------------------ */
 /* the heap                                                            */
 /* ------------------------------------------------------------------ */
+
+/* The worker pool, defined in gc/pool.h. Held by pointer so that heap.h
+ * does not depend on the pool's internals; NULL when there are no
+ * concurrent workers, which is the single-threaded case. */
+struct CvmGcPool;
 
 typedef struct CvmHeap {
     /* --- the block-aligned heap window --- */
@@ -134,6 +141,82 @@ typedef struct CvmHeap {
         u64 current_end_ns;
         u64 last_end_ns;
     } mark;
+
+    /* --- sweeping --- */
+    struct {
+        /*
+         * Next block to sweep. Atomic because sweepers claim batches by
+         * advancing it, so several can work at once without a lock.
+         */
+        _Atomic u32 cursor;
+        u32 limit;
+
+        /*
+         * Coalescing has been done up to here. Trails the sweep cursor:
+         * a run of free blocks can only be merged once every sweeper that
+         * touches it has finished, which is what the minimum cursor of
+         * all sweepers tracks.
+         */
+        _Atomic u32 coalesce_done;
+
+        /* Set when the sweep, including coalescing, is finished. */
+        _Atomic bool post_sweep_done;
+
+        /*
+         * Claimed by whichever thread does the finishing work — putting
+         * the sweeper's reserve back and leaving concurrent mode. Without
+         * it two threads reaching the end at once would each take a
+         * reserve, and the second would take blocks the first had just
+         * set aside.
+         */
+        _Atomic bool finishing;
+    } sweep;
+
+    /*
+     * Concurrent GC workers, or NULL. Their per-thread sweep progress is
+     * what bounds coalescing, so the sweeper needs to see them.
+     */
+    struct CvmGcPool* pool;
+
+    /*
+     * The block allocator over this heap. Held here rather than passed
+     * around because the sweeper, the collector and the allocator all need
+     * it and it is a property of the heap: there is exactly one per heap,
+     * and it is created with it.
+     *
+     * Named block_alloc rather than blocks, because `blocks` is the
+     * reservation holding the heap's own payload.
+     */
+    CvmBlockAllocator* block_alloc;
+
+    /*
+     * State for the lazy sweeper: the sweep a mutator thread does when it
+     * cannot allocate. Tracked separately from the sweepers because it is
+     * not a GC thread and its progress must still bound coalescing.
+     */
+    struct {
+        _Atomic u32 cursor_done;
+
+        /*
+         * How many threads are driving the sweep right now.
+         *
+         * This is what coalescing is bounded by. A run of free blocks can
+         * only be closed off once every sweeper that might extend it has
+         * finished its batch, and a sweeper's cursor_done is the end of
+         * its last completed batch — so the bound is the smallest
+         * cursor_done among the sweepers that are still working.
+         *
+         * A sweeper that has stopped imposes no bound: it is not going to
+         * extend anything. That is why this is a count and not a flag —
+         * two threads may be driving at once, and one finishing must not
+         * make the other invisible.
+         *
+         * The counter is also why coalescing can finish at all: the
+         * thread doing the last batch is itself counted, so its own
+         * cursor_done provides the bound it needs.
+         */
+        _Atomic u32 active_count;
+    } lazy_sweep;
 } CvmHeap;
 
 /*
