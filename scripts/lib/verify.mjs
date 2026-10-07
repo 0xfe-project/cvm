@@ -170,6 +170,7 @@ const PROBE_HEADERS = [
     "gc/world.h",
     "gc/grey_packet.h",
     "gc/marker.h",
+    "gc/weak.h",
     "gc/block_list.h",
 ];
 
