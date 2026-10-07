@@ -57,7 +57,14 @@ function foreignSymbols(nm, obj, opts) {
  * Headers the probe covers. Public headers belong here; internal headers
  * are covered by pass 2 as soon as a .c file includes them.
  */
-const PROBE_HEADERS = ["base/types.h", "base/math.h", "cvm/gc.h", "gc/layout.h"];
+const PROBE_HEADERS = [
+    "base/types.h",
+    "base/math.h",
+    "base/assert.h",
+    "cvm/gc.h",
+    "gc/layout.h",
+    "gc/meta.h",
+];
 
 export function checkFreestanding({
     root,

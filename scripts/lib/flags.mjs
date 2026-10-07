@@ -17,10 +17,9 @@ const COMMON = [
     "-Werror",
     "-Wpedantic",
     "-fno-common",
-    "-fvisibility=hidden",
 ];
 
-export const DEBUG_FLAGS = ["-g", "-O0", "-fno-omit-frame-pointer"];
+export const DEBUG_FLAGS = ["-g", "-O0", "-fno-omit-frame-pointer", "-DCVM_DEBUG"];
 export const RELEASE_FLAGS = ["-O2", "-DNDEBUG"];
 
 export function sanitizerFlags({ asan, tsan }) {
@@ -37,6 +36,11 @@ export function sanitizerFlags({ asan, tsan }) {
  *   vm/          so `#include "gc/layout.h"` resolves (internal)
  *   tests/       hosted only — test-only headers must not be reachable
  *                from freestanding translation units.
+ *
+ * Note the layering rule this encodes: headers under rt/base/ are shared
+ * with the freestanding vm layer, so they must stay libc-free even though
+ * rt/*.c files may use libc freely. The freestanding probe is what
+ * enforces that.
  */
 export function includeFlags(root, flavor) {
     const dirs = [

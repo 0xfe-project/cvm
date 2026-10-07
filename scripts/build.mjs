@@ -74,10 +74,18 @@ function compileTree({ dir, flavor, toolchain, verbose }) {
     return { srcs, objs };
 }
 
+/**
+ * Compile the two runtime layers.
+ *
+ * Flavor split: vm/ is freestanding (no libc at all), rt/ is hosted (it is
+ * the one layer allowed to use a thin libc, and it is where the platform
+ * syscalls live). Headers under rt/base/ are shared with vm, so they stay
+ * libc-free regardless — the freestanding probe enforces that.
+ */
 function buildRuntime(toolchain) {
     const rt = compileTree({
         dir: path.join(ROOT, "rt"),
-        flavor: "freestanding",
+        flavor: "hosted",
         toolchain,
         verbose: opts.verbose,
     });
@@ -90,11 +98,11 @@ function buildRuntime(toolchain) {
 
     if (rt.objs.length + vm.objs.length === 0) {
         ui.log("runtime: no sources yet (headers only)");
-        return [];
+        return { objs: [], vmObjs: [] };
     }
 
-    ui.log(`runtime: ${rt.objs.length} rt + ${vm.objs.length} vm objects`);
-    return [...rt.objs, ...vm.objs];
+    ui.log(`runtime: ${rt.objs.length} rt (hosted) + ${vm.objs.length} vm (freestanding)`);
+    return { objs: [...rt.objs, ...vm.objs], vmObjs: vm.objs };
 }
 
 function buildTests(toolchain, runtimeObjs) {
@@ -160,9 +168,9 @@ function main() {
 
     mkdirp(BUILD);
 
-    const runtimeObjs = buildRuntime(toolchain);
+    const runtime = buildRuntime(toolchain);
 
-    if (opts.test) buildTests(toolchain, runtimeObjs);
+    if (opts.test) buildTests(toolchain, runtime.objs);
 
     checkFreestanding({
         root: ROOT,
@@ -171,7 +179,7 @@ function main() {
         toolchain,
         verbose: opts.verbose,
         ui,
-        runtimeObjs,
+        runtimeObjs: runtime.vmObjs,
     });
 
     ui.log("done");
