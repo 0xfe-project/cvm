@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, help } from "./lib/args.mjs";
 import { logger, mkdirp, rmrf, collect } from "./lib/util.mjs";
 import { discover } from "./lib/toolchain.mjs";
-import { flagsFor } from "./lib/flags.mjs";
+import { flagsFor, sanitizerFlags } from "./lib/flags.mjs";
 import { compile, link, objectPath } from "./lib/cc.mjs";
 import { checkFreestanding } from "./lib/verify.mjs";
 
@@ -139,6 +139,14 @@ function buildTests(toolchain, runtimeObjs) {
             objs: [obj, ...runtimeObjs],
             out: bin,
             toolchain,
+            // The sanitizer runtime is linked by the driver, so the same
+            // -fsanitize flag must appear on the link line as on the
+            // compile line. Omitting it leaves the instrumented objects
+            // with undefined __tsan_*/__asan_* symbols.
+            flags: sanitizerFlags(opts),
+            // Tests are hosted and use pthreads for the concurrent cases.
+            // -lpthread is a no-op on macOS and needed on older glibc.
+            libs: ["-lpthread"],
             verbose: opts.verbose,
             ui,
         });

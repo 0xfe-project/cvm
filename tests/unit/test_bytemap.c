@@ -40,6 +40,13 @@ static Fixture fixture_make(usize heap_size) {
     f.heap = heap;
     f.heap_size = heap_size;
     f.map = bytemap_init(meta, heap, heap_size);
+
+    /* bytemap_init does not clear the slots; the heap does that once at
+     * startup, and so must the fixture, or tests would read whatever the
+     * allocation happened to contain. */
+    for (usize i = 0; i < f.map->count; i++) {
+        object_meta_set_free(&f.map->slots[i]);
+    }
     return f;
 }
 

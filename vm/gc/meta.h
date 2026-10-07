@@ -248,7 +248,7 @@ typedef struct BlockMeta {
         } superblock;
     } block;
 
-    /* Index of the next block in a free list, or -1 for the end. */
+    /* Index of the next block in a free list, or CVM_LAST_BLOCK. */
     i32 next_block;
 
     u8 debug_state;
@@ -369,12 +369,15 @@ CVM_INLINE u8 block_meta_debug_state(BlockMeta const* m) {
     return m->debug_state;
 }
 
+/* Sentinel for `next_block`: this block ends the list. */
+#define CVM_LAST_BLOCK (-1)
+
 /* Reset to the free state. Written out rather than memset; see the file
  * header for why. */
 CVM_INLINE void block_meta_clear(BlockMeta* m) {
     m->block.simple.flags = (u8)CVM_BLOCK_FREE;
     m->block.simple.first_free_line = CVM_LAST_HOLE;
-    m->next_block = -1;
+    m->next_block = CVM_LAST_BLOCK;
     m->debug_state = (u8)CVM_DBG_MUST_SWEEP;
     m->reserved[0] = 0;
     m->reserved[1] = 0;
@@ -462,11 +465,33 @@ CVM_INLINE BlockMeta* block_meta_of_word(BlockMeta* meta_start, u8* heap_start,
 }
 
 /*
+ * Free-list linkage.
+ *
+ * Blocks are chained by index rather than by pointer, so a link costs four
+ * bytes instead of eight. Converting an index back to a BlockMeta needs the
+ * metadata base, which is why these take meta_start.
+ */
+CVM_INLINE void block_meta_set_next(BlockMeta* meta_start, BlockMeta* m,
+                                    BlockMeta* next) {
+    m->next_block =
+        (next == NULL) ? CVM_LAST_BLOCK : (i32)block_meta_index_of(meta_start, next);
+}
+
+CVM_INLINE BlockMeta* block_meta_next(BlockMeta* meta_start, BlockMeta const* m) {
+    i32 next = m->next_block;
+    return (next == CVM_LAST_BLOCK) ? NULL : block_meta_at(meta_start, (u32)next);
+}
+
+/*
  * Walk backwards from a superblock tail to the head of its superblock.
  * Blocks in a superblock are contiguous and the head is at or after
  * meta_start, so the loop terminates.
  */
 CVM_INLINE BlockMeta* block_meta_superblock_start(BlockMeta* meta_start, BlockMeta* m) {
+    /* meta_start is used only by the assertion below, so release builds
+     * would otherwise report an unused parameter. */
+    CVM_UNUSED(meta_start);
+
     BlockMeta* cur = m;
     while (block_meta_is_superblock_tail(cur)) {
         cur--;

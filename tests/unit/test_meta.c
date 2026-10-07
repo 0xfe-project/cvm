@@ -216,7 +216,10 @@ TEST block_geometry_line_addresses(void) {
 /* ------------------------------------------------------------------ */
 
 TEST line_meta_mark_and_unmark(void) {
-    LineMeta lines[CVM_LINE_COUNT];
+    /* Zero-initialised: an uninitialised array happens to hold whatever the
+     * stack held, and 1 is a valid LineFlag, so reading a never-written
+     * byte is not a safe way to assert "empty". */
+    LineMeta lines[CVM_LINE_COUNT] = {0};
     LineMeta* block0 = line_meta_of_block(lines, 0);
 
     line_meta_unmark(&block0[0]);

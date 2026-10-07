@@ -97,6 +97,15 @@ typedef struct span_const {
 #define CVM_PREFETCH(p) ((void)0)
 #endif
 
+/*
+ * Marks a parameter as intentionally unused.
+ *
+ * Needed because cvm_assert compiles away in release builds, which can
+ * leave a parameter referenced only inside an assertion and therefore
+ * unused in exactly one build configuration.
+ */
+#define CVM_UNUSED(x) ((void)(x))
+
 /* Alignment constants used across GC and allocators. */
 #define CVM_WORD_BITS ((u32)(sizeof(word) * 8))
 #define CVM_WORD_SIZE ((usize)sizeof(word))
