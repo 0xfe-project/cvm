@@ -227,6 +227,17 @@ void cvm_thread_set_state(CvmThreadState state) {
         return;
     }
     atomic_store_explicit(&node->state, (u32)state, memory_order_release);
+
+    /*
+     * A thread that becomes unmanaged is one a collector no longer has to
+     * wait for, and it should not have to wait out its whole diagnostic
+     * interval to notice. The check keeps this off the hot path: when no
+     * collection is running there is nothing to notify, and a relaxed load
+     * of a flag is all this costs.
+     */
+    if (state == CVM_THREAD_UNMANAGED && cvm_safepoint_in_progress()) {
+        cvm_safepoint_notify_thread_changed();
+    }
 }
 
 bool cvm_thread_node_is_alive(CvmThreadNode const* node) {

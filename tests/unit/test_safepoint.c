@@ -286,8 +286,16 @@ TEST stuck_thread_is_reported(void) {
 
     u32 reports_before = cvm_safepoint_stuck_reports();
 
-    /* Deliberately do not poll. The collector is waiting for us, and after
-     * its report interval it must say so instead of stalling silently. */
+    /*
+     * Deliberately do not poll. The collector is waiting for us, and after
+     * its report interval it must say so instead of stalling silently.
+     *
+     * The warning that follows on stderr is this test working: it is the
+     * only place in the suite where a stuck thread is produced on purpose,
+     * so a line saying "thread(s) not parked" appearing in a test run
+     * should be read as coming from here rather than chased as a bug.
+     */
+    fprintf(stderr, "test_safepoint: expecting a stuck-thread warning below\n");
     u64 deadline = rt_time_nanos() + 5000000000ull;
     while (cvm_safepoint_stuck_reports() == reports_before &&
            rt_time_nanos() < deadline) {

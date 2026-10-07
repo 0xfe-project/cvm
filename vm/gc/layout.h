@@ -98,6 +98,23 @@
  */
 #define CVM_GREY_PACKET_RATIO 0.01
 
+/*
+ * Marking parallelism thresholds, from the reference.
+ *
+ * A large array is split into packets so that several markers can trace it
+ * at once; a huge array traced by one thread is a serial bottleneck that
+ * no amount of packet shuffling elsewhere can hide. Below the threshold
+ * the split would cost more than it saves.
+ *
+ * The two spawn constants are the backlog below which waking another
+ * worker is pointless: a worker that finds no packet does nothing but
+ * contend.
+ */
+#define CVM_ARRAY_SPLIT_THRESHOLD 512u
+#define CVM_ARRAY_SPLIT_BATCH CVM_ARRAY_SPLIT_THRESHOLD
+#define CVM_MARK_MIN_PACKETS_PER_THREAD 3u
+#define CVM_MARK_SPAWN_THREADS_MIN_PACKETS (2u * CVM_MARK_MIN_PACKETS_PER_THREAD)
+
 /* ------------------------------------------------------------------ */
 /* heap growth policy                                                  */
 /* ------------------------------------------------------------------ */

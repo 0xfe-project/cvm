@@ -340,6 +340,22 @@ extern __thread CvmVMContext* cvm_tls_ctx __attribute__((tls_model("initial-exec
     CvmGcFrame name##_frame
 
 CVM_INLINE void cvm_frame_push(CvmGcFrame* frame, opaque_mut* roots, u32 num_slots) {
+    /*
+     * A function entry is a safepoint, and this is where generated code
+     * enters a function — so the poll lives here rather than being left to
+     * the frontend to remember.
+     *
+     * That narrows the frontend's obligation to loop back edges, which are
+     * the places it has to think about anyway. The alternative is a
+     * protocol with two obligations, one of which is easy to forget
+     * precisely because it looks like boilerplate.
+     *
+     * The cost is one relaxed load and a well-predicted branch per call.
+     * The compiler can merge consecutive ones, and it is the same load the
+     * frontend would have emitted.
+     */
+    cvm_safepoint_poll();
+
     CvmVMContext* ctx = cvm_ctx();
     frame->prev = ctx->top_frame;
     frame->num_slots = num_slots;
@@ -400,10 +416,18 @@ CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
     hdr->type = type;
     hdr->flags = 0;
 
-    /* Mark the slot. Without this the object exists but the collector
-     * cannot see it, which is silent and fatal. */
-    ctx->object_meta[(usize)(p - ctx->heap_base) / CVM_ALLOC_ALIGNMENT] =
-        CVM_OBJECT_SLOT_ALLOCATED;
+    /*
+     * Mark the slot. Without this the object exists but the collector
+     * cannot see it, which is silent and fatal.
+     *
+     * Relaxed and atomic rather than a plain store, because the collector
+     * reads these bytes atomically and mixing the two kinds of access to
+     * one address is a data race whichever way round it is. A relaxed
+     * atomic byte store is the same single instruction.
+     */
+    atomic_store_explicit((_Atomic u8*)&ctx->object_meta[(usize)(p - ctx->heap_base) /
+                                                         CVM_ALLOC_ALIGNMENT],
+                          CVM_OBJECT_SLOT_ALLOCATED, memory_order_relaxed);
 
     return (opaque_mut)(hdr + 1); /* payload follows the header */
 }

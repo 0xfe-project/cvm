@@ -53,11 +53,34 @@
 void cvm_mark_roots(CvmHeap* heap);
 
 /*
+ * Drain the full packet list until none is left, tracing what it finds.
+ *
+ * Both a worker and the master use this; the difference is what they do
+ * when the list runs dry. A worker stops, which is what keeps an idle
+ * collection from burning a core. The master loops until marking is
+ * finished, because someone has to notice that it is.
+ *
+ * `scale` is whether to wake more workers when the backlog justifies it.
+ * Only the master does, since it is the one that can see the backlog.
+ */
+void cvm_mark(CvmHeap* heap, bool scale);
+
+/*
  * Drain the full packet list, tracing objects until nothing is left to
- * trace. Safe to call from more than one thread; the packet lists are
- * lock-free.
+ * trace, and loop until marking is done. Safe to call from more than one
+ * thread; the packet lists are lock-free.
  */
 void cvm_mark_until_done(CvmHeap* heap);
+
+/*
+ * Trace every object in one packet, filling `out` with newly discovered
+ * objects and `out_weak` with weak references encountered.
+ *
+ * A packet is either a list of objects or a range of an array that was too
+ * large to mark inline.
+ */
+void cvm_mark_batch(CvmHeap* heap, CvmGreyPacket* in, CvmGreyPacket** out,
+                    CvmGreyPacket** out_weak);
 
 /*
  * Whether marking has nothing left to do.

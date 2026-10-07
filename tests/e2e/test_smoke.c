@@ -291,7 +291,12 @@ int main(int argc, char** argv) {
     CvmOptions options = {
         .min_heap_size = 4 * 1024 * 1024,
         .max_heap_size = 32 * 1024 * 1024,
-        .gc_workers = 0,
+        /*
+         * Let the runtime size the pool. The smoke test is meant to run the
+         * configuration a real program would, and a real program wants
+         * workers.
+         */
+        .gc_workers = CVM_GC_WORKERS_DEFAULT,
         .finalizer_thread = true,
         .stats_channel = NULL,
         .log_level = {NULL, 0},

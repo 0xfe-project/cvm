@@ -197,7 +197,16 @@ bool cvm_safepoint_acquire(void) {
      * lets a thread park while we are waiting. */
     while (!all_others_parked(self)) {
         if (!rt_cond_wait_timeout(&stw_cond, &stw_mutex, STUCK_REPORT_INTERVAL_NS)) {
-            report_stuck(self);
+            /*
+             * Re-check before reporting. A thread that went unmanaged or
+             * parked just as the interval expired would otherwise be
+             * reported as stuck while it is in fact on its way — and a
+             * diagnostic that races its own timeout is worse than none,
+             * because it teaches the reader to ignore it.
+             */
+            if (!all_others_parked(self)) {
+                report_stuck(self);
+            }
         }
     }
 

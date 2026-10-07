@@ -173,6 +173,7 @@ const PROBE_HEADERS = [
     "gc/marker.h",
     "cvm/weak.h",
     "gc/sweeper.h",
+    "gc/pool.h",
     "gc/collect.h",
     "cvm/roots.h",
     "cvm/external.h",

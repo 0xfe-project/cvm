@@ -24,6 +24,7 @@
 #include "gc/collect.h"
 #include "cvm/external.h"
 #include "gc/heap.h"
+#include "gc/pool.h"
 #include "cvm/roots.h"
 #include "gc/sweeper.h"
 #include "gc/world.h"
@@ -57,18 +58,6 @@ bool cvm_init(CvmOptions const* options) {
         cvm_log_init_from_env();
     }
 
-    if (o->gc_workers != 0) {
-        /*
-         * Refused rather than ignored. Quietly running single-threaded
-         * when the caller asked for workers would be a performance
-         * mystery; saying so is better than a silent downgrade.
-         */
-        CVM_LOG_ERROR(m) {
-            fmt_lit(&m.fmt, "gc_workers is not implemented yet; leave it at 0");
-        }
-        return false;
-    }
-
     cvm_threads_init();
     cvm_safepoint_init();
 
@@ -77,6 +66,29 @@ bool cvm_init(CvmOptions const* options) {
             fmt_lit(&m.fmt, "could not reserve the heap");
         }
         return false;
+    }
+
+    /*
+     * The GC worker pool, if asked for.
+     *
+     * A failure here is not fatal: the collector runs correctly
+     * single-threaded, so the program keeps working with a longer pause
+     * rather than not starting at all.
+     */
+    if (o->gc_workers == CVM_GC_WORKERS_DEFAULT) {
+        if (!cvm_pool_init(cvm_vm_heap(), 0)) {
+            CVM_LOG_WARN(m) {
+                fmt_lit(&m.fmt, "GC worker pool could not start; collecting "
+                                "single-threaded");
+            }
+        }
+    } else if (o->gc_workers > 0) {
+        if (!cvm_pool_init(cvm_vm_heap(), o->gc_workers)) {
+            CVM_LOG_WARN(m) {
+                fmt_lit(&m.fmt, "GC worker pool could not start; collecting "
+                                "single-threaded");
+            }
+        }
     }
 
     if (o->finalizer_thread && !cvm_finalizer_start()) {
@@ -120,6 +132,12 @@ void cvm_shutdown(void) {
      * and it needs a working runtime to do that.
      */
     cvm_finalizer_stop();
+
+    /*
+     * The pool goes before the heap it points into, and before this thread
+     * detaches: a worker joined here may still be holding sweep state.
+     */
+    cvm_pool_destroy(cvm_vm_heap());
 
     cvm_thread_detach();
     cvm_world_destroy();

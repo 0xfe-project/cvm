@@ -27,6 +27,7 @@
 #include "gc/heap.h"
 #include "gc/meta.h"
 #include "cvm/roots.h"
+#include "gc/pool.h"
 #include "log.h"
 #include "rt.h"
 
@@ -252,7 +253,46 @@ static void trace_type(CvmHeap* heap, u8* base, CvmTypeDescriptor const* type,
     case CVM_TYPE_PTR_ARRAY: {
         usize length = *(usize*)(base + type->array_length_offset);
         opaque_mut* items = (opaque_mut*)(base + type->array_data_offset);
-        for (usize i = 0; i < length; i++) {
+
+        if (length <= CVM_ARRAY_SPLIT_THRESHOLD) {
+            for (usize i = 0; i < length; i++) {
+                cvm_mark_field(heap, items[i], out, out_weak);
+            }
+            break;
+        }
+
+        /*
+         * A large array is handed to the packet list in slices, so that
+         * several markers trace it at once. One thread walking a million
+         * elements is a serial bottleneck that no amount of packet
+         * shuffling elsewhere can hide.
+         *
+         * If a slice cannot be had — every packet is in flight — the
+         * elements are marked on this thread instead. Dropping them would
+         * be a correctness bug, and waiting would be a deadlock when this
+         * is the only thread holding a packet.
+         */
+        usize batch = CVM_ARRAY_SPLIT_BATCH;
+        usize done = 0;
+
+        while (length - done >= batch) {
+            CvmGreyPacket* slice =
+                cvm_grey_list_pop(&heap->mark.empty, heap->mark.packets);
+            if (slice == NULL) {
+                for (usize i = done; i < done + batch; i++) {
+                    cvm_mark_field(heap, items[i], out, out_weak);
+                }
+            } else {
+                slice->type = (u16)CVM_GREY_PACKET_REFRANGE;
+                slice->size = (u16)batch;
+                slice->items[0] = (opaque_mut)&items[done];
+                give_full_packet(heap, slice);
+            }
+            done += batch;
+        }
+
+        /* The remainder is small by construction, so it goes inline. */
+        for (usize i = done; i < length; i++) {
             cvm_mark_field(heap, items[i], out, out_weak);
         }
         break;
@@ -330,6 +370,101 @@ void cvm_mark_roots(CvmHeap* heap) {
 /* draining                                                            */
 /* ------------------------------------------------------------------ */
 
+void cvm_mark_batch(CvmHeap* heap, CvmGreyPacket* in, CvmGreyPacket** out,
+                    CvmGreyPacket** out_weak) {
+    /*
+     * The caller's holders may start empty. Taking here rather than
+     * requiring the caller to have taken first makes "out is non-NULL once
+     * this returns" an invariant rather than a hope — and the marking loop
+     * relies on it when it reuses the out packet as its next input.
+     */
+    if (*out == NULL) {
+        *out = take_empty_packet(heap);
+    }
+    if (*out_weak == NULL) {
+        *out_weak = take_empty_packet(heap);
+    }
+
+    while (!cvm_grey_packet_is_empty(in)) {
+        if (in->type == (u16)CVM_GREY_PACKET_REFRANGE) {
+            /* A slice of a large array: the packet holds where to start
+             * and how many words follow. */
+            opaque_mut* base = (opaque_mut*)in->items[0];
+            u16 count = in->size;
+            in->size = 0;
+            for (u16 i = 0; i < count; i++) {
+                cvm_mark_field(heap, base[i], out, out_weak);
+            }
+        } else {
+            u8* start = cvm_grey_packet_pop(in);
+            cvm_trace_object(heap, start, out, out_weak);
+        }
+    }
+}
+
+/*
+ * Marking's driving loop.
+ *
+ * The packet churn is the part worth reading twice. When there is more
+ * work on the full list, the exhausted in packet goes back and a new one
+ * is taken. When there is not, but this trace produced objects, the out
+ * packet *becomes* the in packet and the old in packet becomes the new
+ * out packet. That avoids returning a packet only to take another
+ * immediately, which under a single marker is most of what it would be
+ * doing.
+ */
+void cvm_mark(CvmHeap* heap, bool scale) {
+    CvmGreyPacket* in = try_take_full_packet(heap);
+    CvmGreyPacket* out = NULL;
+    CvmGreyPacket* out_weak = NULL;
+
+    while (in != NULL) {
+        cvm_mark_batch(heap, in, &out, &out_weak);
+
+        cvm_assert(out != NULL);
+        cvm_assert(cvm_grey_packet_is_empty(in));
+
+        CvmGreyPacket* next = try_take_full_packet(heap);
+
+        if (next != NULL) {
+            give_empty_packet(heap, in);
+            if (scale) {
+                /*
+                 * A backlog means marking is falling behind, so more
+                 * workers are worth waking. They stop themselves when the
+                 * list runs dry, so over-waking costs a check rather than
+                 * a busy thread.
+                 */
+                cvm_pool_scale_markers(heap->pool,
+                                       cvm_grey_list_size(&heap->mark.full));
+            }
+        } else if (!cvm_grey_packet_is_empty(out)) {
+            /*
+             * Nothing left to take, but this trace produced more. Reuse
+             * the packets already in hand rather than returning them and
+             * immediately taking others: the in packet becomes the out
+             * packet and vice versa.
+             */
+            next = out;
+            out = in;
+        } else {
+            /* Nothing left and nothing produced: this marker is done. */
+            give_empty_packet(heap, in);
+            give_full_packet(heap, out);
+            give_weak_packet(heap, out_weak);
+            return;
+        }
+
+        in = next;
+    }
+
+    /*
+     * The loop is entered with `in == NULL` when there was nothing to do
+     * at all, in which case `out` is still NULL and there is nothing to
+     * hand back. Otherwise the packets were returned above.
+     */
+}
+
 bool cvm_mark_is_done(CvmHeap* heap) {
     u32 empty = cvm_grey_list_size(&heap->mark.empty);
     u32 weak = cvm_grey_list_size(&heap->mark.found_weak_refs);
@@ -338,25 +473,12 @@ bool cvm_mark_is_done(CvmHeap* heap) {
 
 void cvm_mark_until_done(CvmHeap* heap) {
     while (!cvm_mark_is_done(heap)) {
-        CvmGreyPacket* in = try_take_full_packet(heap);
-        if (in == NULL) {
-            /* Another marker has the work; wait for it to finish or hand
-             * some back. */
+        cvm_mark(heap, true);
+        if (!cvm_mark_is_done(heap)) {
+            /* Other markers have the work in flight; let them finish it
+             * rather than spinning on the packet list. */
             rt_thread_yield();
-            continue;
         }
-
-        CvmGreyPacket* out = take_empty_packet(heap);
-        CvmGreyPacket* out_weak = take_empty_packet(heap);
-
-        while (!cvm_grey_packet_is_empty(in)) {
-            u8* start = cvm_grey_packet_pop(in);
-            cvm_trace_object(heap, start, &out, &out_weak);
-        }
-
-        give_empty_packet(heap, in);
-        give_full_packet(heap, out);
-        give_weak_packet(heap, out_weak);
     }
 }
 

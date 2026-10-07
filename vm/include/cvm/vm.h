@@ -38,6 +38,13 @@
 #include "rt.h"
 #include "stats.h"
 
+/*
+ * Ask the runtime to size the worker pool itself. A named constant because
+ * zero already means something else — no workers at all — and the two are
+ * very different requests.
+ */
+#define CVM_GC_WORKERS_DEFAULT ((u32)~0u)
+
 typedef struct CvmOptions {
     /*
      * Heap sizes in bytes. Zero means "choose": the minimum becomes
@@ -49,9 +56,9 @@ typedef struct CvmOptions {
 
     /*
      * Concurrent GC workers. Zero means none, in which case marking and
-     * sweeping happen on whichever thread triggered them. The pool is not
-     * implemented yet, so a non-zero value is currently refused rather
-     * than silently ignored.
+     * sweeping happen on whichever thread triggered them;
+     * CVM_GC_WORKERS_DEFAULT means "as many as this machine and heap
+     * justify".
      */
     u32 gc_workers;
 

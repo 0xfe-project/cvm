@@ -66,9 +66,45 @@ CvmCollectionStats cvm_gc_last_collection(void) {
 /* phases                                                              */
 /* ------------------------------------------------------------------ */
 
-static void phase_set(CvmHeap* heap, CvmGcPhase phase) {
-    if (heap->pool != NULL) {
-        atomic_store_explicit(&heap->pool->phase, (u32)phase, memory_order_release);
+/*
+ * Run a phase with whatever help is available.
+ *
+ * `work` is this thread's own share, which is the same work the workers
+ * do: with no pool it is the whole phase, and with one it is the share the
+ * thread that then has to notice the phase is over must do itself.
+ *
+ * The order is: set the phase, do our share, wake the workers, wait for
+ * them. Doing our share first matters for marking — the root scan has to
+ * produce packets before a worker that wakes finds anything, or it finds
+ * an empty list, concludes there is nothing to do, and stops.
+ */
+static void phase_run(CvmHeap* heap, CvmGcPhase phase, u32 workers,
+                      void (*work)(CvmHeap*)) {
+    CvmGcPool* pool = heap->pool;
+
+    if (pool == NULL) {
+        work(heap);
+        return;
+    }
+
+    atomic_store_explicit(&pool->phase, (u32)phase, memory_order_release);
+    work(heap);
+    cvm_pool_wake(pool, phase, workers);
+    cvm_pool_wait_idle(pool);
+}
+
+/* Mark until nothing is left to trace. */
+static void mark_all(CvmHeap* heap) {
+    cvm_mark_until_done(heap);
+}
+
+/* Clear every weak reference whose target did not survive. */
+static void nullify_all(CvmHeap* heap) {
+    while (!cvm_weak_is_done(heap)) {
+        cvm_weak_nullify(heap);
+        if (!cvm_weak_is_done(heap)) {
+            rt_thread_yield();
+        }
     }
 }
 
@@ -169,6 +205,13 @@ bool cvm_gc_collect(CvmHeap* heap) {
         cvm_heap_grow_if_needed(heap);
     }
 
+    /*
+     * How many workers to wake for a phase. All of them: a worker with
+     * nothing to do stops immediately, so waking too many costs a check
+     * rather than a busy thread.
+     */
+    u32 worker_count = (heap->pool != NULL) ? heap->pool->count : 0;
+
     u64 start_ns = rt_time_nanos();
     u32 blocks_before = heap->block_count;
 
@@ -187,17 +230,26 @@ bool cvm_gc_collect(CvmHeap* heap) {
 
     /* --- mark --- */
     u64 mark_start = rt_time_nanos();
-    phase_set(heap, CVM_GC_MARK);
     cvm_mark_roots(heap);
-    cvm_mark_until_done(heap);
+    phase_run(heap, CVM_GC_MARK, worker_count, mark_all);
     u64 mark_end = rt_time_nanos();
 
     /* --- nullify weak references --- */
-    phase_set(heap, CVM_GC_NULLIFY);
-    u32 weak_cleared = cvm_weak_nullify(heap);
+    u32 weak_cleared = 0;
+    phase_run(heap, CVM_GC_NULLIFY, worker_count, nullify_all);
 
-    /* --- start the sweep, which continues after the world resumes --- */
-    phase_set(heap, CVM_GC_SWEEP);
+    /*
+     * --- start the sweep ---
+     *
+     * The sweep deliberately continues after the world resumes, so only the
+     * preparation happens here. Workers are not woken for it either: the
+     * preparation empties the block allocator, so there is nothing to sweep
+     * until a mutator needs memory, and that mutator drives it.
+     */
+    if (heap->pool != NULL) {
+        atomic_store_explicit(&heap->pool->phase, (u32)CVM_GC_IDLE,
+                              memory_order_release);
+    }
     prepare_for_sweep(heap);
 
     u64 end_ns = rt_time_nanos();
@@ -217,7 +269,10 @@ bool cvm_gc_collect(CvmHeap* heap) {
 
     bool grew = false; /* decided at the start of the next collection */
 
-    phase_set(heap, CVM_GC_IDLE);
+    if (heap->pool != NULL) {
+        atomic_store_explicit(&heap->pool->phase, (u32)CVM_GC_IDLE,
+                              memory_order_release);
+    }
 
     last_collection = (CvmCollectionStats){
         .start_ns = start_ns,

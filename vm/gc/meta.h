@@ -32,10 +32,46 @@
 #ifndef CVM_GC_META_H
 #define CVM_GC_META_H
 
+#include <stdatomic.h>
+
 #include "base/assert.h"
 #include "base/math.h"
 #include "base/types.h"
 #include "gc/layout.h"
+
+/* ================================================================== */
+/* Marked bytes, and why they are accessed atomically                  */
+/* ================================================================== */
+
+/*
+ * Several markers write and read the same mark bytes at once, and that is
+ * safe for a reason worth stating precisely.
+ *
+ * Marking is idempotent: two markers that mark the same object both write
+ * the same value, so whichever store lands second leaves the byte correct.
+ * Nothing is read and then written, so there is no lost update to lose.
+ * The reference relies on exactly this and says so.
+ *
+ * That makes it safe in fact but not in form. A plain read and write of
+ * one byte from two threads is a data race, and a data race is undefined
+ * behaviour in C: the compiler is entitled to assume it does not happen,
+ * and is entitled to move, merge or delete the accesses accordingly. It
+ * also means ThreadSanitizer reports it — correctly — and a report full of
+ * benign races is a report in which a real one goes unnoticed.
+ *
+ * So every access to a mark byte goes through a relaxed atomic. "Relaxed"
+ * because there is no ordering to establish: the value written is the same
+ * either way. On every target this compiles to the same single byte load
+ * or store the plain access produced, so the cost is nothing and the
+ * undefined behaviour is gone.
+ */
+CVM_INLINE void cvm_mark_byte_set(u8* p, u8 value) {
+    atomic_store_explicit((_Atomic u8*)p, value, memory_order_relaxed);
+}
+
+CVM_INLINE u8 cvm_mark_byte_get(u8 const* p) {
+    return atomic_load_explicit((_Atomic u8 const*)p, memory_order_relaxed);
+}
 
 /* ================================================================== */
 /* LineMeta                                                            */
@@ -65,15 +101,15 @@ typedef enum LineFlag {
 typedef u8 LineMeta;
 
 CVM_INLINE bool line_meta_is_marked(LineMeta const* m) {
-    return *m == (u8)CVM_LINE_MARKED;
+    return cvm_mark_byte_get(m) == (u8)CVM_LINE_MARKED;
 }
 
 CVM_INLINE void line_meta_mark(LineMeta* m) {
-    *m = (u8)CVM_LINE_MARKED;
+    cvm_mark_byte_set(m, (u8)CVM_LINE_MARKED);
 }
 
 CVM_INLINE void line_meta_unmark(LineMeta* m) {
-    *m = (u8)CVM_LINE_EMPTY;
+    cvm_mark_byte_set(m, (u8)CVM_LINE_EMPTY);
 }
 
 /* First LineMeta of a block's line table. */
@@ -123,40 +159,40 @@ _Static_assert(sizeof(ObjectMeta) == sizeof(u8),
                "the inlined path indexes the metadata table as bytes");
 
 CVM_INLINE bool object_meta_is_free(ObjectMeta const* m) {
-    return *m == (u8)CVM_OM_FREE;
+    return cvm_mark_byte_get(m) == (u8)CVM_OM_FREE;
 }
 
 CVM_INLINE bool object_meta_is_placeholder(ObjectMeta const* m) {
-    return *m == (u8)CVM_OM_PLACEHOLDER;
+    return cvm_mark_byte_get(m) == (u8)CVM_OM_PLACEHOLDER;
 }
 
 CVM_INLINE bool object_meta_is_allocated(ObjectMeta const* m) {
-    return *m == (u8)CVM_OM_ALLOCATED;
+    return cvm_mark_byte_get(m) == (u8)CVM_OM_ALLOCATED;
 }
 
 CVM_INLINE bool object_meta_is_marked(ObjectMeta const* m) {
-    return *m == (u8)CVM_OM_MARKED;
+    return cvm_mark_byte_get(m) == (u8)CVM_OM_MARKED;
 }
 
 /* True for anything that is not free: allocated, marked, or placeholder. */
 CVM_INLINE bool object_meta_is_occupied(ObjectMeta const* m) {
-    return *m != (u8)CVM_OM_FREE;
+    return cvm_mark_byte_get(m) != (u8)CVM_OM_FREE;
 }
 
 CVM_INLINE void object_meta_set_free(ObjectMeta* m) {
-    *m = (u8)CVM_OM_FREE;
+    cvm_mark_byte_set(m, (u8)CVM_OM_FREE);
 }
 
 CVM_INLINE void object_meta_set_placeholder(ObjectMeta* m) {
-    *m = (u8)CVM_OM_PLACEHOLDER;
+    cvm_mark_byte_set(m, (u8)CVM_OM_PLACEHOLDER);
 }
 
 CVM_INLINE void object_meta_set_allocated(ObjectMeta* m) {
-    *m = (u8)CVM_OM_ALLOCATED;
+    cvm_mark_byte_set(m, (u8)CVM_OM_ALLOCATED);
 }
 
 CVM_INLINE void object_meta_set_marked(ObjectMeta* m) {
-    *m = (u8)CVM_OM_MARKED;
+    cvm_mark_byte_set(m, (u8)CVM_OM_MARKED);
 }
 
 /*
@@ -295,36 +331,37 @@ _Static_assert(sizeof(BlockMeta) == 12,
 /* ------------------------------------------------------------------ */
 
 CVM_INLINE bool block_meta_is_free(BlockMeta const* m) {
-    return m->block.simple.flags == (u8)CVM_BLOCK_FREE;
+    return cvm_mark_byte_get(&m->block.simple.flags) == (u8)CVM_BLOCK_FREE;
 }
 
 CVM_INLINE bool block_meta_is_simple(BlockMeta const* m) {
-    u8 flags = m->block.simple.flags;
+    u8 flags = cvm_mark_byte_get(&m->block.simple.flags);
     return flags == (u8)CVM_BLOCK_SIMPLE || flags == (u8)CVM_BLOCK_MARKED;
 }
 
 CVM_INLINE bool block_meta_is_marked(BlockMeta const* m) {
-    return m->block.simple.flags == (u8)CVM_BLOCK_MARKED;
+    return cvm_mark_byte_get(&m->block.simple.flags) == (u8)CVM_BLOCK_MARKED;
 }
 
 CVM_INLINE bool block_meta_is_reserved(BlockMeta const* m) {
-    return m->block.simple.flags == (u8)CVM_BLOCK_RESERVED;
+    return cvm_mark_byte_get(&m->block.simple.flags) == (u8)CVM_BLOCK_RESERVED;
 }
 
 CVM_INLINE bool block_meta_is_superblock_start(BlockMeta const* m) {
-    return m->block.simple.flags == (u8)CVM_BLOCK_SUPERBLOCK_START;
+    return cvm_mark_byte_get(&m->block.simple.flags) == (u8)CVM_BLOCK_SUPERBLOCK_START;
 }
 
 CVM_INLINE bool block_meta_is_superblock_tail(BlockMeta const* m) {
-    return m->block.simple.flags == (u8)CVM_BLOCK_SUPERBLOCK_TAIL;
+    return cvm_mark_byte_get(&m->block.simple.flags) == (u8)CVM_BLOCK_SUPERBLOCK_TAIL;
 }
 
 CVM_INLINE bool block_meta_is_superblock_start_me(BlockMeta const* m) {
-    return m->block.simple.flags == (u8)CVM_BLOCK_SUPERBLOCK_START_ME;
+    return cvm_mark_byte_get(&m->block.simple.flags) ==
+           (u8)CVM_BLOCK_SUPERBLOCK_START_ME;
 }
 
 CVM_INLINE bool block_meta_is_coalesce_me(BlockMeta const* m) {
-    return m->block.simple.flags == (u8)CVM_BLOCK_COALESCE_ME;
+    return cvm_mark_byte_get(&m->block.simple.flags) == (u8)CVM_BLOCK_COALESCE_ME;
 }
 
 /* True for both the head and the continuation blocks of a large object. */
@@ -337,7 +374,7 @@ CVM_INLINE bool block_meta_contains_large_objects(BlockMeta const* m) {
 /* ------------------------------------------------------------------ */
 
 CVM_INLINE void block_meta_set_flag(BlockMeta* m, BlockFlag flag) {
-    m->block.simple.flags = (u8)flag;
+    cvm_mark_byte_set(&m->block.simple.flags, (u8)flag);
 }
 
 CVM_INLINE void block_meta_mark(BlockMeta* m) {
@@ -367,7 +404,7 @@ CVM_INLINE void block_meta_set_flag_and_size(BlockMeta* m, BlockFlag flag, i32 s
     cvm_assert(flag != CVM_BLOCK_SUPERBLOCK_START || size > 0);
     cvm_assert(flag != CVM_BLOCK_COALESCE_ME || size > 0);
 
-    m->block.superblock.flags = (u8)flag;
+    cvm_mark_byte_set(&m->block.superblock.flags, (u8)flag);
     m->block.superblock.size = u24_from_u32((u32)size);
 }
 
@@ -390,11 +427,11 @@ CVM_INLINE i8 block_meta_first_free_line(BlockMeta const* m) {
 }
 
 CVM_INLINE bool block_meta_has_finalizers(BlockMeta const* m) {
-    return m->has_finalizers != 0;
+    return cvm_mark_byte_get(&m->has_finalizers) != 0;
 }
 
 CVM_INLINE void block_meta_set_has_finalizers(BlockMeta* m, bool value) {
-    m->has_finalizers = value ? 1 : 0;
+    cvm_mark_byte_set(&m->has_finalizers, value ? 1 : 0);
 }
 
 CVM_INLINE void block_meta_set_debug_state(BlockMeta* m, BlockDebugState s) {
@@ -411,7 +448,7 @@ CVM_INLINE u8 block_meta_debug_state(BlockMeta const* m) {
 /* Reset to the free state. Written out rather than memset; see the file
  * header for why. */
 CVM_INLINE void block_meta_clear(BlockMeta* m) {
-    m->block.simple.flags = (u8)CVM_BLOCK_FREE;
+    cvm_mark_byte_set(&m->block.simple.flags, (u8)CVM_BLOCK_FREE);
     m->block.simple.first_free_line = CVM_LAST_HOLE;
     m->next_block = CVM_LAST_BLOCK;
     m->debug_state = (u8)CVM_DBG_MUST_SWEEP;
