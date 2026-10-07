@@ -1,7 +1,7 @@
 /*
  * vm/log.c
  *
- * Leveled logging. See vm/include/cvm/log.h for the call-site form.
+ * Leveled logging. See vm/log.h for the call-site form.
  *
  * Output goes through an RtChannel, so this file never sees a FILE* and
  * the destination can be swapped without touching the collector. Messages
@@ -9,7 +9,7 @@
  * logging from interleaving mid-line.
  */
 
-#include "cvm/log.h"
+#include "log.h"
 
 #include "base/format.h"
 #include "rt.h"

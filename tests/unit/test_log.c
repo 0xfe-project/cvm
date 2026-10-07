@@ -16,7 +16,7 @@
 #include <string.h>
 
 #include "base/format.h"
-#include "cvm/log.h"
+#include "log.h"
 #include "rt.h"
 
 #define LOG_TMP "/tmp/cvm_log_test.txt"
