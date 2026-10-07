@@ -66,6 +66,7 @@
 #include "base/assert.h"
 #include "base/types.h"
 #include "cvm/gc.h"
+#include "rt.h"
 
 /* Bytes per packet, and the pointers that fit in one. */
 #define CVM_GREY_PACKET_SIZE 2048
@@ -96,7 +97,15 @@ typedef union CvmGreyPacketRef {
     struct {
         u24 idx;
         u24 size;
-        u16 times_popped;
+
+        /*
+         * Padding, not a counter. The reference used this for an ABA
+         * counter on the head packet; the lists are mutex-guarded now, so
+         * there is nothing to count. It stays because the two u24 fields
+         * only come to six bytes, and the word has to be eight for the
+         * whole-head load and store to be one operation.
+         */
+        u16 _reserved;
     } sep;
     u64 atom;
 } CvmGreyPacketRef;
@@ -116,13 +125,11 @@ typedef enum CvmGreyPacketType {
 
 typedef struct CvmGreyPacket {
     /*
-     * Link to the rest of the list. Written before the packet is
-     * published, read after it is acquired.
+     * Link to the rest of the list. Carries both the index of the next
+     * packet and the count of packets from there on, which is what lets a
+     * pop restore the list's size without walking it.
      */
     CvmGreyPacketRef next;
-
-    /* ABA counter for this packet's position in the list. */
-    _Atomic u32 times_popped;
 
     u16 size;
     u16 type;
@@ -135,8 +142,36 @@ typedef struct CvmGreyPacket {
     opaque_mut items[CVM_GREY_PACKET_ITEMS];
 } CvmGreyPacket;
 
+/*
+ * A grey list: a stack of packets, guarded by a mutex.
+ *
+ * The reference makes this lock-free: a Treiber stack over one word holding
+ * the head index and the count, with a 16-bit counter on the head packet
+ * as an ABA guard. That guard is not complete — when the head comes from a
+ * contiguous run of packets (which is how the list starts, and how a batch
+ * of packets is handed over) the counter is not carried, so the guard does
+ * not apply to exactly the case that happens first. The consequence is not
+ * a slow path: a pop whose exchange succeeds against a stale head can hand
+ * two threads the same packet, and a packet that is owned twice is a packet
+ * that comes back once. Marking cannot finish while a packet is
+ * unaccounted for, so the process wedges at the next collection with
+ * nothing in the log to explain it. (That is exactly what happened, and it
+ * took a lost-packet diagnostic to see it: one packet on no list.)
+ *
+ * A mutex removes the whole class of problem, and the cost is nothing that
+ * matters: a packet holds two kilobytes' worth of objects to trace, so the
+ * lock is taken once per two kilobytes of marking work. Trading an
+ * unverifiable lock-free argument for a lock whose correctness is obvious
+ * is the right side of that trade.
+ *
+ * The head word still packs the index and the count together, because the
+ * count has to travel with the link anyway: a pop has to know how many
+ * packets remain behind the one it takes.
+ */
 typedef struct CvmGreyList {
-    _Atomic u64 head; /* a CvmGreyPacketRef, read and written whole */
+    RtMutex lock;
+    u64 head; /* a CvmGreyPacketRef */
+    bool ready;
 } CvmGreyList;
 
 /* ------------------------------------------------------------------ */
@@ -161,7 +196,6 @@ void cvm_grey_packet_move_items(CvmGreyPacket* src, CvmGreyPacket* dst, u32 coun
 CVM_INLINE void cvm_grey_packet_init(CvmGreyPacket* packet, CvmGreyPacketType type) {
     packet->size = 0;
     packet->type = (u16)type;
-    atomic_store(&packet->times_popped, 0);
     packet->next.atom = 0;
 }
 
@@ -169,7 +203,8 @@ CVM_INLINE void cvm_grey_packet_init(CvmGreyPacket* packet, CvmGreyPacketType ty
 /* lists                                                               */
 /* ------------------------------------------------------------------ */
 
-void cvm_grey_list_init(CvmGreyList* list);
+/* Prepare the list. Returns false if the lock could not be created. */
+bool cvm_grey_list_init(CvmGreyList* list);
 
 /* Packets currently on the list. Read atomically with the head. */
 u32 cvm_grey_list_size(CvmGreyList const* list);
@@ -189,7 +224,7 @@ CVM_INLINE u64 cvm_grey_list_empty(void) {
     CvmGreyPacketRef r;
     r.sep.idx = u24_from_u32(CVM_GREYLIST_LAST);
     r.sep.size = u24_from_u32(0);
-    r.sep.times_popped = 0;
+    r.sep._reserved = 0;
     return r.atom;
 }
 

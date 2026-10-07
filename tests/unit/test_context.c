@@ -25,6 +25,7 @@
 #include "cvm/gc.h"
 #include "gc/world.h"
 #include "rt.h"
+#include "safepoint.h"
 
 /* The registry is process-wide, so every test that registers must
  * unregister before it returns. This is the baseline other tests measure
@@ -317,6 +318,7 @@ GREATEST_MAIN_DEFS();
 
 int main(int argc, char** argv) {
     cvm_threads_init();
+    cvm_safepoint_init();
 
     /* Registration requires a heap: a registered thread may allocate. */
     if (!cvm_world_init(4 * 1024 * 1024, 16 * 1024 * 1024)) {

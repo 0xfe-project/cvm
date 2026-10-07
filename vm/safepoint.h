@@ -47,6 +47,7 @@
 #define CVM_SAFEPOINT_H
 
 #include "base/types.h"
+#include "context.h"
 
 /* One-time setup. Safe to call more than once. */
 void cvm_safepoint_init(void);
@@ -98,5 +99,60 @@ u32 cvm_safepoint_stuck_reports(void);
  * timings, that a thread has actually entered the wait.
  */
 u32 cvm_safepoint_acquire_waiters(void);
+
+/* ------------------------------------------------------------------ */
+/* trap-based safepoints                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The two mechanisms, and why both exist.
+ *
+ * Polling: the safepoint is a flag the thread checks and branches on. It
+ * needs nothing from the platform, which is why it is the baseline.
+ *
+ * Traps: the safepoint is a load from a per-thread page that the collector
+ * makes inaccessible. One load, no branch, and nothing for the compiler to
+ * reorder around. It needs a signal handler and a per-architecture
+ * trampoline, which is why it is a separate mode rather than the only
+ * mechanism.
+ *
+ * The poll itself is a macro over the two, so nothing else in the
+ * collector knows which is in use.
+ */
+bool cvm_safepoint_trap_usable(void);
+
+/* Install the fault handler. Returns false if the platform refused;
+ * callers then use polling. */
+bool cvm_safepoint_trap_init(void);
+
+void cvm_safepoint_trap_attach(CvmThreadNode* node);
+void cvm_safepoint_trap_detach(CvmThreadNode* node);
+
+/* Make every registered thread's poll fault. */
+void cvm_safepoint_trap_arm_all(void);
+void cvm_safepoint_trap_disarm_all(void);
+
+/*
+ * Arm the calling thread's own page if a collection is in progress.
+ *
+ * Called after a thread has registered, and taken under the stop-the-world
+ * mutex so that it cannot interleave with the release path's disarm pass.
+ * The two orderings are then both safe:
+ *
+ *   - this call runs first, sees the flag set, and arms. The release's
+ *     disarm pass then runs and sees a registered thread, so it disarms.
+ *
+ *   - the release runs first, disarming every registered page and clearing
+ *     the flag. This call then sees the flag cleared and does not arm.
+ *
+ * What it prevents is the third interleaving: reading the flag before it
+ * was cleared, arming, and then missing the disarm pass because the thread
+ * was not in the registry yet. The page stays armed with no collection
+ * running, so every subsequent poll faults and the parking it triggers
+ * finds nothing to wait for — the fault retries, faults again, and the
+ * thread never makes progress again. (That is not hypothetical: it is how
+ * the finalizer thread came to stop running.)
+ */
+void cvm_safepoint_arm_page_if_collecting(void);
 
 #endif /* CVM_SAFEPOINT_H */

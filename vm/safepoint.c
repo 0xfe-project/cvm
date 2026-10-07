@@ -46,6 +46,9 @@ static RtCond stw_cond;
 static _Atomic bool stw_ready = false;
 static _Atomic u32 stuck_reports = 0;
 
+/* Identity of the thread that currently holds the world, or zero. */
+static _Atomic(usize) stw_owner = 0;
+
 /* Threads waiting for another collector to finish. */
 static _Atomic u32 acquire_waiters = 0;
 
@@ -65,6 +68,13 @@ void cvm_safepoint_init(void) {
         rt_fatal(STR_LITERAL("could not create the safepoint synchroniser"));
     }
     atomic_store(&cvm_safepoint_requested, false);
+
+    /*
+     * Try to install the trap handler. A refusal is not fatal: polling
+     * works everywhere, so a platform that cannot do traps collects with a
+     * branch in the poll rather than not collecting.
+     */
+    cvm_safepoint_trap_init();
 }
 
 static bool ensure_ready(void) {
@@ -193,6 +203,14 @@ bool cvm_safepoint_acquire(void) {
 
     atomic_store_explicit(&cvm_safepoint_requested, true, memory_order_release);
 
+    /*
+     * With trap mode the flag alone is not enough: a thread that is polling
+     * its trap cell never looks at it. Arming the pages is what makes those
+     * polls fault. Both are done because a thread that has no trap page
+     * still polls the flag.
+     */
+    cvm_safepoint_trap_arm_all();
+
     /* Wait for the others. cond_wait releases the mutex, which is what
      * lets a thread park while we are waiting. */
     while (!all_others_parked(self)) {
@@ -210,6 +228,8 @@ bool cvm_safepoint_acquire(void) {
         }
     }
 
+    atomic_store_explicit(&stw_owner, (usize)self->id, memory_order_release);
+
     rt_mutex_unlock(&stw_mutex);
     return true;
 }
@@ -219,9 +239,33 @@ void cvm_safepoint_release(void) {
         return;
     }
 
+    atomic_store_explicit(&stw_owner, 0, memory_order_release);
+
     rt_mutex_lock(&stw_mutex);
+
+    /* Disarm before clearing the flag: a thread that faulted and has not
+     * yet parked must find its page readable when it retries the load. */
+    cvm_safepoint_trap_disarm_all();
+
     atomic_store_explicit(&cvm_safepoint_requested, false, memory_order_release);
     rt_cond_broadcast(&stw_cond);
+    rt_mutex_unlock(&stw_mutex);
+}
+
+void cvm_safepoint_arm_page_if_collecting(void) {
+    if (!atomic_load(&stw_ready)) {
+        return;
+    }
+
+    CvmThreadNode* node = cvm_thread_node();
+    if (node == NULL || node->trap == NULL) {
+        return;
+    }
+
+    rt_mutex_lock(&stw_mutex);
+    if (atomic_load_explicit(&cvm_safepoint_requested, memory_order_acquire)) {
+        rt_trap_page_arm(node->trap);
+    }
     rt_mutex_unlock(&stw_mutex);
 }
 
@@ -232,6 +276,18 @@ void cvm_safepoint_release(void) {
 void cvm_safepoint_park(void) {
     CvmThreadNode* node = cvm_thread_node();
     if (node == NULL || !atomic_load(&stw_ready)) {
+        return;
+    }
+
+    /*
+     * The thread holding the world must never wait for the world to be
+     * given back. In polling mode it cannot reach here, because the poll
+     * is what it is doing; in trap mode it could, if it happened to touch
+     * an armed page — its own, or one it had just armed. Returning
+     * immediately is both the correct answer and the one that keeps a
+     * mistake from becoming a deadlock with no output.
+     */
+    if (atomic_load_explicit(&stw_owner, memory_order_acquire) == (usize)node->id) {
         return;
     }
 

@@ -48,12 +48,37 @@ export function sanitizerFlags({ asan, tsan }) {
  * strict, and a benign-looking entry in the allowlist is how a real libc
  * dependency gets in unnoticed later.
  */
-const FREESTANDING_BASE = [
-    ...COMMON,
-    "-ffreestanding",
-    "-nostdinc",
-    "-fno-stack-protector",
-];
+/*
+ * Trap-based safepoints, where the platform supports them and the build
+ * allows them.
+ *
+ * The poll becomes a load from a per-thread page instead of a flag check:
+ * one instruction, no branch, and nothing for the compiler to reorder
+ * around. It needs a signal handler and a per-architecture trampoline.
+ *
+ * Off in two cases, for two different reasons:
+ *
+ *   Windows — no trampoline, so the collector polls. The mechanism is
+ *   portable C plus per-architecture assembly, and the assembly is what is
+ *   missing there.
+ *
+ *   Under a sanitizer — asan and tsan install their own SIGSEGV handlers
+ *   and expect to see every fault. A trap fault is deliberately handled
+ *   and resumed, which the sanitizer runtime does not expect, and the
+ *   observed result is a hang before the program prints anything. The
+ *   polling mode is what the sanitizer configurations exercise, which
+ *   means both modes are covered across the matrix: traps in the plain
+ *   debug and release runs, polling under asan and tsan.
+ */
+function safepointTrapFlags(opts) {
+    if (process.platform === "win32" || opts.asan || opts.tsan) return [];
+    return ["-DCVM_SAFEPOINT_TRAPS"];
+}
+
+/** Flags shared by both flavors, before the flavor-specific ones. */
+function commonFor(opts) {
+    return [...COMMON, ...safepointTrapFlags(opts)];
+}
 
 /**
  * Build the include path list.
@@ -82,8 +107,10 @@ export function includeFlags(root, flavor) {
 export function flagsFor({ flavor, opts, toolchain, root, extra = [] }) {
     const base =
         flavor === "freestanding"
-            ? [...FREESTANDING_BASE, ...freestandingInclude(toolchain.cc, toolchain.isClang)]
-            : [...COMMON];
+            ? [...commonFor(opts), "-ffreestanding", "-nostdinc",
+               "-fno-stack-protector",
+               ...freestandingInclude(toolchain.cc, toolchain.isClang)]
+            : commonFor(opts);
 
     return [
         ...base,

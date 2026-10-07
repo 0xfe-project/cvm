@@ -101,9 +101,29 @@ bool cvm_thread_attach(void) {
     atomic_store(&node->parked, false);
     node->next = NULL;
 
+    /*
+     * Every field, including the ones only one build configuration uses.
+     * The node comes from rt_mem_alloc, so anything not written here is
+     * whatever the allocator last had — which is how `trap` came to be a
+     * non-null pointer to nothing in the configuration that does not use
+     * it. Nothing read it there, but an uninitialised field is a bug
+     * waiting for a build that does.
+     */
+    node->trap = NULL;
+    node->safepoint_resume_pc = 0;
+
     /* Publish to TLS before the registry, so the thread can use its own
      * context the moment attach returns. */
     cvm_tls_ctx = &node->ctx;
+
+    /*
+     * The trap page has to exist before anything polls, because in trap
+     * mode the poll *is* a load through this thread's cell — and would
+     * fault on a null one. It is created here rather than later precisely
+     * so that the poll below has somewhere to read. (It did not, once, and
+     * the result was a crash inside the registration path.)
+     */
+    cvm_safepoint_trap_attach(node);
 
     cvm_threads_lock_write();
     node->next = registry_head;
@@ -122,6 +142,7 @@ bool cvm_thread_attach(void) {
      * no thread ever waits on the safepoint mutex while holding the
      * registry lock. See the lock-order note in vm/safepoint.c.
      */
+    cvm_safepoint_arm_page_if_collecting();
     cvm_safepoint_poll();
 
     /*
@@ -176,6 +197,8 @@ void cvm_thread_detach(void) {
     cvm_threads_unlock_write();
 
     atomic_fetch_sub(&registry_count, 1u);
+
+    cvm_safepoint_trap_detach(node);
 
     /* A collector waiting for this thread would otherwise sit out its
      * whole timeout before re-checking the registry. */

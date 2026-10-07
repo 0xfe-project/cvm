@@ -46,9 +46,18 @@ function clean() {
     ui.log("cleaned build/");
 }
 
-/** Compile every .c under a directory tree with one flag flavor. */
+/**
+ * Compile every source under a directory tree with one flag flavor.
+ *
+ * `.S` is included because the safepoint trampoline has to be assembly:
+ * it runs on a stack the faulting code was using, at a point where no
+ * compiler-generated prologue has run, so there is nothing for a C
+ * function to save and restore. The `.S` spelling means the file is run
+ * through the preprocessor first, which is how a single file can cover
+ * two architectures and three platforms.
+ */
 function compileTree({ dir, flavor, toolchain, verbose }) {
-    const srcs = collect(dir, [".c"]);
+    const srcs = collect(dir, [".c", ".S"]);
     const objs = [];
 
     for (const src of srcs) {

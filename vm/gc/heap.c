@@ -254,9 +254,12 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
         cvm_grey_packet_init(&heap->mark.packets[i], CVM_GREY_PACKET_REFLIST);
     }
 
-    cvm_grey_list_init(&heap->mark.empty);
-    cvm_grey_list_init(&heap->mark.full);
-    cvm_grey_list_init(&heap->mark.found_weak_refs);
+    if (!cvm_grey_list_init(&heap->mark.empty) ||
+        !cvm_grey_list_init(&heap->mark.full) ||
+        !cvm_grey_list_init(&heap->mark.found_weak_refs)) {
+        cvm_heap_destroy(heap);
+        return false;
+    }
 
     cvm_grey_list_push_all(&heap->mark.empty, heap->mark.packets, heap->mark.packets,
                            heap->mark.packet_count);

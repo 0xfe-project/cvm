@@ -36,9 +36,17 @@ export function link({ objs, out, toolchain, flags = [], libs = [], verbose, ui 
     return out;
 }
 
-/** Object path for a source file under build/obj/<config>/<flavor>/. */
+/**
+ * Object path for a source file under build/obj/<config>/<flavor>/.
+ *
+ * The extension is kept rather than replaced: `foo.c` and `foo.S` are two
+ * different translation units, and mapping both to `foo.o` means one
+ * silently overwrites the other. That is exactly what happened to the
+ * safepoint trampoline, whose assembly and C halves share a stem — the
+ * link failed with an undefined symbol while the build reported success.
+ */
 export function objectPath({ root, buildDir, config, flavor, src }) {
-    const rel = path.relative(root, src).replace(/\.c$/, ".o");
+    const rel = path.relative(root, src) + ".o";
     return path.join(buildDir, "obj", config, flavor, rel);
 }
 

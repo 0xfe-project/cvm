@@ -331,6 +331,99 @@ void rt_rwlock_unlock_read(RtRwlock* l);
 void rt_rwlock_unlock_write(RtRwlock* l);
 
 /* ------------------------------------------------------------------ */
+/* trap pages                                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A page that can be made inaccessible, used as a safepoint signal.
+ *
+ * The trick it exists for: instead of generated code polling a flag and
+ * branching, it loads from this page. While the page is armed a load
+ * faults, and the fault handler stops the thread. So a safepoint costs one
+ * load in the common case, and there is no branch and nothing for the
+ * compiler to reorder around.
+ *
+ * The page's contents are irrelevant; the page itself is the signal. That
+ * is why arming and disarming are the only operations.
+ *
+ * Address-space note: a released page is never unmapped and returned to
+ * the system. Generated code is allowed to cache the cell's address in a
+ * register or spill it across a call, and a stale address to an unmapped
+ * page would fault in a way the handler cannot distinguish from a real
+ * one. Disarmed pages are recycled through a free list instead. This
+ * matters less than it does in the reference — which has to survive a
+ * continuation resuming on a different thread — but the reasoning holds
+ * for any hoisted load, and the cost is one page per thread that ever
+ * existed only if threads come and go in large numbers.
+ */
+/*
+ * An incomplete type rather than a type-erased pointer: there is exactly
+ * one kind of thing this can be, so the compiler can say so.
+ */
+typedef struct RtTrapPage RtTrapPage;
+
+/* Create a page, disarmed. Returns NULL on failure. */
+RtTrapPage* rt_trap_page_create(void);
+
+/* Make loads through the page fault. */
+void rt_trap_page_arm(RtTrapPage* page);
+
+/* Make loads through the page succeed. */
+void rt_trap_page_disarm(RtTrapPage* page);
+
+/* Return the page for reuse. Never unmaps it; see above. */
+void rt_trap_page_release(RtTrapPage* page);
+
+/* The address to poll: loading through this pointer faults when armed. */
+opaque_mut rt_trap_page_cell(RtTrapPage* page);
+
+/* ------------------------------------------------------------------ */
+/* fault handling                                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Called when a trap page is read while armed.
+ *
+ * `context` is the platform's saved machine state for the faulting
+ * thread, opaque to the caller. `fault_address` is what was read.
+ *
+ * Returning true means the fault was handled and the faulting instruction
+ * should be retried; returning false passes the fault on, so a genuine
+ * segmentation fault is still reported as one.
+ */
+typedef bool (*RtTrapFaultFn)(opaque_mut context, u64 fault_address, opaque_mut user);
+
+/*
+ * Install the handler. Returns false if it could not be installed, in
+ * which case trap-based safepoints cannot be used and the caller should
+ * fall back to polling.
+ */
+bool rt_trap_handler_install(RtTrapFaultFn on_fault, opaque_mut user);
+
+/*
+ * The faulting instruction's address, and a way to change where execution
+ * resumes.
+ *
+ * This is what makes the mechanism work without doing anything
+ * signal-unsafe: the handler does not stop the thread, it repoints the
+ * saved instruction pointer at a stub that does, and returns. The stub
+ * runs on the faulting thread's own stack in ordinary context, where
+ * taking a lock is allowed.
+ */
+u64 rt_trap_context_pc(opaque_mut context);
+void rt_trap_context_set_pc(opaque_mut context, u64 pc);
+
+/*
+ * Apple delivers a read of an inaccessible page to task-level Mach
+ * exception ports before turning it into a signal, and debuggers and some
+ * frameworks install such ports. Clearing them restores the signal path.
+ *
+ * Called before arming, because a library can install a port after
+ * startup. A no-op elsewhere.
+ */
+void rt_trap_reset_platform_exception_ports(void);
+
+/* ------------------------------------------------------------------ */
 /* process                                                             */
 /* ------------------------------------------------------------------ */
 

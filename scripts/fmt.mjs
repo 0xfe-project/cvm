@@ -23,6 +23,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CHECK = process.argv.includes("--check");
 
 const SOURCE_DIRS = ["rt", "vm", "tests"];
+/* Assembly is not formatted: clang-format would reflow the
+ * instruction columns and the .S conditionals. */
 const EXTS = [".c", ".h"];
 const SKIP_DIRS = new Set(["build", "refs", "node_modules", ".git"]);
 

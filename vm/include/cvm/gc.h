@@ -203,23 +203,57 @@ void cvm_safepoint_park(void);
 /*
  * The safepoint poll, inlined into generated code.
  *
- * One relaxed-in-practice atomic load and a well-predicted branch in the
- * common case. The acquire ordering is what makes everything the
- * collecting thread did before setting the flag visible to this thread,
- * which matters because the flag is also the handshake for "stop touching
- * the heap".
+ * Two mechanisms, chosen at build time. Nothing outside this function and
+ * the collector's arming code knows which is in use.
  *
- * Poll placement is a frontend obligation: at every loop back edge and
- * every function entry. A loop with no poll can keep a collection waiting
- * indefinitely; that is what cvm_safepoint_stuck_reports exists to
- * diagnose.
+ * Poll placement is a frontend obligation for loop back edges — a loop with
+ * no poll can keep a collection waiting indefinitely, which is what
+ * cvm_safepoint_stuck_reports exists to diagnose. Function entries are
+ * covered already, because cvm_frame_push polls.
  */
+#if defined(CVM_SAFEPOINT_TRAPS) && !defined(_WIN32)
+
+/*
+ * The cell to poll, in its own TLS slot. The poll reads it on every
+ * function entry, so one segment-offset load beats a load through the
+ * context, which would be a second access and a heap one.
+ */
+extern __thread opaque_mut cvm_tls_trap_cell;
+
 CVM_INLINE void cvm_safepoint_poll(void) {
+    /*
+     * Load from the trap cell. While the collector has the page armed this
+     * faults, and the fault handler redirects execution to a stub that
+     * parks the thread. The value read is irrelevant — the page is the
+     * signal — which is why it is discarded.
+     *
+     * One load and no branch. There is also nothing for the compiler to
+     * reorder around: the load cannot be hoisted past a collection,
+     * because the collection is what makes it fault.
+     *
+     * A thread that has not registered cannot be running generated code,
+     * so the cell is valid wherever this is reached. The attach path makes
+     * that true by refusing to register a thread it cannot give a page to.
+     */
+    (void)*(volatile u8*)cvm_tls_trap_cell;
+}
+
+#else
+
+CVM_INLINE void cvm_safepoint_poll(void) {
+    /*
+     * One relaxed-in-practice atomic load and a well-predicted branch. The
+     * acquire ordering is what makes everything the collecting thread did
+     * before setting the flag visible to this thread, which matters because
+     * the flag is also the handshake for "stop touching the heap".
+     */
     if (CVM_UNLIKELY(
             atomic_load_explicit(&cvm_safepoint_requested, memory_order_acquire))) {
         cvm_safepoint_park();
     }
 }
+
+#endif
 
 /* ------------------------------------------------------------------ */
 /* GCFrame: the precise root stack                                     */

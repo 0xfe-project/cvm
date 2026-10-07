@@ -42,13 +42,35 @@
  * possible for all packets to be held at once, and the alternative to
  * waiting is to drop work.
  */
+CVM_NOINLINE void report_packet_state(CvmHeap* heap, str what);
+
 static CvmGreyPacket* take_empty_packet(CvmHeap* heap) {
-    for (;;) {
+    /*
+     * Bounded rather than unbounded. Every packet can legitimately be in
+     * flight at once — each marker holds one to trace into and one to fill
+     * — so this can wait. It cannot legitimately wait forever: packets come
+     * back as markers finish with them.
+     *
+     * If it does wait forever, the cause is a packet that was taken and
+     * never returned, and the process wedges with no output at all. A GC
+     * that hangs is the worst way for it to fail, so the count is bounded
+     * and the state is reported.
+     */
+    u64 started = rt_time_millis();
+    for (u64 spin = 0;; spin++) {
         CvmGreyPacket* packet =
             cvm_grey_list_pop(&heap->mark.empty, heap->mark.packets);
         if (packet != NULL) {
             return packet;
         }
+
+        if ((spin & 0xfffff) == 0 && spin != 0) {
+            if (rt_time_millis() - started >= 2000) {
+                report_packet_state(heap, STR_LITERAL("no empty grey packet"));
+                rt_fatal(STR_LITERAL("grey packets are lost, not busy"));
+            }
+        }
+
         rt_thread_yield();
     }
 }
@@ -58,6 +80,18 @@ static CvmGreyPacket* try_take_full_packet(CvmHeap* heap) {
 }
 
 static void give_empty_packet(CvmHeap* heap, CvmGreyPacket* packet) {
+    /*
+     * Reset the kind on the way out. A packet that served as an array
+     * slice comes back with its type still saying so, and a packet whose
+     * type says "slice" but whose contents are a list of objects is worse
+     * than wrong: it is read as a base pointer and a count, so the objects
+     * that were pushed into it are silently not traced. That is a missing
+     * mark, and a missing mark is how a live object gets collected.
+     *
+     * Only the array-split path sets the other type, and it sets it
+     * immediately before pushing, so clearing here is enough.
+     */
+    packet->type = (u16)CVM_GREY_PACKET_REFLIST;
     cvm_grey_list_push(&heap->mark.empty, heap->mark.packets, packet);
 }
 
@@ -465,6 +499,78 @@ void cvm_mark(CvmHeap* heap, bool scale) {
      */
 }
 
+/*
+ * Say how the packets are distributed, and name any that are on no list.
+ *
+ * Marking cannot finish while a packet is unaccounted for, so a packet that
+ * was taken and never returned wedges it. Naming the index is the
+ * difference between a diagnosable bug and "marking stopped working
+ * sometimes": the index locates it in the packet array, and from there in
+ * the code that handed it out.
+ *
+ * Builds the set of reachable packets by walking each list, which makes it
+ * quadratic. It runs only on the failure path, where the alternative is no
+ * information at all — and it does consume the lists, which is acceptable
+ * only because the caller is about to end the process.
+ */
+CVM_NOINLINE void report_packet_state(CvmHeap* heap, str what) {
+    u32 total = heap->mark.packet_count;
+
+    CVM_LOG_ERROR(m) {
+        fmt_str(&m.fmt, what);
+        fmt_lit(&m.fmt, ": empty=");
+        fmt_u32(&m.fmt, cvm_grey_list_size(&heap->mark.empty));
+        fmt_lit(&m.fmt, " full=");
+        fmt_u32(&m.fmt, cvm_grey_list_size(&heap->mark.full));
+        fmt_lit(&m.fmt, " weak=");
+        fmt_u32(&m.fmt, cvm_grey_list_size(&heap->mark.found_weak_refs));
+        fmt_lit(&m.fmt, " total=");
+        fmt_u32(&m.fmt, total);
+    }
+
+#if defined(CVM_DEBUG)
+    u8 on_a_list[1024];
+    u32 reportable = (total < sizeof(on_a_list)) ? total : 0;
+    if (reportable == 0) {
+        return;
+    }
+
+    for (u32 i = 0; i < reportable; i++) {
+        on_a_list[i] = 0;
+    }
+
+    for (u32 which = 0; which < 3; which++) {
+        CvmGreyList* grey = (which == 0)   ? &heap->mark.empty
+                            : (which == 1) ? &heap->mark.full
+                                           : &heap->mark.found_weak_refs;
+        for (;;) {
+            CvmGreyPacket* packet = cvm_grey_list_pop(grey, heap->mark.packets);
+            if (packet == NULL) {
+                break;
+            }
+            u32 index = (u32)(packet - heap->mark.packets);
+            if (index < reportable) {
+                on_a_list[index] = 1;
+            }
+        }
+    }
+
+    for (u32 i = 0; i < reportable; i++) {
+        if (!on_a_list[i]) {
+            CVM_LOG_ERROR(m) {
+                fmt_lit(&m.fmt, "  packet ");
+                fmt_u32(&m.fmt, i);
+                fmt_lit(&m.fmt, " is on no list (type=");
+                fmt_u32(&m.fmt, (u32)heap->mark.packets[i].type);
+                fmt_lit(&m.fmt, " size=");
+                fmt_u32(&m.fmt, (u32)heap->mark.packets[i].size);
+                fmt_lit(&m.fmt, ")");
+            }
+        }
+    }
+#endif
+}
+
 bool cvm_mark_is_done(CvmHeap* heap) {
     u32 empty = cvm_grey_list_size(&heap->mark.empty);
     u32 weak = cvm_grey_list_size(&heap->mark.found_weak_refs);
@@ -472,8 +578,28 @@ bool cvm_mark_is_done(CvmHeap* heap) {
 }
 
 void cvm_mark_until_done(CvmHeap* heap) {
+    /*
+     * Bounded by time rather than by iteration count: a marker that can
+     * never conclude is worse than one that says why, and the number of
+     * yields it takes to get there depends on how slow the machine is —
+     * under a sanitizer, millions of yields can pass in a second.
+     */
+    u64 last_progress_at = rt_time_millis();
+    u32 last_accounted = 0;
+
     while (!cvm_mark_is_done(heap)) {
         cvm_mark(heap, true);
+
+        u32 accounted = cvm_grey_list_size(&heap->mark.empty) +
+                        cvm_grey_list_size(&heap->mark.found_weak_refs);
+        if (accounted != last_accounted) {
+            last_accounted = accounted;
+            last_progress_at = rt_time_millis();
+        } else if (rt_time_millis() - last_progress_at >= 2000) {
+            report_packet_state(heap, STR_LITERAL("marking made no progress"));
+            rt_fatal(STR_LITERAL("marking cannot complete"));
+        }
+
         if (!cvm_mark_is_done(heap)) {
             /* Other markers have the work in flight; let them finish it
              * rather than spinning on the packet list. */

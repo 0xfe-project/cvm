@@ -76,6 +76,22 @@ typedef struct CvmThreadNode {
      */
     CvmAllocator allocator;
     CvmLargeAllocator large_allocator;
+
+    /* --- trap-based safepoints --- */
+
+    /*
+     * This thread's trap page, or NULL when trap mode is not in use. The
+     * page is what the thread's safepoint poll reads; the collector makes
+     * it inaccessible to stop the thread.
+     */
+    RtTrapPage* trap;
+
+    /*
+     * Where the faulting instruction was, recorded by the fault handler so
+     * the trampoline knows where to resume. Only meaningful between the
+     * fault and the resumption.
+     */
+    u64 safepoint_resume_pc;
 } CvmThreadNode;
 
 /* ------------------------------------------------------------------ */

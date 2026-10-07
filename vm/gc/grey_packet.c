@@ -1,23 +1,32 @@
 /*
  * vm/gc/grey_packet.c
  *
- * Grey packets and lists. See vm/gc/grey_packet.h for the shape and, in
- * particular, why the list head is one word.
+ * Grey packets and lists. See vm/gc/grey_packet.h for why the lists are
+ * mutex-guarded rather than lock-free.
  *
- * The compare-exchange loops here follow the reference. The subtle part
- * is not the loop — it is that every mutation of the list must update the
- * head index and the total count in the same exchange, because a reader
- * that sees a consistent pair is entitled to conclude that marking is
- * finished when the count reaches zero.
+ * The encoding is the reference's and is worth stating once, because the
+ * link word carries more than a link:
+ *
+ *   packet indices are stored offset by two, so 0 can mean "no packets at
+ *   all" and 1 can mean "the list ends here";
+ *
+ *   a packet's link is either 0, meaning "the next packet is the adjacent
+ *   one" — which is how a contiguous run handed over in one push is
+ *   represented with no per-packet writes — or a whole head word, meaning
+ *   the rest of the list from there on;
+ *
+ *   the head word also carries the count of packets from the head onwards,
+ *   so a pop can restore the list's size without walking it. That is why
+ *   the count lives in the word rather than in a field of its own: it has
+ *   to travel with the link.
  */
 
 #include "gc/grey_packet.h"
 
-#include <stdatomic.h>
-
 #include "base/assert.h"
 #include "base/types.h"
 #include "cvm/gc.h"
+#include "rt.h"
 
 /* ------------------------------------------------------------------ */
 /* packets                                                             */
@@ -46,10 +55,8 @@ void cvm_grey_packet_move_items(CvmGreyPacket* src, CvmGreyPacket* dst, u32 coun
     cvm_assert(dst->size + count < CVM_GREY_PACKET_ITEMS);
     cvm_assert(src->size >= count);
 
-    /* Copy by hand rather than memcpy: memcpy is a libc symbol and this
-     * is freestanding code. The compiler turns the loop into the same
-     * thing for a known count, and the count is bounded by the packet
-     * size either way. */
+    /* Written out rather than memcpy: memcpy is a libc symbol and this is
+     * freestanding code. */
     u32 dst_start = dst->size;
     u32 src_start = src->size - count;
     for (u32 i = 0; i < count; i++) {
@@ -78,52 +85,56 @@ static CvmGreyPacket* packet_from_index(CvmGreyPacket* packets_start, u32 index)
 /* lists                                                               */
 /* ------------------------------------------------------------------ */
 
-void cvm_grey_list_init(CvmGreyList* list) {
-    atomic_store_explicit(&list->head, cvm_grey_list_empty(), memory_order_relaxed);
+bool cvm_grey_list_init(CvmGreyList* list) {
+    if (!rt_mutex_init(&list->lock)) {
+        return false;
+    }
+    list->head = cvm_grey_list_empty();
+    list->ready = true;
+    return true;
 }
 
 u32 cvm_grey_list_size(CvmGreyList const* list) {
-    u64 head = atomic_load_explicit(&list->head, memory_order_relaxed);
+    CvmGreyList* mutable_list = (CvmGreyList*)list;
+    if (!mutable_list->ready) {
+        return 0;
+    }
+
+    rt_mutex_lock(&mutable_list->lock);
     CvmGreyPacketRef ref;
-    ref.atom = head;
-    return u24_to_u32(ref.sep.size);
+    ref.atom = mutable_list->head;
+    u32 count = u24_to_u32(ref.sep.size);
+    rt_mutex_unlock(&mutable_list->lock);
+    return count;
 }
 
 void cvm_grey_list_push(CvmGreyList* list, CvmGreyPacket* packets_start,
                         CvmGreyPacket* packet) {
     u32 index = packet_index_of(packets_start, packet);
-    u32 times_popped =
-        atomic_load_explicit(&packet->times_popped, memory_order_relaxed);
 
-    u64 head = atomic_load_explicit(&list->head, memory_order_relaxed);
-    u64 next_value;
+    rt_mutex_lock(&list->lock);
 
-    for (;;) {
-        CvmGreyPacketRef h;
-        h.atom = head;
+    CvmGreyPacketRef head;
+    head.atom = list->head;
 
-        CvmGreyPacketRef n;
-        n.sep.idx = u24_from_u32(index);
-        n.sep.size = u24_add(h.sep.size, 1);
-        n.sep.times_popped = (u16)times_popped;
+    CvmGreyPacketRef next;
+    next.sep.idx = u24_from_u32(index);
+    next.sep.size = u24_add(head.sep.size, 1);
+    next.sep._reserved = 0;
 
-        /* If the list was empty, this packet becomes the whole list and
-         * is its own end. Otherwise it points at what was the head, with
-         * that head's own link and count carried along. */
-        if (u24_to_u32(h.sep.idx) == CVM_GREYLIST_LAST) {
-            packet->next.atom = cvm_grey_list_empty();
-        } else {
-            packet->next.atom = head;
-        }
-
-        next_value = n.atom;
-        if (atomic_compare_exchange_weak_explicit(&list->head, &head, next_value,
-                                                  memory_order_release,
-                                                  memory_order_relaxed)) {
-            return;
-        }
-        /* head was refreshed by the failed exchange; rebuild and retry */
+    /*
+     * If the list was empty, this packet is the whole list and is its own
+     * end. Otherwise it points at what was the head, carrying that head's
+     * own link and count along with it.
+     */
+    if (u24_to_u32(head.sep.idx) == CVM_GREYLIST_LAST) {
+        packet->next.atom = cvm_grey_list_empty();
+    } else {
+        packet->next.atom = head.atom;
     }
+
+    list->head = next.atom;
+    rt_mutex_unlock(&list->lock);
 }
 
 void cvm_grey_list_push_all(CvmGreyList* list, CvmGreyPacket* packets_start,
@@ -131,78 +142,65 @@ void cvm_grey_list_push_all(CvmGreyList* list, CvmGreyPacket* packets_start,
     cvm_assert(count > 0);
 
     u32 index = packet_index_of(packets_start, first);
-    u32 times_popped = atomic_load_explicit(&first->times_popped, memory_order_relaxed);
     CvmGreyPacket* last = first + (count - 1);
 
-    u64 head = atomic_load_explicit(&list->head, memory_order_relaxed);
-    u64 next_value;
+    rt_mutex_lock(&list->lock);
 
-    for (;;) {
-        CvmGreyPacketRef h;
-        h.atom = head;
+    CvmGreyPacketRef head;
+    head.atom = list->head;
 
-        CvmGreyPacketRef n;
-        n.sep.idx = u24_from_u32(index);
-        n.sep.size = u24_add(h.sep.size, (i32)count);
-        n.sep.times_popped = (u16)times_popped;
+    CvmGreyPacketRef next;
+    next.sep.idx = u24_from_u32(index);
+    next.sep.size = u24_add(head.sep.size, (i32)count);
+    next.sep._reserved = 0;
 
-        /* Only the last packet of the run needs a link: the rest are
-         * found by adding one to the index, which is why a run has to be
-         * contiguous in the packet array. */
-        if (u24_to_u32(h.sep.idx) == CVM_GREYLIST_LAST) {
-            last->next.atom = cvm_grey_list_empty();
-        } else {
-            last->next.atom = head;
-        }
-
-        next_value = n.atom;
-        if (atomic_compare_exchange_weak_explicit(&list->head, &head, next_value,
-                                                  memory_order_release,
-                                                  memory_order_relaxed)) {
-            return;
-        }
+    /*
+     * Only the last packet of the run needs a link: the rest are found by
+     * adding one to the index, which is why a run has to be contiguous in
+     * the packet array.
+     */
+    if (u24_to_u32(head.sep.idx) == CVM_GREYLIST_LAST) {
+        last->next.atom = cvm_grey_list_empty();
+    } else {
+        last->next.atom = head.atom;
     }
+
+    list->head = next.atom;
+    rt_mutex_unlock(&list->lock);
 }
 
 CvmGreyPacket* cvm_grey_list_pop(CvmGreyList* list, CvmGreyPacket* packets_start) {
-    u64 head = atomic_load_explicit(&list->head, memory_order_acquire);
+    rt_mutex_lock(&list->lock);
 
-    for (;;) {
-        CvmGreyPacketRef h;
-        h.atom = head;
+    CvmGreyPacketRef head;
+    head.atom = list->head;
 
-        u32 index = u24_to_u32(h.sep.idx);
+    u32 index = u24_to_u32(head.sep.idx);
 
-        /* An empty list and the end sentinel are different states; only
-         * the first means "nothing here". */
-        cvm_assert(index != CVM_GREYLIST_NEXT);
-        if (index == CVM_GREYLIST_LAST) {
-            return NULL;
-        }
-
-        CvmGreyPacket* packet = packet_from_index(packets_start, index);
-
-        u64 next = packet->next.atom;
-        u64 next_value;
-
-        if (next != 0) {
-            /* The packet holds the rest of the list. */
-            next_value = next;
-        } else {
-            /* No link means the next packet is the adjacent one, and the
-             * count drops by one. */
-            CvmGreyPacketRef n;
-            n.sep.idx = u24_add(h.sep.idx, 1);
-            n.sep.size = u24_add(h.sep.size, -1);
-            n.sep.times_popped = h.sep.times_popped;
-            next_value = n.atom;
-        }
-
-        if (atomic_compare_exchange_weak_explicit(&list->head, &head, next_value,
-                                                  memory_order_acquire,
-                                                  memory_order_acquire)) {
-            atomic_fetch_add_explicit(&packet->times_popped, 1, memory_order_relaxed);
-            return packet;
-        }
+    /* An empty list and the end sentinel are different states; only the
+     * first means "nothing here". */
+    cvm_assert(index != CVM_GREYLIST_NEXT);
+    if (index == CVM_GREYLIST_LAST) {
+        rt_mutex_unlock(&list->lock);
+        return NULL;
     }
+
+    CvmGreyPacket* packet = packet_from_index(packets_start, index);
+    u64 next = packet->next.atom;
+
+    if (next != 0) {
+        /* The packet holds the rest of the list. */
+        list->head = next;
+    } else {
+        /* No link means the next packet is the adjacent one, and the count
+         * drops by one. */
+        CvmGreyPacketRef n;
+        n.sep.idx = u24_add(head.sep.idx, 1);
+        n.sep.size = u24_add(head.sep.size, -1);
+        n.sep._reserved = 0;
+        list->head = n.atom;
+    }
+
+    rt_mutex_unlock(&list->lock);
+    return packet;
 }
