@@ -13,9 +13,40 @@ oracles, the stress patterns, and what is borrowed from other collectors.
 
 ## Status
 
-Batch 1 of the port is complete: base types, integer math, heap geometry,
-GC metadata, the object-metadata bytemap, and the lock-free block lists.
-No allocator, no marker, no collector yet.
+The collector works end to end: a program allocates, collections reclaim,
+and `tests/e2e/test_smoke.c` runs a whole program through the public
+headers. What is in place:
+
+    base types, integer math, heap geometry, GC metadata, the bytemap
+    the heap, the block allocator, the per-thread allocator, large objects
+    grey packets, the precise marker, weak references, the sweeper
+    the thread registry, the safepoint synchroniser, the GC worker pool
+    external handles, the global root table, the finalizer thread
+    the entry points, and a smoke test
+
+What is not: Windows. The platform layer is POSIX-shaped; the trap
+trampoline has no Windows branch, so that build would poll instead, and
+nothing in `rt/pal/` is written for it yet. Evacuation is also absent —
+sweeping reclaims lines and blocks and leaves the fragmentation that
+opportunistic evacuation would address.
+
+## Two safepoint mechanisms
+
+Which one a build uses is a compile-time choice, so that the poll can be a
+load rather than a load and a branch:
+
+  **polling**   the safepoint is a flag the thread checks. Portable, needs
+                nothing from the platform, and is the baseline.
+
+  **traps**     the safepoint is a load from a per-thread page the
+                collector makes inaccessible. One load, no branch, and
+                nothing for the compiler to reorder around. Needs a signal
+                handler and a per-architecture trampoline.
+
+Traps are used on POSIX and off under a sanitizer, which installs its own
+`SIGSEGV` handling and does not expect a fault that is deliberately handled
+and resumed. Both mechanisms are therefore exercised: traps in the plain
+debug and release runs, polling under asan and tsan.
 
 ## Layout
 
