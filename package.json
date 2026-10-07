@@ -9,14 +9,13 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "build:debug": "node scripts/build.mjs --debug",
     "clean": "node scripts/build.mjs --clean",
     "test": "node scripts/build.mjs --test && node scripts/run-tests.mjs",
     "test:asan": "node scripts/build.mjs --test --asan && node scripts/run-tests.mjs",
     "test:tsan": "node scripts/build.mjs --test --tsan && node scripts/run-tests.mjs",
-    "verify": "node scripts/build.mjs --verify-freestanding",
+    "test:release": "node scripts/build.mjs --test --release && node scripts/run-tests.mjs",
     "fmt": "node scripts/fmt.mjs",
     "fmt:check": "node scripts/fmt.mjs --check",
-    "ci": "pnpm run fmt:check && pnpm run build && pnpm run verify && pnpm run test"
+    "ci": "node scripts/ci.mjs"
   }
 }
