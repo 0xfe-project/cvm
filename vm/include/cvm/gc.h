@@ -19,6 +19,8 @@
 
 /* rt/ is on the -I list, so this resolves without fragile relative
  * traversal. */
+#include <stdatomic.h>
+
 #include "base/types.h"
 
 /* ------------------------------------------------------------------ */
@@ -139,6 +141,40 @@ typedef enum CvmThreadState {
 
 void cvm_thread_enter_unmanaged(void);
 void cvm_thread_leave_unmanaged(void);
+
+/* ------------------------------------------------------------------ */
+/* Safepoints                                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Set by a thread that is collecting. Generated code polls it at
+ * function entries and loop back edges.
+ */
+extern _Atomic bool cvm_safepoint_requested;
+
+/* Out-of-line slow path: park until the collection finishes. */
+void cvm_safepoint_park(void);
+
+/*
+ * The safepoint poll, inlined into generated code.
+ *
+ * One relaxed-in-practice atomic load and a well-predicted branch in the
+ * common case. The acquire ordering is what makes everything the
+ * collecting thread did before setting the flag visible to this thread,
+ * which matters because the flag is also the handshake for "stop touching
+ * the heap".
+ *
+ * Poll placement is a frontend obligation: at every loop back edge and
+ * every function entry. A loop with no poll can keep a collection waiting
+ * indefinitely; that is what cvm_safepoint_stuck_reports exists to
+ * diagnose.
+ */
+CVM_INLINE void cvm_safepoint_poll(void) {
+    if (CVM_UNLIKELY(
+            atomic_load_explicit(&cvm_safepoint_requested, memory_order_acquire))) {
+        cvm_safepoint_park();
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* GCFrame: the precise root stack                                     */

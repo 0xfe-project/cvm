@@ -27,9 +27,11 @@
 #include <sys/types.h>
 #endif
 
+#include <errno.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "rt.h"
@@ -213,6 +215,38 @@ void rt_cond_destroy(RtCond* c) {
 
 void rt_cond_wait(RtCond* c, RtMutex* m) {
     (void)pthread_cond_wait(cond_of(c), mutex_of(m));
+}
+
+bool rt_cond_wait_timeout(RtCond* c, RtMutex* m, u64 timeout_ns) {
+    /*
+     * pthread_cond_timedwait takes an absolute deadline, and it times
+     * against CLOCK_REALTIME unless the condition variable was created
+     * with a monotonic clock attribute. glibc supports that attribute;
+     * macOS does not, so the portable spelling is a realtime deadline
+     * computed from the current realtime clock.
+     *
+     * A clock jump during the wait can therefore shorten or lengthen it.
+     * That is acceptable here: this wait exists to notice a thread that is
+     * not reaching a safepoint, so an imprecise timeout costs a
+     * mis-timed diagnostic, not a correctness problem.
+     */
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+        return false;
+    }
+
+    u64 secs = timeout_ns / 1000000000ull;
+    u64 nanos = timeout_ns % 1000000000ull;
+
+    deadline.tv_sec += (time_t)secs;
+    deadline.tv_nsec += (long)nanos;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_nsec -= 1000000000L;
+        deadline.tv_sec += 1;
+    }
+
+    int rc = pthread_cond_timedwait(cond_of(c), mutex_of(m), &deadline);
+    return rc == 0;
 }
 
 void rt_cond_signal(RtCond* c) {

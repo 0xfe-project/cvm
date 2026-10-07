@@ -124,6 +124,7 @@ const PROBE_HEADERS = [
     "log.h",
     "stats.h",
     "context.h",
+    "safepoint.h",
     "cvm/gc.h",
     "gc/layout.h",
     "gc/meta.h",

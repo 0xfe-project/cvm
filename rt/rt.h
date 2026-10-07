@@ -230,6 +230,21 @@ void rt_cond_destroy(RtCond* c);
 /* Releases `m` while waiting and reacquires it before returning. */
 void rt_cond_wait(RtCond* c, RtMutex* m);
 
+/*
+ * Wait until signalled, or until `timeout_ns` has passed.
+ *
+ * Returns true if it was signalled, false on timeout. The distinction
+ * matters for the collector: a thread that never reaches a safepoint
+ * would otherwise be waited for forever, with nothing to report.
+ *
+ * The timeout is relative rather than an absolute deadline, because the
+ * clock a condition variable times against is not the same everywhere:
+ * pthread_cond_timedwait defaults to CLOCK_REALTIME, and macOS has no way
+ * to change that, so a monotonic deadline could not be expressed
+ * portably.
+ */
+bool rt_cond_wait_timeout(RtCond* c, RtMutex* m, u64 timeout_ns);
+
 void rt_cond_signal(RtCond* c);
 void rt_cond_broadcast(RtCond* c);
 

@@ -17,6 +17,7 @@
 #include "base/types.h"
 #include "cvm/gc.h"
 #include "log.h"
+#include "safepoint.h"
 #include "rt.h"
 
 /* ------------------------------------------------------------------ */
@@ -85,6 +86,7 @@ bool cvm_thread_attach(void) {
     node->handle = rt_thread_self();
     node->id = rt_thread_id();
     atomic_store(&node->state, (u32)CVM_THREAD_MANAGED);
+    atomic_store(&node->parked, false);
     node->next = NULL;
 
     /* Publish to TLS before the registry, so the thread can use its own
@@ -97,6 +99,18 @@ bool cvm_thread_attach(void) {
     cvm_threads_unlock_write();
 
     atomic_fetch_add(&registry_count, 1u);
+
+    /*
+     * A collection may already be running, in which case this thread has
+     * to stop before it touches the heap. Polling here is what makes a
+     * thread that appears mid-collection participate instead of sailing
+     * through a heap that is being marked.
+     *
+     * Note the order: the registry lock is released before this point, so
+     * no thread ever waits on the safepoint mutex while holding the
+     * registry lock. See the lock-order note in vm/safepoint.c.
+     */
+    cvm_safepoint_poll();
 
     CVM_LOG_DEBUG(m) {
         fmt_lit(&m.fmt, "thread ");
@@ -135,6 +149,10 @@ void cvm_thread_detach(void) {
     cvm_threads_unlock_write();
 
     atomic_fetch_sub(&registry_count, 1u);
+
+    /* A collector waiting for this thread would otherwise sit out its
+     * whole timeout before re-checking the registry. */
+    cvm_safepoint_notify_thread_changed();
 
     /* Clear TLS before freeing: leaving a dangling context installed
      * would make any later use of the thread look registered. */

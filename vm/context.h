@@ -59,6 +59,13 @@ typedef struct CvmThreadNode {
      * thread it describes is still running.
      */
     _Atomic u32 state;
+
+    /*
+     * Set by the thread itself when it is stopped at a safepoint, cleared
+     * when it resumes. Read by the collecting thread while the parked
+     * thread is blocked, so it has to be atomic.
+     */
+    _Atomic bool parked;
 } CvmThreadNode;
 
 /* ------------------------------------------------------------------ */
