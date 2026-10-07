@@ -29,6 +29,11 @@ import { flagsFor } from "./flags.mjs";
  * so they are only whitelisted when the corresponding flag is on.
  */
 function allowedPrefixes(opts) {
+    /*
+     * cvm_/rt_ are a fallback for a symbol the runtime defines but that is
+     * not in the current object set (a file excluded from a build, say).
+     * The defined-symbol set is what does the real work.
+     */
     const base = ["cvm_", "rt_"];
     if (opts.asan) base.push("asan_", "sanitizer_", "sancov_");
     if (opts.tsan) base.push("tsan_", "sanitizer_", "sancov_");
@@ -72,26 +77,54 @@ function stripMachOSymbolNoise(sym) {
     return sym.replace(/^_+/, "");
 }
 
-/** Undefined symbols of an object that are not ours. */
-function foreignSymbols(nm, obj, opts, report) {
+/*
+ * Split nm's output into the symbols an object defines and the ones it
+ * leaves undefined.
+ *
+ * Lines look like "0000000000000000 T _name" or "                 U _name".
+ * The type letter is what distinguishes them.
+ */
+function symbolsOf(nm, obj) {
+    const defined = [];
+    const undefined_ = [];
+
+    for (const line of run(nm, [obj]).stdout.split("\n")) {
+        const m = line.match(/^\s*(?:[0-9a-fA-F]+\s+)?([A-Za-z])\s+(\S+)$/);
+        if (!m) continue;
+        const [, type, rawName] = m;
+        const name = stripMachOSymbolNoise(rawName);
+        if (type === "U") undefined_.push(name);
+        else defined.push(name);
+    }
+
+    return { defined, undefined: undefined_ };
+}
+
+/**
+ * Undefined symbols of an object that nothing in the runtime provides.
+ *
+ * The set of symbols defined by the runtime is built from the objects
+ * themselves rather than from a prefix convention. That matters: a vm
+ * object legitimately references symbols defined in another vm object
+ * (block_list_push, say), and a prefix list cannot tell those apart from a
+ * libc dependency. Comparing against what the runtime actually defines is
+ * both stricter and more accurate.
+ */
+function foreignSymbols(nm, obj, opts, runtimeDefines, report) {
     const allowed = allowedPrefixes(opts);
     const exceptions = PLATFORM_EXCEPTIONS[process.platform] ?? [];
 
-    return run(nm, ["-u", obj])
-        .stdout.split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .map((l) => stripMachOSymbolNoise(l.replace(/^U\s+/, "")))
-        .filter((s) => {
-            if (allowed.some((p) => s.startsWith(p))) return false;
+    return symbolsOf(nm, obj).undefined.filter((s) => {
+        if (runtimeDefines.has(s)) return false;
+        if (allowed.some((p) => s.startsWith(p))) return false;
 
-            const exception = exceptions.find((e) => e.symbol === s);
-            if (exception) {
-                if (report) report(exception);
-                return false;
-            }
-            return true;
-        });
+        const exception = exceptions.find((e) => e.symbol === s);
+        if (exception) {
+            if (report) report(exception);
+            return false;
+        }
+        return true;
+    });
 }
 
 /** Wrap text to a column, for readable build output. */
@@ -130,6 +163,8 @@ const PROBE_HEADERS = [
     "gc/meta.h",
     "gc/bytemap.h",
     "gc/heap.h",
+    "gc/block_range.h",
+    "gc/block_alloc.h",
     "gc/block_list.h",
 ];
 
@@ -176,9 +211,20 @@ export function checkFreestanding({
     const applied = new Map();
     const report = (exception) => applied.set(exception.symbol, exception);
 
+    const objects = [probeObj, ...runtimeObjs];
+
+    /* Everything the runtime provides, so that cross-object references
+     * inside vm/ and rt/ are not mistaken for external dependencies. */
+    const runtimeDefines = new Set();
+    for (const obj of objects) {
+        for (const name of symbolsOf(nm, obj).defined) {
+            runtimeDefines.add(name);
+        }
+    }
+
     const violations = [];
-    for (const obj of [probeObj, ...runtimeObjs]) {
-        const foreign = foreignSymbols(nm, obj, opts, report);
+    for (const obj of objects) {
+        const foreign = foreignSymbols(nm, obj, opts, runtimeDefines, report);
         if (foreign.length > 0) violations.push({ obj, foreign });
     }
 

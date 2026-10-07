@@ -63,6 +63,14 @@
 #define CVM_LARGE_OBJECT_MIN_BITS 13u
 #define CVM_LARGE_OBJECT_MIN_SIZE ((usize)1 << CVM_LARGE_OBJECT_MIN_BITS) /* 8 KiB */
 
+/*
+ * Blocks held back from the free lists so the sweeper always has
+ * somewhere to work. Without this, a heap that fills completely leaves
+ * the sweeper unable to allocate the space it needs to finish, which is a
+ * deadlock rather than a slow collection.
+ */
+#define CVM_SWEEP_RESERVE_BLOCKS 4u
+
 /* ------------------------------------------------------------------ */
 /* heap growth policy                                                  */
 /* ------------------------------------------------------------------ */
