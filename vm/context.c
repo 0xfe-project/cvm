@@ -253,6 +253,19 @@ void cvm_thread_enter_unmanaged(void) {
 
 void cvm_thread_leave_unmanaged(void) {
     cvm_thread_set_state(CVM_THREAD_MANAGED);
+
+    /*
+     * Now managed, so a collection must be able to stop this thread — and
+     * one may have started while it was inside the foreign call. Polling
+     * here is what makes returning from foreign code safe.
+     *
+     * The order matters and is not interchangeable. Announcing the managed
+     * state first means a collector that observes it will wait for this
+     * thread to park, which the poll then does. Polling first would leave
+     * a window where the thread looks unmanaged and is skipped, but is
+     * about to touch the heap.
+     */
+    cvm_safepoint_poll();
 }
 
 /* ------------------------------------------------------------------ */

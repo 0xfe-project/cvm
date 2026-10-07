@@ -21,6 +21,7 @@
 #include "gc/block_alloc.h"
 #include "gc/block_list.h"
 #include "gc/bytemap.h"
+#include "gc/external.h"
 #include "gc/heap.h"
 #include "gc/large.h"
 #include "gc/layout.h"
@@ -47,6 +48,91 @@ void cvm_sweep_result_init(CvmSweepResult* result) {
 /* ------------------------------------------------------------------ */
 /* simple blocks                                                       */
 /* ------------------------------------------------------------------ */
+/*
+ * Hand the finalizer of every dead object in a range to the queue.
+ *
+ * This has to run over *every* path that reclaims objects, and the reason
+ * is not obvious until it bites: the sweeper has bulk paths that clear a
+ * whole line or a whole block without ever looking at an individual
+ * object. A block that held nothing but waste takes one of those paths,
+ * and a finalizer inside it would be lost — which is the common case for
+ * an external handle, since the whole point of one is to be the only thing
+ * keeping a resource alive.
+ *
+ * A slot reading "allocated" at this point means the object is dead:
+ * marking wrote "marked" on everything that survived, so anything still
+ * reading "allocated" did not. That is why this can be a single pass and
+ * needs no separate liveness question.
+ *
+ * The walk steps by object size when it finds an object and by one
+ * allocation slot when it does not, so a block costs one iteration per
+ * object plus one per gap rather than one per slot.
+ */
+static void extract_finalizers(Bytemap* bytemap, u8* start, u8* limit) {
+    u8* p = start;
+
+    while (p < limit) {
+        ObjectMeta* slot = bytemap_get(bytemap, p);
+
+        if (object_meta_is_allocated(slot)) {
+            CvmGcHeader* header = (CvmGcHeader*)p;
+
+            if ((header->flags & CVM_GC_HAS_FINALIZER) != 0) {
+                CvmExternal* ext = (CvmExternal*)(p + sizeof(CvmGcHeader));
+                /*
+                 * A failure means the queue is full, which is counted and
+                 * read as cvm_finalizer_dropped_count rather than logged
+                 * per object: a sweep can produce thousands, and a line
+                 * each would bury the collection's own output.
+                 */
+                (void)cvm_finalizer_enqueue(ext->c_ptr, ext->finalizer);
+            }
+            p += cvm_object_size(header);
+        } else {
+            p += CVM_ALLOC_ALIGNMENT;
+        }
+    }
+}
+
+/* The same, for a block that says it might be worth doing. */
+static void extract_finalizers_if_flagged(Bytemap* bytemap, BlockMeta* block, u8* start,
+                                          u8* limit) {
+    if (!block_meta_has_finalizers(block)) {
+        return;
+    }
+    extract_finalizers(bytemap, start, limit);
+}
+
+/*
+ * Sweep one line's objects, handing any finalizer to the queue first.
+ *
+ * Slot by slot rather than through the bulk line sweep, because a line can
+ * hold both survivors and dead objects and each dead one may carry a
+ * finalizer.
+ */
+static void sweep_line_with_finalizers(ObjectMeta* line_cursor, u8* line_start) {
+    for (usize i = 0; i < CVM_SLOTS_PER_LINE; i++) {
+        ObjectMeta* slot = &line_cursor[i];
+
+        if (object_meta_is_allocated(slot)) {
+            u8* addr = line_start + i * CVM_ALLOC_ALIGNMENT;
+            CvmGcHeader* header = (CvmGcHeader*)addr;
+
+            if ((header->flags & CVM_GC_HAS_FINALIZER) != 0) {
+                CvmExternal* ext = (CvmExternal*)(addr + sizeof(CvmGcHeader));
+                (void)cvm_finalizer_enqueue(ext->c_ptr, ext->finalizer);
+            }
+            object_meta_set_free(slot);
+        } else if (object_meta_is_marked(slot)) {
+            object_meta_set_allocated(slot);
+        } else {
+            /* Already free, or a placeholder for a large object's
+             * interior. Both become free, which is what
+             * object_meta_sweep does. */
+            object_meta_set_free(slot);
+        }
+    }
+}
 
 /*
  * Sweep one ordinary block.
@@ -80,7 +166,16 @@ static u32 cvm_sweep_simple_block(CvmThreadNode* node, BlockMeta* block_meta,
     cvm_assert(block_meta_debug_state(block_meta) == (u8)CVM_DBG_MUST_SWEEP);
 
     if (!block_meta_is_marked(block_meta)) {
-        /* Nothing survived: the whole block is free. */
+        /*
+         * Nothing survived, so the whole block is free — but every object
+         * in it died here, and any of them may own something outside the
+         * heap. This bulk path is the reason the block needs a finalizer
+         * flag at all: it clears the metadata in one go and would never
+         * look at an individual object.
+         */
+        extract_finalizers_if_flagged(node->allocator.bytemap, block_meta, block_start,
+                                      block_end(block_start));
+
         block_meta_clear(block_meta);
         block_meta_set_debug_state(block_meta, CVM_DBG_FREE);
 
@@ -107,7 +202,7 @@ static u32 cvm_sweep_simple_block(CvmThreadNode* node, BlockMeta* block_meta,
             /* Live lines are kept; their objects lose the mark bit and
              * become ordinary allocated objects. */
             line_meta_unmark(line_meta);
-            object_meta_sweep_line(bytemap_cursor);
+            sweep_line_with_finalizers(bytemap_cursor, line_start);
 
             line_index++;
             line_meta++;
@@ -126,6 +221,11 @@ static u32 cvm_sweep_simple_block(CvmThreadNode* node, BlockMeta* block_meta,
                 last_recyclable->next = (i8)line_index;
             }
 
+            /* An unmarked line inside a marked block: everything in it is
+             * dead, and this path clears the line in bulk. */
+            extract_finalizers_if_flagged(bytemap, block_meta, line_start,
+                                          line_start + CVM_LINE_SIZE);
+
             object_meta_clear_line(bytemap_cursor);
             last_recyclable = (FreeLineMeta*)line_start;
 
@@ -137,6 +237,8 @@ static u32 cvm_sweep_simple_block(CvmThreadNode* node, BlockMeta* block_meta,
             /* Extend the run over every following unmarked line. */
             u8 size = 1;
             while (line_index < CVM_LINE_COUNT && !line_meta_is_marked(line_meta)) {
+                extract_finalizers_if_flagged(bytemap, block_meta, line_start,
+                                              line_start + CVM_LINE_SIZE);
                 object_meta_clear_line(bytemap_cursor);
                 size++;
 

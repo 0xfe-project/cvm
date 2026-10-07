@@ -9,6 +9,8 @@
 #include "base/types.h"
 #include "gc/block_alloc.h"
 #include "gc/heap.h"
+#include "gc/external.h"
+#include "gc/root.h"
 #include "log.h"
 #include "rt.h"
 
@@ -50,6 +52,27 @@ bool cvm_world_init(usize min_size, usize max_size) {
                          w->heap.block_count);
     w->heap.block_alloc = &w->block_alloc;
 
+    /*
+     * The global root table. It is memory the collector walks, so it comes
+     * up and goes down with the heap rather than with any particular
+     * collection.
+     */
+    if (!cvm_root_init()) {
+        cvm_heap_destroy(&w->heap);
+        return false;
+    }
+
+    /*
+     * The finalizer queue. Prepared here rather than when the finalizer
+     * thread starts, because a collection must be able to hand it work
+     * whether or not the thread exists.
+     */
+    if (!cvm_finalizer_init()) {
+        cvm_root_destroy();
+        cvm_heap_destroy(&w->heap);
+        return false;
+    }
+
     w->ready = true;
     return true;
 }
@@ -59,6 +82,7 @@ void cvm_world_destroy(void) {
     if (!w->ready) {
         return;
     }
+    cvm_root_destroy();
     cvm_heap_destroy(&w->heap);
     w->ready = false;
 }

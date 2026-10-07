@@ -263,7 +263,24 @@ typedef struct BlockMeta {
     i32 next_block;
 
     u8 debug_state;
-    u8 reserved[3]; /* explicit, so the layout does not depend on the
+
+    /*
+     * Set while this block holds an object that owns something outside the
+     * heap, so the sweeper knows to look for finalizers here.
+     *
+     * Without it a block whose objects all died would take the "nothing
+     * survived, free the whole block" path, which clears the metadata in
+     * bulk and never looks at an individual object — and the finalizer of
+     * a dead object would be lost. That is not a rare case: it is what
+     * happens to every block that holds nothing but waste.
+     *
+     * The flag is conservative: it may stay set on a block whose finalizer
+     * objects all survived. A sweep then walks that block unnecessarily,
+     * which costs time rather than correctness.
+     */
+    u8 has_finalizers;
+
+    u8 reserved[2]; /* explicit, so the layout does not depend on the
                      * compiler's padding decisions */
 } BlockMeta;
 
@@ -372,6 +389,14 @@ CVM_INLINE i8 block_meta_first_free_line(BlockMeta const* m) {
     return m->block.simple.first_free_line;
 }
 
+CVM_INLINE bool block_meta_has_finalizers(BlockMeta const* m) {
+    return m->has_finalizers != 0;
+}
+
+CVM_INLINE void block_meta_set_has_finalizers(BlockMeta* m, bool value) {
+    m->has_finalizers = value ? 1 : 0;
+}
+
 CVM_INLINE void block_meta_set_debug_state(BlockMeta* m, BlockDebugState s) {
     m->debug_state = (u8)s;
 }
@@ -390,9 +415,12 @@ CVM_INLINE void block_meta_clear(BlockMeta* m) {
     m->block.simple.first_free_line = CVM_LAST_HOLE;
     m->next_block = CVM_LAST_BLOCK;
     m->debug_state = (u8)CVM_DBG_MUST_SWEEP;
+    /* A cleared block holds nothing, so it holds nothing with a finalizer
+     * either. This is what releases the flag once a block goes fully
+     * free. */
+    m->has_finalizers = 0;
     m->reserved[0] = 0;
     m->reserved[1] = 0;
-    m->reserved[2] = 0;
 }
 
 /* ------------------------------------------------------------------ */

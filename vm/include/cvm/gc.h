@@ -105,6 +105,21 @@ struct CvmTypeDescriptor {
 #define CVM_GC_WEAK_REF ((u32)1u << 2)
 
 /*
+ * An object that owns a resource outside the heap.
+ *
+ * When such an object dies, the runtime extracts its pointer and its
+ * finalizer into a queue and a dedicated thread runs the finalizer, so
+ * that a finalizer which allocates or blocks cannot do so in the middle
+ * of a sweep. See vm/gc/finalize.h.
+ *
+ * The object itself contains no GC pointers: the C pointer it holds is
+ * outside the heap, and the finalizer is code. Its descriptor is
+ * therefore a scalar, which is also what stops the marker from trying to
+ * follow either of them.
+ */
+#define CVM_GC_HAS_FINALIZER ((u32)1u << 3)
+
+/*
  * Allocation granularity.
  *
  * Every object starts on a CVM_ALLOC_ALIGNMENT boundary, and cvm_alloc

@@ -26,6 +26,7 @@
 #include "gc/grey_packet.h"
 #include "gc/heap.h"
 #include "gc/meta.h"
+#include "gc/root.h"
 #include "log.h"
 #include "rt.h"
 
@@ -94,6 +95,18 @@ static void packet_push(CvmHeap* heap, CvmGreyPacket** holder, opaque_mut value)
         give_full_packet(heap, *holder);
         *holder = take_empty_packet(heap);
         cvm_grey_packet_push(*holder, value);
+    }
+}
+
+CvmGreyPacket* cvm_mark_take_packet(CvmHeap* heap) {
+    return take_empty_packet(heap);
+}
+
+void cvm_mark_give_packet(CvmHeap* heap, CvmGreyPacket* packet, bool weak) {
+    if (weak) {
+        give_weak_packet(heap, packet);
+    } else {
+        give_full_packet(heap, packet);
     }
 }
 
@@ -301,6 +314,13 @@ void cvm_mark_roots(CvmHeap* heap) {
         mark_frame_chain(heap, node->ctx.top_frame, &out, &out_weak);
     }
     cvm_threads_unlock_read();
+
+    /*
+     * The global root table, for pointers held by foreign code. It takes
+     * its own lock, so it is walked outside the registry lock — the same
+     * lock-ordering discipline the rest of the collector follows.
+     */
+    cvm_root_mark_all(heap, &out, &out_weak);
 
     give_full_packet(heap, out);
     give_weak_packet(heap, out_weak);

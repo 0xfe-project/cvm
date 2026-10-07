@@ -173,6 +173,8 @@ const PROBE_HEADERS = [
     "gc/weak.h",
     "gc/sweeper.h",
     "gc/collect.h",
+    "gc/root.h",
+    "gc/external.h",
     "gc/pool.h",
     "gc/block_list.h",
 ];

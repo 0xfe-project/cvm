@@ -75,6 +75,21 @@ void cvm_mark_object(CvmHeap* heap, u8* start, CvmGreyPacket** out,
 void cvm_mark_field(CvmHeap* heap, opaque_mut field, CvmGreyPacket** out,
                     CvmGreyPacket** out_weak);
 
+/*
+ * A packet to mark into, for a caller outside the marking loop.
+ *
+ * The root table's write barrier needs to mark a single object from an
+ * arbitrary thread while a collection is running, and that thread has no
+ * packet of its own. Taking and returning one is cheaper than making every
+ * marker keep a holder it mostly does not need, and the packet lists are
+ * lock-free so it is safe from any thread.
+ */
+CvmGreyPacket* cvm_mark_take_packet(CvmHeap* heap);
+
+/* Give a packet back. An empty one goes to the empty list; a non-empty
+ * one to the full list, or to the weak list when `weak` is set. */
+void cvm_mark_give_packet(CvmHeap* heap, CvmGreyPacket* packet, bool weak);
+
 /* Trace one object's fields through its type descriptor. */
 void cvm_trace_object(CvmHeap* heap, u8* start, CvmGreyPacket** out,
                       CvmGreyPacket** out_weak);
