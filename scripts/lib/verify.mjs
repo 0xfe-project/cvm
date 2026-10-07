@@ -49,6 +49,7 @@ export function checkFreestanding({ root, buildDir, opts, toolchain, verbose, ui
         probe,
         [
             '#include "base/types.h"',
+            '#include "base/math.h"',
             '#include "cvm/gc.h"',
             "",
             "/* Declares nothing, calls nothing: a clean probe has zero",
