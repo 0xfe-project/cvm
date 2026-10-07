@@ -2,15 +2,17 @@
 //
 // The machine-checkable form of "vm/rt do not depend on libc".
 //
-// Method: compile a probe that includes every public header under
-// -ffreestanding -nostdinc, then inspect the object's undefined symbols.
-// A freestanding translation unit that only declares (never calls) must
-// reference nothing at all. Any undefined symbol is a leaked dependency.
+// Two passes, because they catch different mistakes:
 //
-// Note this catches header-level leakage (a libc include, an inline function
-// calling something outside our prefix). It cannot catch a libc call that
-// sits inside a .c file, because that only shows up at link time — that is
-// what the shared-object symbol scan in checkSharedObject() is for.
+//   1. A probe translation unit that includes every public header under
+//      -ffreestanding -nostdinc. A header that pulls in a libc header, or
+//      that defines an inline function calling outside our prefix, fails
+//      here.
+//
+//   2. Every object compiled from rt/ and vm/. This is where a libc call
+//      hidden inside a .c file is caught; the probe alone would miss it,
+//      because a call only becomes an undefined symbol once something
+//      actually emits it.
 
 import path from "node:path";
 import fs from "node:fs";
@@ -40,7 +42,32 @@ function stripMachOSymbolNoise(sym) {
     return sym.replace(/^_+/, "");
 }
 
-export function checkFreestanding({ root, buildDir, opts, toolchain, verbose, ui }) {
+/** Undefined symbols of an object that are not ours. */
+function foreignSymbols(nm, obj, opts) {
+    const allowed = allowedPrefixes(opts);
+    return run(nm, ["-u", obj])
+        .stdout.split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((l) => stripMachOSymbolNoise(l.replace(/^U\s+/, "")))
+        .filter((s) => !allowed.some((p) => s.startsWith(p)));
+}
+
+/**
+ * Headers the probe covers. Public headers belong here; internal headers
+ * are covered by pass 2 as soon as a .c file includes them.
+ */
+const PROBE_HEADERS = ["base/types.h", "base/math.h", "cvm/gc.h", "gc/layout.h"];
+
+export function checkFreestanding({
+    root,
+    buildDir,
+    opts,
+    toolchain,
+    verbose,
+    ui,
+    runtimeObjs = [],
+}) {
     const tmp = path.join(buildDir, "tmp");
     mkdirp(tmp);
 
@@ -48,9 +75,7 @@ export function checkFreestanding({ root, buildDir, opts, toolchain, verbose, ui
     fs.writeFileSync(
         probe,
         [
-            '#include "base/types.h"',
-            '#include "base/math.h"',
-            '#include "cvm/gc.h"',
+            ...PROBE_HEADERS.map((h) => `#include "${h}"`),
             "",
             "/* Declares nothing, calls nothing: a clean probe has zero",
             " * undefined symbols. */",
@@ -59,7 +84,7 @@ export function checkFreestanding({ root, buildDir, opts, toolchain, verbose, ui
         ].join("\n"),
     );
 
-    const obj = compile({
+    const probeObj = compile({
         src: probe,
         obj: path.join(tmp, "freestanding_probe.o"),
         flags: flagsFor({ flavor: "freestanding", opts, toolchain, root }),
@@ -74,41 +99,33 @@ export function checkFreestanding({ root, buildDir, opts, toolchain, verbose, ui
         return true;
     }
 
-    const r = run(nm, ["-u", obj]);
-    const syms = r.stdout
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .map((l) => stripMachOSymbolNoise(l.replace(/^U\s+/, "")));
-
-    const allowed = allowedPrefixes(opts);
-    const leaked = syms.filter((s) => !allowed.some((p) => s.startsWith(p)));
-
-    if (leaked.length > 0) {
-        console.error("[verify] freestanding violation: foreign symbols in headers");
-        for (const s of leaked) console.error(`         ${s}`);
-        ui.fatal("vm/rt headers must not depend on libc");
+    const violations = [];
+    for (const obj of [probeObj, ...runtimeObjs]) {
+        const foreign = foreignSymbols(nm, obj, opts);
+        if (foreign.length > 0) violations.push({ obj, foreign });
     }
 
-    ui.log(`verify: freestanding ok (${syms.length} undefined symbols, all cvm_/rt_)`);
+    if (violations.length > 0) {
+        console.error("[verify] freestanding violation: foreign symbols");
+        for (const v of violations) {
+            console.error(`         ${path.relative(root, v.obj)}`);
+            for (const s of v.foreign) console.error(`           ${s}`);
+        }
+        ui.fatal("vm/rt must not depend on libc");
+    }
+
+    const scanned = 1 + runtimeObjs.length;
+    ui.log(`verify: freestanding ok (${scanned} object(s) scanned, 0 foreign)`);
     return true;
 }
 
 /**
  * Inspect a linked shared object for undefined symbols outside our prefixes.
- * This is where a libc call hidden inside a .c file gets caught.
+ * Wired in once vm.so / rt.so are actually produced (entry-glue step); kept
+ * here so the check lives next to the other one.
  */
-export function checkSharedObject(soPath, opts, ui) {
+export function checkSharedObject(soPath, opts) {
     const nm = which("nm") || which("llvm-nm");
     if (!nm || !fs.existsSync(soPath)) return null;
-
-    const allowed = allowedPrefixes(opts);
-    const leaked = run(nm, ["-u", soPath])
-        .stdout.split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .map((l) => stripMachOSymbolNoise(l.replace(/^U\s+/, "")))
-        .filter((s) => !allowed.some((p) => s.startsWith(p)));
-
-    return leaked;
+    return foreignSymbols(nm, soPath, opts);
 }

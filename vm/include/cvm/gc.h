@@ -91,6 +91,20 @@ struct CvmTypeDescriptor {
 #define CVM_GC_PINNED ((u32)1u << 1)
 
 /*
+ * Allocation granularity.
+ *
+ * Every object starts on a CVM_ALLOC_ALIGNMENT boundary, and cvm_alloc
+ * rounds the total size up to it. This is part of the ABI rather than an
+ * internal detail because generated code inlines the bump fast path and
+ * therefore embeds the rounding.
+ *
+ * The runtime's object metadata table has the same granularity: an
+ * address maps to exactly one metadata entry only if object starts are
+ * at least this aligned. vm/gc/layout.h asserts the two agree.
+ */
+#define CVM_ALLOC_ALIGNMENT ((usize)(2 * CVM_WORD_SIZE))
+
+/*
  * Every GC heap object begins with this header. Allocation returns
  * a pointer to the header; user payload follows immediately after.
  */
@@ -188,7 +202,7 @@ opaque_mut cvm_alloc_large(CvmTypeDescriptor const* type, usize size);
  */
 CVM_INLINE opaque_mut cvm_alloc(CvmTypeDescriptor const* type) {
     CvmVMContext* ctx = cvm_ctx();
-    usize size = cvm_align_up(sizeof(CvmGcHeader) + type->size, CVM_ALIGN_WORD);
+    usize size = cvm_align_up(sizeof(CvmGcHeader) + type->size, CVM_ALLOC_ALIGNMENT);
     u8* p = ctx->bump_ptr;
 
     if (CVM_UNLIKELY(p + size > ctx->bump_end)) {

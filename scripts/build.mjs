@@ -171,6 +171,7 @@ function main() {
         toolchain,
         verbose: opts.verbose,
         ui,
+        runtimeObjs,
     });
 
     ui.log("done");

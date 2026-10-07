@@ -33,12 +33,17 @@ export function sanitizerFlags({ asan, tsan }) {
  * Build the include path list.
  *
  *   rt/          so `#include "base/types.h"` resolves
- *   vm/include/  so `#include "cvm/gc.h"` resolves
+ *   vm/include/  so `#include "cvm/gc.h"` resolves  (public ABI)
+ *   vm/          so `#include "gc/layout.h"` resolves (internal)
  *   tests/       hosted only — test-only headers must not be reachable
  *                from freestanding translation units.
  */
 export function includeFlags(root, flavor) {
-    const dirs = [path.join(root, "rt"), path.join(root, "vm", "include")];
+    const dirs = [
+        path.join(root, "rt"),
+        path.join(root, "vm", "include"),
+        path.join(root, "vm"),
+    ];
     if (flavor === "hosted") dirs.push(path.join(root, "tests"));
     return dirs.flatMap((d) => ["-I", d]);
 }
