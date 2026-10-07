@@ -9,8 +9,8 @@
 #include "base/types.h"
 #include "gc/block_alloc.h"
 #include "gc/heap.h"
-#include "gc/external.h"
-#include "gc/root.h"
+#include "cvm/external.h"
+#include "cvm/roots.h"
 #include "log.h"
 #include "rt.h"
 

@@ -1,5 +1,5 @@
 /*
- * vm/gc/root.h
+ * cvm/roots.h
  *
  * The global root table, replacing the address-range list in
  * refs/commix/immix_comix/GCRoots.{h,c}.
@@ -86,6 +86,8 @@ u32 cvm_root_count(void);
 
 /* Slots currently allocated, for tests and diagnostics. */
 u32 cvm_root_capacity(void);
+
+/* ---- runtime-internal ---- */
 
 /*
  * Mark everything in the table. Called by the marker as part of root

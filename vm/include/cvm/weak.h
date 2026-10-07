@@ -1,5 +1,5 @@
 /*
- * vm/gc/weak.h
+ * cvm/weak.h
  *
  * Weak references, from refs/commix/WeakReferences.c.
  *
@@ -73,6 +73,8 @@ extern CvmTypeDescriptor const cvm_type_weak_ref;
  * Returns the number of references cleared, which is what a test and a
  * caller interested in "did anything actually die" both want to know.
  */
+/* ---- runtime-internal, not for frontends or FFI glue ---- */
+
 u32 cvm_weak_nullify(CvmHeap* heap);
 
 /*

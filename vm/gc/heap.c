@@ -261,9 +261,20 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     cvm_grey_list_push_all(&heap->mark.empty, heap->mark.packets, heap->mark.packets,
                            heap->mark.packet_count);
 
+    /*
+     * Marking bookkeeping. `has_history` false means the growth decision
+     * has no previous collection to read, which is correct for a fresh
+     * heap — and setting it explicitly matters because the heap struct may
+     * be reused (a test that builds and destroys several heaps in one
+     * process), in which case a stale true would let the first collection
+     * read another heap's figures.
+     */
     heap->mark.current_start_ns = 0;
     heap->mark.current_end_ns = 0;
-    heap->mark.last_end_ns = 0;
+    heap->mark.last_end_ns = rt_time_nanos();
+    heap->mark.last_mark_ns = 0;
+    heap->mark.last_period_ns = 0;
+    heap->mark.has_history = false;
 
     CVM_LOG_INFO(m) {
         fmt_lit(&m.fmt, "heap: ");
@@ -366,7 +377,7 @@ bool cvm_heap_extend(CvmHeap* heap, u32 blocks, u32* out_first_block) {
     return true;
 }
 
-bool cvm_heap_should_grow(CvmHeap* heap, u64 mark_time_ns, u64 total_time_ns,
+bool cvm_heap_should_grow(CvmHeap* heap, u64 mark_time_ns, u64 period_ns,
                           u32 free_blocks) {
     /*
      * Two independent reasons, either sufficient. The reference uses the
@@ -379,8 +390,8 @@ bool cvm_heap_should_grow(CvmHeap* heap, u64 mark_time_ns, u64 total_time_ns,
      * Growing only on the second would let a program sit at 100% mark
      * time indefinitely, which is a heap that never stops collecting.
      */
-    if (total_time_ns > 0) {
-        f64 ratio = (f64)mark_time_ns / (f64)total_time_ns;
+    if (period_ns > 0) {
+        f64 ratio = (f64)mark_time_ns / (f64)period_ns;
         if (ratio >= heap->max_mark_time_ratio) {
             return true;
         }
@@ -388,6 +399,53 @@ bool cvm_heap_should_grow(CvmHeap* heap, u64 mark_time_ns, u64 total_time_ns,
 
     f64 free_ratio = (f64)free_blocks / (f64)heap->block_count;
     return free_ratio < heap->min_free_ratio;
+}
+
+void cvm_heap_grow_if_needed(CvmHeap* heap) {
+    u32 free_blocks = cvm_block_alloc_free_count(heap->block_alloc);
+
+    if (!cvm_heap_should_grow(heap, heap->mark.last_mark_ns, heap->mark.last_period_ns,
+                              free_blocks)) {
+        return;
+    }
+
+    u32 increment = cvm_heap_growth_increment(heap);
+    if (increment == 0) {
+        return;
+    }
+
+    u32 first = 0;
+    if (!cvm_heap_extend(heap, increment, &first)) {
+        return;
+    }
+
+    /*
+     * The new blocks are free and their metadata is cleared, so they go
+     * straight to the allocator as one run. Their debug state is set the
+     * way the sweeper would leave a free block, which is what the
+     * allocator expects to find.
+     */
+    for (u32 i = 0; i < increment; i++) {
+        block_meta_set_debug_state(cvm_heap_block_meta(heap, first + i), CVM_DBG_FREE);
+    }
+
+    /*
+     * Under the allocator's lock: after a sweep finishes the allocator
+     * leaves concurrent mode, so its free lists are manipulated non-
+     * atomically from then on. A lock-free push from here would race with
+     * a pop that is not expecting one.
+     */
+    cvm_block_alloc_acquire(heap->block_alloc);
+    cvm_block_alloc_add_free_superblock(heap->block_alloc,
+                                        cvm_heap_block_meta(heap, first), increment);
+    cvm_block_alloc_release(heap->block_alloc);
+
+    CVM_LOG_DEBUG(m) {
+        fmt_lit(&m.fmt, "heap grew by ");
+        fmt_u32(&m.fmt, increment);
+        fmt_lit(&m.fmt, " blocks, now ");
+        fmt_u32(&m.fmt, heap->block_count);
+    }
 }
 
 u32 cvm_heap_growth_increment(CvmHeap const* heap) {

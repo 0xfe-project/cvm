@@ -50,7 +50,7 @@
 #include "gc/meta.h"
 #include "gc/pool.h"
 #include "gc/sweeper.h"
-#include "gc/weak.h"
+#include "cvm/weak.h"
 #include "log.h"
 #include "rt.h"
 #include "safepoint.h"
@@ -60,25 +60,6 @@ static CvmCollectionStats last_collection;
 
 CvmCollectionStats cvm_gc_last_collection(void) {
     return last_collection;
-}
-
-/* ------------------------------------------------------------------ */
-/* counting, for the stats and the tests                               */
-/* ------------------------------------------------------------------ */
-
-/* Objects with an allocated or marked slot, across the blocks in use. */
-static u32 count_objects(CvmHeap* heap) {
-    u32 count = 0;
-    for (u32 i = 0; i < heap->block_count; i++) {
-        u8* block_start = cvm_heap_block_address(heap, i);
-        ObjectMeta* slot = bytemap_get(heap->bytemap, block_start);
-        for (usize s = 0; s < CVM_SLOTS_PER_BLOCK; s++) {
-            if (object_meta_is_allocated(&slot[s]) || object_meta_is_marked(&slot[s])) {
-                count++;
-            }
-        }
-    }
-    return count;
 }
 
 /* ------------------------------------------------------------------ */
@@ -146,52 +127,6 @@ static void prepare_for_sweep(CvmHeap* heap) {
 }
 
 /* ------------------------------------------------------------------ */
-/* growth                                                              */
-/* ------------------------------------------------------------------ */
-
-/*
- * Whether to grow, and by how much.
- *
- * Growing here rather than on the allocation path is what makes the
- * decision informed: this is the one moment the collector knows how much
- * survived and how long marking took.
- */
-static bool maybe_grow(CvmHeap* heap, u64 mark_time_ns, u64 total_time_ns) {
-    u32 free_blocks = cvm_block_alloc_free_count(heap->block_alloc);
-    if (!cvm_heap_should_grow(heap, mark_time_ns, total_time_ns, free_blocks)) {
-        return false;
-    }
-
-    u32 increment = cvm_heap_growth_increment(heap);
-    if (increment == 0) {
-        return false;
-    }
-
-    u32 first = 0;
-    if (!cvm_heap_extend(heap, increment, &first)) {
-        return false;
-    }
-
-    /*
-     * The new blocks are free and their metadata is cleared, so they go
-     * straight to the allocator. They arrive as one run, and their debug
-     * state is set the way the sweeper would leave it.
-     */
-    for (u32 i = 0; i < increment; i++) {
-        block_meta_set_debug_state(cvm_heap_block_meta(heap, first + i), CVM_DBG_FREE);
-    }
-    cvm_block_alloc_add_free_superblock(heap->block_alloc,
-                                        cvm_heap_block_meta(heap, first), increment);
-
-    CVM_LOG_DEBUG(m) {
-        fmt_lit(&m.fmt, "heap grew by ");
-        fmt_u32(&m.fmt, increment);
-        fmt_lit(&m.fmt, " blocks");
-    }
-    return true;
-}
-
-/* ------------------------------------------------------------------ */
 /* the driver                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -225,8 +160,16 @@ bool cvm_gc_collect(CvmHeap* heap) {
         }
     }
 
+    /*
+     * Now that any unfinished sweep has been driven to completion, the
+     * free-block count is meaningful, so this is where the growth decision
+     * belongs.
+     */
+    if (heap->mark.has_history) {
+        cvm_heap_grow_if_needed(heap);
+    }
+
     u64 start_ns = rt_time_nanos();
-    u32 objects_before = count_objects(heap);
     u32 blocks_before = heap->block_count;
 
 #if defined(CVM_DEBUG)
@@ -258,7 +201,21 @@ bool cvm_gc_collect(CvmHeap* heap) {
     prepare_for_sweep(heap);
 
     u64 end_ns = rt_time_nanos();
-    bool grew = maybe_grow(heap, mark_end - mark_start, end_ns - mark_start);
+
+    /*
+     * Record this collection's figures for the next one's growth
+     * decision. The period is the time between this collection's marking
+     * and the previous one's — the program's running time, not the
+     * collection's duration.
+     */
+    heap->mark.last_mark_ns = mark_end - mark_start;
+    heap->mark.last_period_ns = mark_end - heap->mark.last_end_ns;
+    heap->mark.last_end_ns = mark_end;
+    heap->mark.current_start_ns = mark_start;
+    heap->mark.current_end_ns = mark_end;
+    heap->mark.has_history = true;
+
+    bool grew = false; /* decided at the start of the next collection */
 
     phase_set(heap, CVM_GC_IDLE);
 
@@ -266,8 +223,6 @@ bool cvm_gc_collect(CvmHeap* heap) {
         .start_ns = start_ns,
         .end_ns = end_ns,
         .mark_ns = mark_end - mark_start,
-        .objects_before = objects_before,
-        .objects_after = objects_before, /* not known until the sweep ends */
         .weak_cleared = weak_cleared,
         .blocks_before = blocks_before,
         .blocks_after = heap->block_count,
@@ -277,9 +232,7 @@ bool cvm_gc_collect(CvmHeap* heap) {
     cvm_gc_counters_record_collection(start_ns, end_ns);
 
     CVM_LOG_INFO(m) {
-        fmt_lit(&m.fmt, "collected: objects ");
-        fmt_u32(&m.fmt, objects_before);
-        fmt_lit(&m.fmt, ", weak cleared ");
+        fmt_lit(&m.fmt, "collected: weak cleared ");
         fmt_u32(&m.fmt, weak_cleared);
         fmt_lit(&m.fmt, ", mark ");
         fmt_u64(&m.fmt, (mark_end - mark_start) / 1000);

@@ -26,7 +26,7 @@
 #include "gc/grey_packet.h"
 #include "gc/heap.h"
 #include "gc/meta.h"
-#include "gc/root.h"
+#include "cvm/roots.h"
 #include "log.h"
 #include "rt.h"
 

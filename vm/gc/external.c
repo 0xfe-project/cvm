@@ -1,12 +1,12 @@
 /*
  * vm/gc/external.c
  *
- * External handles and the finalizer thread. See vm/gc/external.h for the
+ * External handles and the finalizer thread. See include/cvm/external.h for the
  * shape and why the finalizers run on their own thread rather than in the
  * sweep.
  */
 
-#include "gc/external.h"
+#include "cvm/external.h"
 
 #include <stdatomic.h>
 

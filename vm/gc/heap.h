@@ -140,6 +140,22 @@ typedef struct CvmHeap {
         u64 current_start_ns;
         u64 current_end_ns;
         u64 last_end_ns;
+
+        /*
+         * The previous collection's figures, kept because the growth
+         * decision is made at the start of the next one.
+         *
+         * That timing is not arbitrary. The free-block count is only
+         * meaningful once a sweep has finished and mutators have been
+         * allocating against it; asking earlier, while the block allocator
+         * has just been emptied for the coming sweep, always answers "no
+         * free blocks" and grows the heap on every collection. (That is
+         * exactly what happened: a churn test that should have grown
+         * nothing doubled the heap three times in a row.)
+         */
+        u64 last_mark_ns;
+        u64 last_period_ns;
+        bool has_history;
     } mark;
 
     /* --- sweeping --- */
@@ -246,15 +262,35 @@ void cvm_heap_destroy(CvmHeap* heap);
 bool cvm_heap_extend(CvmHeap* heap, u32 blocks, u32* out_first_block);
 
 /*
- * Whether to grow, given how long the last collection spent marking and
- * how many blocks are free.
+ * Grow if the previous collection's figures say to.
  *
- * Both conditions come from the reference and both matter: a heap that is
- * mostly marking is too small for the program's allocation rate, and a
- * heap with few free blocks is about to fail an allocation. Growing only
- * on the second would let a program sit at 100% mark time.
+ * Called at the start of a collection, after any unfinished sweep has been
+ * driven to completion, because that is when the free-block count reflects
+ * the heap as the program is actually using it. See the note on
+ * `has_history` in CvmHeap for why the timing matters.
  */
-bool cvm_heap_should_grow(CvmHeap* heap, u64 mark_time_ns, u64 total_time_ns,
+void cvm_heap_grow_if_needed(CvmHeap* heap);
+
+/*
+ * Whether to grow, given how long the last collection spent marking, how
+ * long it has been since the one before, and how many blocks are free.
+ *
+ * `period_ns` is the time *between* collections, not the duration of this
+ * one. That distinction is the whole point of the mark-time condition: it
+ * is asking what fraction of the program's running time marking is eating,
+ * and dividing by the collection's own duration instead answers a
+ * different and useless question — the ratio comes out near one, so a heap
+ * that is barely being used grows anyway on timing noise. (Getting this
+ * wrong is how a churn test that should not have grown the heap at all
+ * did exactly that.)
+ *
+ * The two conditions are independent and either suffices: marking eating
+ * too much of the program's time means the heap is too small for the
+ * allocation rate, and few free blocks means the next allocation is at
+ * risk. Growing only on the second would let a program sit at 100% mark
+ * time indefinitely.
+ */
+bool cvm_heap_should_grow(CvmHeap* heap, u64 mark_time_ns, u64 period_ns,
                           u32 free_blocks);
 
 /*

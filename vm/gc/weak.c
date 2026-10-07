@@ -1,11 +1,11 @@
 /*
  * vm/gc/weak.c
  *
- * Weak references and the nullify phase. See vm/gc/weak.h for the shape
+ * Weak references and the nullify phase. See include/cvm/weak.h for the shape
  * and why it is two phases.
  */
 
-#include "gc/weak.h"
+#include "cvm/weak.h"
 
 #include "base/assert.h"
 #include "base/types.h"

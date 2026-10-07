@@ -1,5 +1,5 @@
 /*
- * vm/gc/external.h
+ * cvm/external.h
  *
  * Objects that own something outside the heap.
  *
@@ -82,6 +82,8 @@ opaque_mut cvm_external_new(opaque_mut c_ptr, CvmFinalizerFn finalizer);
 
 /* The wrapped pointer, or NULL. */
 opaque_mut cvm_external_ptr(opaque_mut object);
+
+/* ---- runtime-internal, not for frontends or FFI glue ---- */
 
 /* ------------------------------------------------------------------ */
 /* the finalizer queue                                                 */

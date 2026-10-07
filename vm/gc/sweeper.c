@@ -21,7 +21,7 @@
 #include "gc/block_alloc.h"
 #include "gc/block_list.h"
 #include "gc/bytemap.h"
-#include "gc/external.h"
+#include "cvm/external.h"
 #include "gc/heap.h"
 #include "gc/large.h"
 #include "gc/layout.h"

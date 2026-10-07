@@ -22,7 +22,7 @@
 #include "cvm/gc.h"
 #include "gc/heap.h"
 #include "gc/marker.h"
-#include "gc/weak.h"
+#include "cvm/weak.h"
 #include "gc/world.h"
 #include "rt.h"
 #include "safepoint.h"

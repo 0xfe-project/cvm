@@ -54,13 +54,23 @@
  */
 bool cvm_gc_collect(CvmHeap* heap);
 
-/* What the last collection did, for tests and for the log. */
+/*
+ * What the last collection did.
+ *
+ * Note what is absent: a count of live objects. Counting them means
+ * walking the whole bytemap, which for a heap of any size costs more than
+ * the collection it is measuring — hundreds of microseconds for a few
+ * megabytes, and seconds for a gigabyte. It also distorts the very ratio
+ * the growth heuristic reads, since the period between collections then
+ * includes the previous one's counting.
+ *
+ * A caller that wants the live count asks cvm_vm_stats, which counts on
+ * demand. That is the right place for an expensive question.
+ */
 typedef struct CvmCollectionStats {
     u64 start_ns;
     u64 end_ns;
     u64 mark_ns;
-    u32 objects_before;
-    u32 objects_after;
     u32 weak_cleared;
     u32 blocks_before;
     u32 blocks_after;

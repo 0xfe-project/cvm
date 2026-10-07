@@ -1,11 +1,11 @@
 /*
  * vm/gc/root.c
  *
- * The global root table. See vm/gc/root.h for what it is for and why
+ * The global root table. See include/cvm/roots.h for what it is for and why
  * adding a root is a write barrier.
  */
 
-#include "gc/root.h"
+#include "cvm/roots.h"
 
 #include <stdatomic.h>
 

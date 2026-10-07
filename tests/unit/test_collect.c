@@ -31,10 +31,11 @@
 #include "cvm/gc.h"
 #include "gc/alloc.h"
 #include "gc/collect.h"
+#include "gc/block_alloc.h"
 #include "gc/heap.h"
 #include "gc/large.h"
 #include "gc/marker.h"
-#include "gc/weak.h"
+#include "cvm/weak.h"
 #include "gc/world.h"
 #include "rt.h"
 #include "safepoint.h"
@@ -488,8 +489,11 @@ TEST the_collection_report_is_consistent(void) {
     CvmCollectionStats stats = cvm_gc_last_collection();
     ASSERT(stats.end_ns >= stats.start_ns);
     ASSERT(stats.mark_ns <= stats.end_ns - stats.start_ns);
-    ASSERT(stats.objects_before >= stats.objects_after || stats.objects_before > 0);
     ASSERT_EQ_FMT(stats.blocks_before, stats.blocks_after, "%u");
+
+    /* Most of the heap should be free after collecting 100 pieces of
+     * garbage while keeping one object. */
+    ASSERT(cvm_block_alloc_free_count(heap()->block_alloc) > 0);
 
     FRAME_END();
     fixture_leave();
