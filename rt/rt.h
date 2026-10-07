@@ -96,6 +96,145 @@ void rt_channel_flush(RtChannel* ch);
 void rt_channel_close(RtChannel* ch);
 
 /* ------------------------------------------------------------------ */
+/* threads and synchronisation                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * These are opaque storage, not platform types.
+ *
+ * The collector embeds its locks by value in its own structures, so the
+ * storage has to be a complete type with a known size. But it must not be
+ * a pthread_mutex_t: that would put a libc type into a freestanding
+ * header and make the ABI platform-specific.
+ *
+ * So each one is a fixed-size, suitably aligned byte block, and the
+ * implementation static-asserts that the real platform type fits inside.
+ * The sizes below are generous for every platform we target; the asserts
+ * are what keeps that honest rather than hopeful.
+ */
+#define RT_THREAD_STORAGE 16
+#define RT_MUTEX_STORAGE 64
+#define RT_COND_STORAGE 64
+#define RT_RWLOCK_STORAGE 208
+
+/* All platform primitives we use are 8-byte aligned; 16 is free here
+ * because every storage size above is a multiple of it. */
+#define RT_SYNC_ALIGN 16
+
+typedef struct RtThread {
+    _Alignas(RT_SYNC_ALIGN) u8 storage[RT_THREAD_STORAGE];
+} RtThread;
+
+typedef struct RtMutex {
+    _Alignas(RT_SYNC_ALIGN) u8 storage[RT_MUTEX_STORAGE];
+} RtMutex;
+
+typedef struct RtCond {
+    _Alignas(RT_SYNC_ALIGN) u8 storage[RT_COND_STORAGE];
+} RtCond;
+
+typedef struct RtRwlock {
+    _Alignas(RT_SYNC_ALIGN) u8 storage[RT_RWLOCK_STORAGE];
+} RtRwlock;
+
+/* ------------------------------------------------------------------ */
+/* threads                                                             */
+/* ------------------------------------------------------------------ */
+
+typedef opaque_mut (*RtThreadFn)(opaque_mut);
+
+/* Start a thread. Returns false if the thread could not be created. */
+bool rt_thread_create(RtThread* out, RtThreadFn fn, opaque_mut arg);
+
+/* Wait for a thread to finish. */
+bool rt_thread_join(RtThread thread);
+
+/* Release our handle without waiting. The thread keeps running. */
+void rt_thread_detach(RtThread thread);
+
+RtThread rt_thread_self(void);
+bool rt_thread_equal(RtThread a, RtThread b);
+
+/* Numeric identity, for log lines. Not necessarily unique across time: a
+ * finished thread's id may be reused. */
+u64 rt_thread_id(void);
+
+/* Give up the rest of the time slice. */
+void rt_thread_yield(void);
+
+/* Usable parallelism, at least 1. */
+u32 rt_hardware_threads(void);
+
+u32 rt_process_id(void);
+
+/* ------------------------------------------------------------------ */
+/* mutex                                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A plain mutex: not recursive.
+ *
+ * The reference implementation makes every mutex recursive, which hides
+ * the mistake it is most likely to be used for — locking a lock the
+ * current thread already holds — by turning a deadlock into silent
+ * success. The default here is non-recursive, and recursion is opt-in
+ * through rt_mutex_init_recursive so that a call site needing it says so.
+ */
+bool rt_mutex_init(RtMutex* m);
+
+/* For the few places that genuinely re-enter, such as a lock taken by a
+ * helper that is also called with the lock held. */
+bool rt_mutex_init_recursive(RtMutex* m);
+
+void rt_mutex_destroy(RtMutex* m);
+void rt_mutex_lock(RtMutex* m);
+
+/* false if the lock is held by someone else. */
+bool rt_mutex_trylock(RtMutex* m);
+
+void rt_mutex_unlock(RtMutex* m);
+
+/* ------------------------------------------------------------------ */
+/* condition variable                                                  */
+/* ------------------------------------------------------------------ */
+
+bool rt_cond_init(RtCond* c);
+void rt_cond_destroy(RtCond* c);
+
+/* Releases `m` while waiting and reacquires it before returning. */
+void rt_cond_wait(RtCond* c, RtMutex* m);
+
+void rt_cond_signal(RtCond* c);
+void rt_cond_broadcast(RtCond* c);
+
+/*
+ * No semaphore type.
+ *
+ * The reference builds them from POSIX named semaphores, because macOS
+ * does not implement unnamed ones (sem_init returns ENOSYS). Named
+ * semaphores bring a name in a global namespace and a lifetime that
+ * outlives the process if it is killed at the wrong moment. A counter plus
+ * a mutex and a condition variable does the same job with none of that,
+ * and every wake-up the collector needs is expressible that way.
+ */
+
+/* ------------------------------------------------------------------ */
+/* reader-writer lock                                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Used for the thread registry: readers walk the list while a writer adds
+ * or removes a thread. Writers are given priority, so a stream of readers
+ * cannot starve a registration.
+ */
+bool rt_rwlock_init(RtRwlock* l);
+void rt_rwlock_destroy(RtRwlock* l);
+void rt_rwlock_lock_read(RtRwlock* l);
+void rt_rwlock_lock_write(RtRwlock* l);
+void rt_rwlock_unlock_read(RtRwlock* l);
+void rt_rwlock_unlock_write(RtRwlock* l);
+
+/* ------------------------------------------------------------------ */
 /* process                                                             */
 /* ------------------------------------------------------------------ */
 
