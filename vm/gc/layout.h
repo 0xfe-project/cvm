@@ -80,6 +80,13 @@
  */
 #define CVM_SWEEP_RESERVE_BLOCKS 4u
 
+/*
+ * Grey packets as a fraction of the heap size. Marking parallelism comes
+ * from having enough packets to hand out; the fraction is the reference's
+ * and is a starting point rather than a tuned value.
+ */
+#define CVM_GREY_PACKET_RATIO 0.01
+
 /* ------------------------------------------------------------------ */
 /* heap growth policy                                                  */
 /* ------------------------------------------------------------------ */

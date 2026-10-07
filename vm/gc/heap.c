@@ -89,6 +89,23 @@ static usize bytemap_bytes(u32 max_blocks) {
 }
 
 /*
+ * How many grey packets the heap gets.
+ *
+ * A fraction of the heap size, so a bigger heap has more marking
+ * parallelism available without the fraction being tuned per workload.
+ * The reference uses the same ratio.
+ */
+static u32 grey_packet_count_for(u32 max_blocks) {
+    usize heap_bytes = (usize)max_blocks * CVM_BLOCK_SIZE;
+    usize count =
+        (usize)((f64)heap_bytes * CVM_GREY_PACKET_RATIO) / CVM_GREY_PACKET_SIZE;
+    if (count == 0) {
+        count = 1;
+    }
+    return (u32)count;
+}
+
+/*
  * A block's payload plus its share of the metadata is what a block really
  * costs, and that is the figure block counts have to be derived from:
  * sizing from the payload alone would under-reserve the metadata.
@@ -130,6 +147,7 @@ static u32 blocks_for_min(usize bytes) {
 bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     /* Start from a clean slate so a failed init leaves nothing half-set. */
     heap->blocks = (CvmRegion){0};
+    heap->grey_packets_region = (CvmRegion){0};
     heap->block_meta_region = (CvmRegion){0};
     heap->line_meta_region = (CvmRegion){0};
     heap->bytemap_region = (CvmRegion){0};
@@ -185,6 +203,10 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
                                  _Alignof(LineMeta)) &&
               cvm_region_reserve(&heap->bytemap_region, bytemap_bytes(max_blocks),
                                  CVM_ALLOC_ALIGNMENT) &&
+              cvm_region_reserve(&heap->grey_packets_region,
+                                 (usize)grey_packet_count_for(max_blocks) *
+                                     sizeof(CvmGreyPacket),
+                                 _Alignof(CvmGreyPacket)) &&
               cvm_region_reserve(&heap->blocks, (usize)max_blocks * CVM_BLOCK_SIZE,
                                  CVM_BLOCK_SIZE);
 
@@ -220,6 +242,29 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
         return false;
     }
 
+    /*
+     * Marking state. Every packet starts on the empty list, so the first
+     * marker to want one has somewhere to look; the total is what tells
+     * marking when everything is accounted for.
+     */
+    heap->mark.packet_count = grey_packet_count_for(max_blocks);
+    heap->mark.packets = (CvmGreyPacket*)heap->grey_packets_region.start;
+
+    for (u32 i = 0; i < heap->mark.packet_count; i++) {
+        cvm_grey_packet_init(&heap->mark.packets[i], CVM_GREY_PACKET_REFLIST);
+    }
+
+    cvm_grey_list_init(&heap->mark.empty);
+    cvm_grey_list_init(&heap->mark.full);
+    cvm_grey_list_init(&heap->mark.found_weak_refs);
+
+    cvm_grey_list_push_all(&heap->mark.empty, heap->mark.packets, heap->mark.packets,
+                           heap->mark.packet_count);
+
+    heap->mark.current_start_ns = 0;
+    heap->mark.current_end_ns = 0;
+    heap->mark.last_end_ns = 0;
+
     CVM_LOG_INFO(m) {
         fmt_lit(&m.fmt, "heap: ");
         fmt_u32(&m.fmt, heap->block_count);
@@ -236,6 +281,7 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
 
 void cvm_heap_destroy(CvmHeap* heap) {
     cvm_region_release(&heap->blocks);
+    cvm_region_release(&heap->grey_packets_region);
     cvm_region_release(&heap->block_meta_region);
     cvm_region_release(&heap->line_meta_region);
     cvm_region_release(&heap->bytemap_region);
@@ -248,6 +294,8 @@ void cvm_heap_destroy(CvmHeap* heap) {
     heap->line_meta_end = NULL;
     heap->bytemap = NULL;
     heap->block_count = 0;
+    heap->mark.packets = NULL;
+    heap->mark.packet_count = 0;
 }
 
 /* ------------------------------------------------------------------ */

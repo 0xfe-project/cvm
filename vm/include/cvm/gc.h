@@ -21,6 +21,7 @@
  * traversal. */
 #include <stdatomic.h>
 
+#include "base/assert.h"
 #include "base/types.h"
 
 /* ------------------------------------------------------------------ */
@@ -91,6 +92,17 @@ struct CvmTypeDescriptor {
  */
 #define CVM_GC_MARKED ((u32)1u << 0)
 #define CVM_GC_PINNED ((u32)1u << 1)
+
+/*
+ * A weak reference. Marking records such an object but does not trace
+ * through it, so its referent is not kept alive by it; the nullify phase
+ * decides afterwards what to clear.
+ *
+ * This is a property of the object rather than of its type, which is why
+ * it is a header flag: two objects of the same type can differ in whether
+ * they hold their referent strongly, and a type descriptor is shared.
+ */
+#define CVM_GC_WEAK_REF ((u32)1u << 2)
 
 /*
  * Allocation granularity.
@@ -207,8 +219,18 @@ CVM_INLINE void cvm_safepoint_poll(void) {
 typedef struct CvmGcFrame {
     struct CvmGcFrame* prev;
     u32 num_slots;
-    u32 flags;          /* e.g. CVM_FRAME_IN_FFI */
-    opaque_mut roots[]; /* num_slots entries */
+    u32 flags; /* e.g. CVM_FRAME_IN_FFI */
+
+    /*
+     * The caller's array of live pointers, not storage inside the frame.
+     *
+     * A flexible array member here would be the obvious spelling and does
+     * not work: a struct containing one cannot be embedded in another
+     * struct except at the end, so generated code could not declare a
+     * frame alongside its own slots. A pointer costs one indirection, on
+     * the root walk only, which is a cold path.
+     */
+    opaque_mut* roots; /* num_slots entries */
 } CvmGcFrame;
 
 /* Thread is inside a blocking FFI call; GC may treat this frame as a safe
@@ -268,28 +290,55 @@ extern __thread CvmVMContext* cvm_tls_ctx __attribute__((tls_model("initial-exec
 /* ------------------------------------------------------------------ */
 
 /*
- * Frame memory comes from the same bump region as objects: pushing a
- * frame is one addition, popping is one store. The bump region must
- * always have room for the maximum frame size of the function being
- * entered; the slow path guarantees this (out of line, in vm).
+ * Frame storage belongs to the caller.
+ *
+ * Generated code declares the frame as a local, so its lifetime is
+ * exactly the activation and nothing has to be allocated:
+ *
+ *     CVM_FRAME_DECL(f, 2);
+ *     cvm_frame_push(&f_frame, f_roots, 2);
+ *     f_roots[0] = cvm_alloc(&some_type);
+ *     ...
+ *     cvm_frame_pop(&f_frame);
+ *
+ * The alternative — carving frames out of the same bump region as
+ * objects and rewinding the bump pointer on pop — does not work, and the
+ * reason is worth recording because the shape is tempting. Rewinding
+ * reclaims everything allocated since the frame was pushed, and that
+ * includes any object the function is about to return:
+ *
+ *     frame->roots[0] = cvm_alloc(&t);
+ *     cvm_frame_pop(frame);        // bump pointer rewinds past it
+ *     return frame->roots[0];      // dangling
+ *
+ * Nothing short of escape analysis could tell the two cases apart, and
+ * the collector is not the place for that. Putting the frame on the
+ * machine stack costs nothing extra: its slots would otherwise have been
+ * stack locals anyway.
+ *
+ * The collector still never scans the machine stack. Roots come from
+ * this chain, which holds exactly the live pointers, and walking it is
+ * what root finding is.
  */
-CVM_INLINE CvmGcFrame* cvm_frame_push(u32 num_slots) {
-    CvmVMContext* ctx = cvm_ctx();
-    usize bytes = sizeof(CvmGcFrame) + CVM_WORD_SIZE * num_slots;
-    CvmGcFrame* frame = (CvmGcFrame*)ctx->bump_ptr;
+#define CVM_FRAME_DECL(name, slots)                                                    \
+    opaque_mut name##_roots[(slots)];                                                  \
+    CvmGcFrame name##_frame
 
-    ctx->bump_ptr += bytes;
+CVM_INLINE void cvm_frame_push(CvmGcFrame* frame, opaque_mut* roots, u32 num_slots) {
+    CvmVMContext* ctx = cvm_ctx();
     frame->prev = ctx->top_frame;
     frame->num_slots = num_slots;
     frame->flags = 0;
+    frame->roots = roots;
     ctx->top_frame = frame;
-    return frame;
 }
 
 CVM_INLINE void cvm_frame_pop(CvmGcFrame* frame) {
     CvmVMContext* ctx = cvm_ctx();
+    /* Popping a frame that is not the top would leave the chain pointing
+     * at storage whose lifetime has ended. */
+    cvm_assert(ctx->top_frame == frame);
     ctx->top_frame = frame->prev;
-    ctx->bump_ptr = (u8*)frame;
 }
 
 /* ------------------------------------------------------------------ */
@@ -305,9 +354,16 @@ opaque_mut cvm_alloc_large(CvmTypeDescriptor const* type, usize size);
  * slow-path call are the only branches. Payload is zero-initialized
  * by the runtime contract.
  */
-CVM_INLINE opaque_mut cvm_alloc(CvmTypeDescriptor const* type) {
+/*
+ * The inlined allocation path, with an explicit payload size.
+ *
+ * cvm_alloc passes the descriptor's own size; an array passes the fixed
+ * part plus its tail, which is only known at run time.
+ */
+CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
+                                      usize payload_size) {
     CvmVMContext* ctx = cvm_ctx();
-    usize size = cvm_align_up(sizeof(CvmGcHeader) + type->size, CVM_ALLOC_ALIGNMENT);
+    usize size = cvm_align_up(sizeof(CvmGcHeader) + payload_size, CVM_ALLOC_ALIGNMENT);
     u8* p = ctx->bump_ptr;
 
     if (CVM_UNLIKELY(size > CVM_INLINE_ALLOC_MAX || p + size > ctx->bump_end)) {
@@ -335,6 +391,26 @@ CVM_INLINE opaque_mut cvm_alloc(CvmTypeDescriptor const* type) {
         CVM_OBJECT_SLOT_ALLOCATED;
 
     return (opaque_mut)(hdr + 1); /* payload follows the header */
+}
+
+CVM_INLINE opaque_mut cvm_alloc(CvmTypeDescriptor const* type) {
+    return cvm_alloc_sized(type, type->size);
+}
+
+/*
+ * Allocate a variable-length array.
+ *
+ * `stride` is the element size: the word size for a pointer array, the
+ * element descriptor's size for an array of aggregates. The length is
+ * written into the object, because that is where both the collector and
+ * the generated code read it from.
+ */
+CVM_INLINE opaque_mut cvm_alloc_array(CvmTypeDescriptor const* type, usize length,
+                                      usize stride) {
+    usize payload_size = type->size + length * stride;
+    u8* payload = (u8*)cvm_alloc_sized(type, payload_size);
+    *(usize*)(payload + type->array_length_offset) = length;
+    return (opaque_mut)payload;
 }
 
 /*
@@ -365,6 +441,49 @@ CVM_INLINE CvmGcHeader const* cvm_header_of(opaque payload) {
 }
 CVM_INLINE CvmGcHeader* cvm_header_of_mut(opaque_mut payload) {
     return ((CvmGcHeader*)payload) - 1;
+}
+
+/*
+ * The object's extent in bytes, measured from its start.
+ *
+ * The header and the payload are rounded up together, so an object whose
+ * type size is not a multiple of the alignment does not leave the next
+ * object half a slot away.
+ */
+/* Bytes per element of an array type. */
+CVM_INLINE usize cvm_array_stride(CvmTypeDescriptor const* type) {
+    return (type->kind == CVM_TYPE_PTR_ARRAY) ? CVM_WORD_SIZE
+                                              : type->array_elem_type->size;
+}
+
+CVM_INLINE bool cvm_type_is_array(CvmTypeDescriptor const* type) {
+    return type->kind == CVM_TYPE_PTR_ARRAY || type->kind == CVM_TYPE_STRUCT_ARRAY;
+}
+
+/*
+ * The object's extent in bytes, measured from its start.
+ *
+ * For an array this has to be read from the object rather than from the
+ * descriptor: the descriptor describes the fixed part, and how much tail
+ * follows depends on a length only known at run time. Getting this wrong
+ * under-marks the object's lines, and the sweeper then reclaims a line
+ * that still holds live data.
+ *
+ * The header and the payload are rounded up together, so an object whose
+ * size is not a multiple of the alignment does not leave the next object
+ * half a slot away.
+ */
+CVM_INLINE usize cvm_object_size(CvmGcHeader const* header) {
+    CvmTypeDescriptor const* type = header->type;
+    usize size = sizeof(CvmGcHeader) + type->size;
+
+    if (cvm_type_is_array(type)) {
+        u8 const* payload = (u8 const*)(header + 1);
+        usize length = *(usize const*)(payload + type->array_length_offset);
+        size += length * cvm_array_stride(type);
+    }
+
+    return cvm_align_up(size, CVM_ALLOC_ALIGNMENT);
 }
 
 /* ------------------------------------------------------------------ */

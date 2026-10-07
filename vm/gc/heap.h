@@ -46,6 +46,7 @@
 
 #include "base/types.h"
 #include "gc/bytemap.h"
+#include "gc/grey_packet.h"
 #include "gc/layout.h"
 #include "gc/meta.h"
 #include "rt.h"
@@ -107,6 +108,32 @@ typedef struct CvmHeap {
 
     /* --- growth serialisation --- */
     RtMutex grow_lock;
+
+    /* --- marking --- */
+    CvmRegion grey_packets_region;
+
+    struct {
+        /*
+         * Packets with room, packets to trace, and weak references found
+         * along the way. The weak list is separate because a weak
+         * reference must not keep its referent alive: it is recorded
+         * rather than traced, and the nullify phase decides what to do
+         * with it once marking knows what survived.
+         */
+        CvmGreyList empty;
+        CvmGreyList full;
+        CvmGreyList found_weak_refs;
+
+        /* How many packets exist in total. Marking is finished when the
+         * number on the empty list plus the number on the weak list
+         * accounts for all of them. */
+        u32 packet_count;
+        CvmGreyPacket* packets;
+
+        u64 current_start_ns;
+        u64 current_end_ns;
+        u64 last_end_ns;
+    } mark;
 } CvmHeap;
 
 /*
@@ -174,6 +201,20 @@ CVM_INLINE BlockMeta* cvm_heap_block_meta(CvmHeap const* heap, u32 index) {
 
 CVM_INLINE LineMeta* cvm_heap_line_meta(CvmHeap const* heap, u32 block) {
     return heap->line_meta_start + (usize)block * CVM_LINE_COUNT;
+}
+
+/* Marking state, for the marker and the collector driver. */
+CVM_INLINE CvmGreyList* cvm_heap_grey_empty(CvmHeap* heap) {
+    return &heap->mark.empty;
+}
+CVM_INLINE CvmGreyList* cvm_heap_grey_full(CvmHeap* heap) {
+    return &heap->mark.full;
+}
+CVM_INLINE CvmGreyList* cvm_heap_grey_weak(CvmHeap* heap) {
+    return &heap->mark.found_weak_refs;
+}
+CVM_INLINE CvmGreyPacket* cvm_heap_packets(CvmHeap* heap) {
+    return heap->mark.packets;
 }
 
 /* Is this address inside the heap's usable window? */
