@@ -168,6 +168,7 @@ const PROBE_HEADERS = [
     "gc/alloc.h",
     "gc/large.h",
     "gc/world.h",
+    "gc/grey_packet.h",
     "gc/block_list.h",
 ];
 
