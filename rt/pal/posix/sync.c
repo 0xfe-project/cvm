@@ -29,6 +29,7 @@
 
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include "rt.h"
@@ -110,6 +111,16 @@ bool rt_thread_equal(RtThread a, RtThread b) {
     pthread_t pa = *(pthread_t const*)(void const*)a.storage;
     pthread_t pb = *(pthread_t const*)(void const*)b.storage;
     return pthread_equal(pa, pb) != 0;
+}
+
+bool rt_thread_is_alive(RtThread thread) {
+    /*
+     * Signal 0 performs the permission and existence checks without
+     * delivering anything, which is the standard way to ask "is this
+     * thread still there".
+     */
+    pthread_t t = *(pthread_t const*)(void const*)thread.storage;
+    return pthread_kill(t, 0) == 0;
 }
 
 u64 rt_thread_id(void) {

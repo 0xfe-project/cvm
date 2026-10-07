@@ -96,6 +96,23 @@ void rt_channel_flush(RtChannel* ch);
 void rt_channel_close(RtChannel* ch);
 
 /* ------------------------------------------------------------------ */
+/* memory                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * General-purpose allocation for runtime bookkeeping: thread registry
+ * nodes, per-thread buffers, that sort of thing.
+ *
+ * Not for GC heap objects. The heap is one large reservation, carved up
+ * by the collector itself; allocating objects here would put them outside
+ * the heap and invisible to the bytemap.
+ */
+opaque_mut rt_mem_alloc(usize bytes);
+
+/* Release memory from rt_mem_alloc. NULL is accepted and ignored. */
+void rt_mem_free(opaque_mut p);
+
+/* ------------------------------------------------------------------ */
 /* threads and synchronisation                                         */
 /* ------------------------------------------------------------------ */
 
@@ -158,6 +175,15 @@ bool rt_thread_equal(RtThread a, RtThread b);
 /* Numeric identity, for log lines. Not necessarily unique across time: a
  * finished thread's id may be reused. */
 u64 rt_thread_id(void);
+
+/*
+ * Whether a thread is still running.
+ *
+ * Used to detect a thread that died without detaching from the collector,
+ * which would otherwise leave the registry waiting forever for a safepoint
+ * that can never arrive.
+ */
+bool rt_thread_is_alive(RtThread thread);
 
 /* Give up the rest of the time slice. */
 void rt_thread_yield(void);

@@ -35,6 +35,36 @@ function allowedPrefixes(opts) {
     return base;
 }
 
+/**
+ * Symbols the platform itself requires, keyed by platform.
+ *
+ * The distinction from a prefix allowance matters. A prefix allowance
+ * says "this family of symbols is expected"; these say "the platform
+ * implements something we cannot implement any other way". Each entry has
+ * to justify itself, is scoped to one platform, and is announced when it
+ * applies, so an exception cannot accumulate quietly.
+ *
+ * The rejected alternative for each of these was to widen a prefix and
+ * hope the audit still notices something. The audit's value is that it is
+ * strict, so exceptions are named one at a time.
+ */
+const PLATFORM_EXCEPTIONS = {
+    darwin: [
+        {
+            symbol: "tlv_bootstrap",
+            why:
+                "Darwin implements thread-local variable access inside a " +
+                "dylib through dyld's TLS bootstrap: the generated code " +
+                "loads a function pointer from the TLV descriptor and calls " +
+                "it. This is not a libc facility we chose to use, it is how " +
+                "the platform implements __thread, and there is no " +
+                "alternative short of owning TLS setup ourselves. The " +
+                "symbol does not exist on Linux, where the same access is a " +
+                "single segment-offset instruction.",
+        },
+    ],
+};
+
 function stripMachOSymbolNoise(sym) {
     // Mach-O C symbols are underscore-prefixed, and sanitizer entry points
     // carry an extra one (___asan_init). nm output also carries a leading
@@ -43,14 +73,42 @@ function stripMachOSymbolNoise(sym) {
 }
 
 /** Undefined symbols of an object that are not ours. */
-function foreignSymbols(nm, obj, opts) {
+function foreignSymbols(nm, obj, opts, report) {
     const allowed = allowedPrefixes(opts);
+    const exceptions = PLATFORM_EXCEPTIONS[process.platform] ?? [];
+
     return run(nm, ["-u", obj])
         .stdout.split("\n")
         .map((l) => l.trim())
         .filter(Boolean)
         .map((l) => stripMachOSymbolNoise(l.replace(/^U\s+/, "")))
-        .filter((s) => !allowed.some((p) => s.startsWith(p)));
+        .filter((s) => {
+            if (allowed.some((p) => s.startsWith(p))) return false;
+
+            const exception = exceptions.find((e) => e.symbol === s);
+            if (exception) {
+                if (report) report(exception);
+                return false;
+            }
+            return true;
+        });
+}
+
+/** Wrap text to a column, for readable build output. */
+function wrap(text, width) {
+    const words = text.split(/\s+/);
+    const lines = [];
+    let line = "";
+    for (const w of words) {
+        if (line.length > 0 && line.length + 1 + w.length > width) {
+            lines.push(line);
+            line = w;
+        } else {
+            line = line.length > 0 ? `${line} ${w}` : w;
+        }
+    }
+    if (line.length > 0) lines.push(line);
+    return lines;
 }
 
 /**
@@ -65,6 +123,7 @@ const PROBE_HEADERS = [
     "rt.h",
     "log.h",
     "stats.h",
+    "context.h",
     "cvm/gc.h",
     "gc/layout.h",
     "gc/meta.h",
@@ -112,10 +171,18 @@ export function checkFreestanding({
         return true;
     }
 
+    const applied = new Map();
+    const report = (exception) => applied.set(exception.symbol, exception);
+
     const violations = [];
     for (const obj of [probeObj, ...runtimeObjs]) {
-        const foreign = foreignSymbols(nm, obj, opts);
+        const foreign = foreignSymbols(nm, obj, opts, report);
         if (foreign.length > 0) violations.push({ obj, foreign });
+    }
+
+    for (const exception of applied.values()) {
+        ui.log(`verify: platform exception ${exception.symbol}`);
+        for (const line of wrap(exception.why, 72)) ui.log(`        ${line}`);
     }
 
     if (violations.length > 0) {

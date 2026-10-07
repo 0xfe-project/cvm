@@ -115,6 +115,32 @@ typedef struct CvmGcHeader {
 } CvmGcHeader;
 
 /* ------------------------------------------------------------------ */
+/* Thread state                                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Whether a thread is executing managed code or is inside a foreign call.
+ *
+ * An unmanaged thread cannot be touching the heap, so a collection does
+ * not have to wait for it: it is treated as already at a safepoint. This
+ * is what makes a blocking FFI call harmless rather than a stop-the-world
+ * stall.
+ *
+ * Generated code must bracket every call that can block or re-enter:
+ *
+ *     cvm_thread_enter_unmanaged();
+ *     ... foreign call ...
+ *     cvm_thread_leave_unmanaged();
+ */
+typedef enum CvmThreadState {
+    CVM_THREAD_MANAGED = 0,
+    CVM_THREAD_UNMANAGED = 1,
+} CvmThreadState;
+
+void cvm_thread_enter_unmanaged(void);
+void cvm_thread_leave_unmanaged(void);
+
+/* ------------------------------------------------------------------ */
 /* GCFrame: the precise root stack                                     */
 /* ------------------------------------------------------------------ */
 
@@ -139,14 +165,26 @@ typedef struct CvmGcFrame {
 /* VMContext: per-thread state, reached via TLS                        */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Per-thread state, reached through TLS.
+ *
+ * The first three fields are what generated code touches, and they are
+ * grouped at the front so the hot ones share a cache line. Everything
+ * after them is runtime bookkeeping that generated code never reads.
+ */
 typedef struct CvmVMContext {
     CvmGcFrame* top_frame; /* head of the precise root stack */
     u8* bump_ptr;          /* fast-path allocation cursor */
     u8* bump_end;          /* end of the current bump region */
 
-    /* Owning OS thread identity is an rt concern; vm keeps only an
-     * opaque handle handed down at thread registration. */
-    opaque_mut rt_thread;
+    /*
+     * The runtime's own record for this thread (vm/context.h). A context
+     * is embedded in its thread node, so this points back at the
+     * container. It is an explicit field rather than a reliance on the
+     * embedding offset, because that coupling would be invisible at the
+     * point where someone breaks it.
+     */
+    opaque_mut owner;
 } CvmVMContext;
 
 /*
