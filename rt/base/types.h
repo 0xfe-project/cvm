@@ -111,4 +111,47 @@ CVM_INLINE bool cvm_is_aligned(usize n, usize align) {
     return (n & (align - 1)) == 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* u24: 24-bit unsigned integer, exactly three bytes                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Why a struct and not `u32 x : 24`:
+ *
+ * This type is embedded in block and packet metadata whose byte layout
+ * must be identical on every platform we support. MSVC packs bitfields
+ * differently from GCC and Clang, so a bitfield there silently produces a
+ * different struct. A three-byte struct leaves the compiler no freedom.
+ *
+ * Stored little-endian regardless of host byte order, so that a four-byte
+ * store covering `struct { u8 flags; u24 size; }` lands identically
+ * everywhere. Never read the raw bytes directly; go through the helpers.
+ */
+typedef struct u24 {
+    u8 bytes[3];
+} u24;
+
+_Static_assert(sizeof(u24) == 3, "u24 must occupy exactly three bytes");
+
+CVM_INLINE u32 u24_to_u32(u24 v) {
+    return (u32)v.bytes[0] | ((u32)v.bytes[1] << 8) | ((u32)v.bytes[2] << 16);
+}
+
+CVM_INLINE u24 u24_from_u32(u32 v) {
+    u24 r;
+    r.bytes[0] = (u8)(v & 0xffu);
+    r.bytes[1] = (u8)((v >> 8) & 0xffu);
+    r.bytes[2] = (u8)((v >> 16) & 0xffu);
+    return r;
+}
+
+CVM_INLINE u24 u24_add(u24 v, i32 delta) {
+    return u24_from_u32((u32)((i32)u24_to_u32(v) + delta));
+}
+
+CVM_INLINE bool u24_eq(u24 a, u24 b) {
+    return a.bytes[0] == b.bytes[0] && a.bytes[1] == b.bytes[1] &&
+           a.bytes[2] == b.bytes[2];
+}
+
 #endif /* RT_BASE_TYPES_H */

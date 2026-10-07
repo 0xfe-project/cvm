@@ -30,12 +30,17 @@ export function sanitizerFlags({ asan, tsan }) {
 }
 
 /**
- * Build the include path list. Note the two include roots:
+ * Build the include path list.
+ *
  *   rt/          so `#include "base/types.h"` resolves
  *   vm/include/  so `#include "cvm/gc.h"` resolves
+ *   tests/       hosted only — test-only headers must not be reachable
+ *                from freestanding translation units.
  */
-export function includeFlags(root) {
-    return ["-I", path.join(root, "rt"), "-I", path.join(root, "vm", "include")];
+export function includeFlags(root, flavor) {
+    const dirs = [path.join(root, "rt"), path.join(root, "vm", "include")];
+    if (flavor === "hosted") dirs.push(path.join(root, "tests"));
+    return dirs.flatMap((d) => ["-I", d]);
 }
 
 export function flagsFor({ flavor, opts, toolchain, root, extra = [] }) {
@@ -48,7 +53,7 @@ export function flagsFor({ flavor, opts, toolchain, root, extra = [] }) {
         ...base,
         ...(opts.release ? RELEASE_FLAGS : DEBUG_FLAGS),
         ...sanitizerFlags(opts),
-        ...includeFlags(root),
+        ...includeFlags(root, flavor),
         ...extra,
     ];
 }
