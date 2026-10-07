@@ -68,3 +68,12 @@ TAGS
 # Kept on disk for reading; never part of our history.
 # ---------------------------------------------------------------
 /refs/
+
+# ---------------------------------------------------------------
+# Package-manager noise. This project has no npm dependencies;
+# package.json is only a script runner, so a lockfile would carry
+# no information and churn on every run.
+# ---------------------------------------------------------------
+pnpm-lock.yaml
+package-lock.json
+yarn.lock

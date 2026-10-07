@@ -8,6 +8,9 @@ The reference for the collector's design is the Commix collector from
 Scala Native, kept read-only under `refs/` (Apache 2.0, not part of this
 repository's history).
 
+[TEST.md](TEST.md) covers how the collector is tested: the liveness
+oracles, the stress patterns, and what is borrowed from other collectors.
+
 ## Status
 
 Batch 1 of the port is complete: base types, integer math, heap geometry,
