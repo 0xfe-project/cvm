@@ -17,7 +17,9 @@
 #ifndef CVM_GC_H
 #define CVM_GC_H
 
-#include "../../../rt/base/types.h"
+/* rt/ is on the -I list, so this resolves without fragile relative
+ * traversal. */
+#include "base/types.h"
 
 /* ------------------------------------------------------------------ */
 /* TypeDescriptor                                                      */
