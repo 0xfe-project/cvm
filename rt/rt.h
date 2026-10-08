@@ -137,7 +137,6 @@ void rt_mem_release(opaque_mut base, usize bytes);
  * a reservation so that it can be aligned up without wasting a whole
  * extra page.
  */
-usize rt_mem_page_size(void);
 
 /* ------------------------------------------------------------------ */
 /* threads and synchronisation                                         */
@@ -307,12 +306,6 @@ void rt_sem_post(RtSem* sem);
 
 /* Decrement, blocking while the count is zero. */
 void rt_sem_wait(RtSem* sem);
-
-/* Decrement if the count is non-zero; false if it was zero. */
-bool rt_sem_trywait(RtSem* sem);
-
-/* Current count, for diagnostics and tests. */
-u32 rt_sem_count(RtSem* sem);
 
 /* ------------------------------------------------------------------ */
 /* reader-writer lock                                                  */

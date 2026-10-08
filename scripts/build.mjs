@@ -22,9 +22,14 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, help } from "./lib/args.mjs";
 import { logger, mkdirp, rmrf, collect } from "./lib/util.mjs";
 import { discover } from "./lib/toolchain.mjs";
+import { which } from "./lib/exec.mjs";
 import { flagsFor, sanitizerFlags } from "./lib/flags.mjs";
 import { compile, link, objectPath } from "./lib/cc.mjs";
-import { checkFreestanding } from "./lib/verify.mjs";
+import {
+    checkFreestanding,
+    checkPublicAbi,
+    checkNoDeadFunctions,
+} from "./lib/verify.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BUILD = path.join(ROOT, "build");
@@ -224,6 +229,21 @@ function main() {
         ui,
         runtimeObjs: runtime.vmObjs,
     });
+
+    /*
+     * The public ABI audit needs the *rt* objects too, because some public
+     * functions are implemented there — rt_mem_*, rt_thread_*, the channels.
+     */
+    checkPublicAbi({
+        root: ROOT,
+        runtimeObjs: runtime.objs,
+        opts,
+        ui,
+        nm: which("nm") || which("llvm-nm"),
+        verbose: opts.verbose,
+    });
+
+    checkNoDeadFunctions({ root: ROOT, ui });
 
     ui.log("done");
 }

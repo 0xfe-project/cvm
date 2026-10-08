@@ -181,8 +181,6 @@ typedef struct CvmGcCounters {
     _Atomic u64 collection_ns;
 } CvmGcCounters;
 
-CvmGcCounters* cvm_gc_counters(void);
-
 void cvm_gc_counters_record_collection(u64 start_ns, u64 end_ns);
 
 /* Convenience for tests and for the exit path. */

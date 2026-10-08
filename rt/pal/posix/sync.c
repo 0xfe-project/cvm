@@ -339,21 +339,4 @@ void rt_sem_wait(RtSem* sem) {
     rt_mutex_unlock(&sem->mutex);
 }
 
-bool rt_sem_trywait(RtSem* sem) {
-    rt_mutex_lock(&sem->mutex);
-    bool got = sem->count > 0;
-    if (got) {
-        sem->count--;
-    }
-    rt_mutex_unlock(&sem->mutex);
-    return got;
-}
-
-u32 rt_sem_count(RtSem* sem) {
-    rt_mutex_lock(&sem->mutex);
-    u32 n = sem->count;
-    rt_mutex_unlock(&sem->mutex);
-    return n;
-}
-
 #endif /* !_WIN32 */

@@ -319,20 +319,6 @@ CVM_INLINE LineMeta* cvm_heap_line_meta(CvmHeap const* heap, u32 block) {
     return heap->line_meta_start + (usize)block * CVM_LINE_COUNT;
 }
 
-/* Marking state, for the marker and the collector driver. */
-CVM_INLINE CvmGreyList* cvm_heap_grey_empty(CvmHeap* heap) {
-    return &heap->mark.empty;
-}
-CVM_INLINE CvmGreyList* cvm_heap_grey_full(CvmHeap* heap) {
-    return &heap->mark.full;
-}
-CVM_INLINE CvmGreyList* cvm_heap_grey_weak(CvmHeap* heap) {
-    return &heap->mark.found_weak_refs;
-}
-CVM_INLINE CvmGreyPacket* cvm_heap_packets(CvmHeap* heap) {
-    return heap->mark.packets;
-}
-
 /* Is this address inside the heap's usable window? */
 CVM_INLINE bool cvm_heap_contains(CvmHeap const* heap, u8 const* p) {
     return p >= heap->heap_start && p < heap->heap_end;

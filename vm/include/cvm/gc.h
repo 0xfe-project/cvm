@@ -91,7 +91,22 @@ struct CvmTypeDescriptor {
  * two flags anyway.
  */
 #define CVM_GC_MARKED ((u32)1u << 0)
-#define CVM_GC_PINNED ((u32)1u << 1)
+
+/*
+ * Bit 1 is free, and deliberately so.
+ *
+ * It was CVM_GC_PINNED, meaning "this object's address must not change".
+ * Pinning is only observable to a collector that moves objects, and no
+ * collector here does: cvm does not evacuate, the Commix reference this
+ * project ports from does not either, and neither does Go. So the flag had
+ * no code that set it and none that read it — a promise of behaviour with
+ * nothing behind it, which is the kind of thing a frontend reads in a
+ * header and relies on.
+ *
+ * When evacuation arrives, the flag comes back with the code that reads it,
+ * in the same change. That is the rule for every flag in this header: a
+ * flag exists because something honours it.
+ */
 
 /*
  * A weak reference. Marking records such an object but does not trace
@@ -268,7 +283,6 @@ CVM_INLINE void cvm_safepoint_poll(void) {
 typedef struct CvmGcFrame {
     struct CvmGcFrame* prev;
     u32 num_slots;
-    u32 flags; /* e.g. CVM_FRAME_IN_FFI */
 
     /*
      * The caller's array of live pointers, not storage inside the frame.
@@ -282,10 +296,21 @@ typedef struct CvmGcFrame {
     opaque_mut* roots; /* num_slots entries */
 } CvmGcFrame;
 
-/* Thread is inside a blocking FFI call; GC may treat this frame as a safe
- * root without waiting for the thread to yield. */
-#define CVM_FRAME_IN_FFI ((u32)1u << 0)
-
+/*
+ * No frame flags.
+ *
+ * An earlier version carried CVM_FRAME_IN_FFI here, meaning "the thread that
+ * owns this frame is inside a foreign call, so do not wait for it". It was
+ * never set and never read, and the reason is that the fact it describes is
+ * already recorded one level up: the *thread* is either managed or
+ * unmanaged, and that is what a collector consults when deciding whether to
+ * wait. A per-frame copy would be a second source of truth for the same
+ * fact, and the first time the two disagreed the collector would be wrong
+ * in a way no test would name.
+ *
+ * The frame is therefore the frame: where the previous one is, how many
+ * slots, and the slots.
+ */
 /* ------------------------------------------------------------------ */
 /* VMContext: per-thread state, reached via TLS                        */
 /* ------------------------------------------------------------------ */
@@ -393,7 +418,6 @@ CVM_INLINE void cvm_frame_push(CvmGcFrame* frame, opaque_mut* roots, u32 num_slo
     CvmVMContext* ctx = cvm_ctx();
     frame->prev = ctx->top_frame;
     frame->num_slots = num_slots;
-    frame->flags = 0;
     frame->roots = roots;
     ctx->top_frame = frame;
 }
@@ -559,13 +583,19 @@ CVM_INLINE usize cvm_object_size(CvmGcHeader const* header) {
     return cvm_align_up(size, CVM_ALLOC_ALIGNMENT);
 }
 
-/* ------------------------------------------------------------------ */
-/* Root scanning entry point (called by the collector, not by          */
-/* generated code)                                                     */
-/* ------------------------------------------------------------------ */
-
-struct CvmHeap;
-void cvm_gc_scan_frame(struct CvmHeap* heap, CvmGcFrame const* frame);
-void cvm_gc_scan_object(struct CvmHeap* heap, CvmGcHeader* obj);
+/*
+ * Nothing here for the collector to call.
+ *
+ * An earlier version of this header declared cvm_gc_scan_frame and
+ * cvm_gc_scan_object, anticipating an entry point for the marker. They were
+ * never defined, which is worse than not declaring them: a frontend reading
+ * this header would have written a call to a function that does not exist,
+ * and found out at link time. The marker's real entry points are internal
+ * (gc/marker.h), because generated code does not drive marking — the
+ * collector does.
+ *
+ * The build now checks for this class of mistake; see the public-ABI audit
+ * in scripts/lib/verify.mjs.
+ */
 
 #endif /* CVM_GC_H */

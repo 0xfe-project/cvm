@@ -318,7 +318,7 @@ enough to take the validated slow path, found nothing.
 | **Large objects** | allocations above the 8 KiB threshold | superblock allocation, split, and return |
 | **Mixed, multithreaded** | several mutators running the above concurrently | safepoint coordination, grey packet handoff |
 | **Thread storm** | threads registering and unregistering rapidly | thread registry races, blocks held by dead threads |
-| **FFI boundary** | frequent managed/unmanaged transitions during collections | frames marked in-FFI, pinning, external handles |
+| **FFI boundary** | frequent managed/unmanaged transitions during collections | the thread state boundary, external handles, finalizer timing |
 
 Two of these deserve a note:
 
@@ -326,9 +326,14 @@ Two of these deserve a note:
   sizes chosen so that allocations land on line boundaries in awkward
   ways, and lifetimes chosen so that holes accumulate without ever
   becoming a full free block.
-- **FFI boundary** is where pinning is exercised. A test that pins an
-  object, forces a collection, and then verifies the object did not move
-  is the only way to know evacuation honours the pin.
+- **FFI boundary** exercises the managed/unmanaged thread state and the
+  external-handle path. Note what is *not* here: pinning. An earlier version
+  of this document listed it, and the flag it referred to
+  (`CVM_GC_PINNED`) was never set and never read by any code — pinning is
+  only observable to a collector that moves objects, and none here does. The
+  flag is gone from the ABI rather than described as working. When
+  evacuation arrives it will bring the flag back, and this pattern will be
+  the one that tests it.
 
 ## Borrowing from other collectors
 

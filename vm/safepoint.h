@@ -70,7 +70,6 @@ bool cvm_safepoint_in_progress(void);
 void cvm_safepoint_park(void);
 
 /* Whether the calling thread is parked right now. */
-bool cvm_safepoint_is_parked(void);
 
 /*
  * Wake a collector that may be waiting for a thread which is going away.

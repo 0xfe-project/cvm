@@ -34,10 +34,6 @@ void cvm_log_set_channel(RtChannel* ch) {
     log_channel = ch;
 }
 
-RtChannel* cvm_log_get_channel(void) {
-    return log_channel;
-}
-
 /* ------------------------------------------------------------------ */
 /* level names and parsing                                             */
 /* ------------------------------------------------------------------ */

@@ -269,19 +269,21 @@ bool cvm_gc_collect(CvmHeap* heap) {
      * preparation empties the block allocator, so there is nothing to sweep
      * until a mutator needs memory, and that mutator drives it.
      */
+    prepare_for_sweep(heap);
+
     if (heap->pool != NULL) {
         atomic_store_explicit(&heap->pool->phase, (u32)CVM_GC_IDLE,
                               memory_order_release);
     }
-    prepare_for_sweep(heap);
-
-    u64 end_ns = rt_time_nanos();
 
     /*
-     * Record this collection's figures for the next one's growth
-     * decision. The period is the time between this collection's marking
-     * and the previous one's — the program's running time, not the
-     * collection's duration.
+     * Record this collection's figures for the next collection's growth
+     * decision. The period is the time between this collection's marking and
+     * the previous one's — the program's running time, not the collection's
+     * duration.
+     *
+     * These are a handful of stores and belong inside the stop, which is
+     * where they are: they are not why the recording below moved.
      */
     heap->mark.last_mark_ns = mark_end - mark_start;
     heap->mark.last_period_ns = mark_end - heap->mark.last_end_ns;
@@ -290,12 +292,23 @@ bool cvm_gc_collect(CvmHeap* heap) {
     heap->mark.current_end_ns = mark_end;
     heap->mark.has_history = true;
 
-    bool grew = false; /* decided at the start of the next collection */
-
-    if (heap->pool != NULL) {
-        atomic_store_explicit(&heap->pool->phase, (u32)CVM_GC_IDLE,
-                              memory_order_release);
-    }
+    /*
+     * The stop ends here, and it is measured here.
+     *
+     * The ordering is the whole of the fix, and it was wrong in a way that
+     * flattered the collector. The release is what ends the stop, so a
+     * timestamp taken before it understates the pause — and worse, the
+     * counter update, the summary struct and the log line all used to run
+     * *before* the release, which put them inside the stop but outside the
+     * measurement. The error grew with the log level: a debug-level run
+     * writes a line per collection through a syscall, stopping the world
+     * longer while reporting the same collection time.
+     *
+     * Everything after this point touches only locals and atomics that no
+     * mutator reads for correctness, so it is safe with the world running.
+     */
+    cvm_safepoint_release();
+    u64 end_ns = rt_time_nanos();
 
     last_collection = (CvmCollectionStats){
         .start_ns = start_ns,
@@ -304,7 +317,7 @@ bool cvm_gc_collect(CvmHeap* heap) {
         .weak_cleared = weak_cleared,
         .blocks_before = blocks_before,
         .blocks_after = heap->block_count,
-        .grew = grew,
+        .grew = false, /* decided at the start of the next collection */
     };
 
     cvm_gc_counters_record_collection(start_ns, end_ns);
@@ -314,11 +327,11 @@ bool cvm_gc_collect(CvmHeap* heap) {
         fmt_u32(&m.fmt, weak_cleared);
         fmt_lit(&m.fmt, ", mark ");
         fmt_u64(&m.fmt, (mark_end - mark_start) / 1000);
-        fmt_lit(&m.fmt, "us, sweep ");
-        fmt_lit(&m.fmt, grew ? "started (heap grew)" : "started");
+        fmt_lit(&m.fmt, "us, pause ");
+        fmt_u64(&m.fmt, (end_ns - start_ns) / 1000);
+        fmt_lit(&m.fmt, "us, sweep started");
     }
 
-    cvm_safepoint_release();
     cvm_thread_set_activity(CVM_ACT_IDLE);
     return true;
 }

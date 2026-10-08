@@ -115,10 +115,6 @@ u64 cvm_stats_now(CvmStats const* stats) {
 
 static CvmGcCounters gc_counters = {.collections = 0, .collection_ns = 0};
 
-CvmGcCounters* cvm_gc_counters(void) {
-    return &gc_counters;
-}
-
 void cvm_gc_counters_record_collection(u64 start_ns, u64 end_ns) {
     if (start_ns == 0) {
         return;

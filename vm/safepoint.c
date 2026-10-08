@@ -379,14 +379,6 @@ void cvm_safepoint_park(void) {
     rt_mutex_unlock(&stw_mutex);
 }
 
-bool cvm_safepoint_is_parked(void) {
-    CvmThreadNode* node = cvm_thread_node();
-    if (node == NULL) {
-        return false;
-    }
-    return atomic_load_explicit(&node->parked, memory_order_acquire);
-}
-
 void cvm_safepoint_notify_thread_changed(void) {
     if (!atomic_load(&stw_ready)) {
         return;

@@ -74,7 +74,6 @@ CvmLogLevel cvm_log_get_level(void);
 
 /* Destination. NULL means stderr. */
 void cvm_log_set_channel(RtChannel* ch);
-RtChannel* cvm_log_get_channel(void);
 
 /*
  * Read the level from the environment (CVM_LOG_LEVEL: debug, info, warn,

@@ -28,7 +28,15 @@ What is not: Windows. The platform layer is POSIX-shaped; the trap
 trampoline has no Windows branch, so that build would poll instead, and
 nothing in `rt/pal/` is written for it yet. Evacuation is also absent —
 sweeping reclaims lines and blocks and leaves the fragmentation that
-opportunistic evacuation would address.
+opportunistic evacuation would address — and because nothing moves objects,
+there is no pinning either. The flag for it was removed rather than left in
+the header describing behaviour no code implements.
+
+What is not, and is easy to mistake for present: parallel sweeping. The
+worker pool exists and marks in parallel, and `pool.c` has a `CVM_GC_SWEEP`
+case, but the collector never wakes workers into it — so sweeping is
+single-threaded today. The case is reachable code that nothing reaches,
+which is the shape of a feature that looks shipped.
 
 ## Two safepoint mechanisms
 

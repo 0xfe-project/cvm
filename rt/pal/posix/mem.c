@@ -69,9 +69,4 @@ void rt_mem_release(opaque_mut base, usize bytes) {
     munmap(base, bytes);
 }
 
-usize rt_mem_page_size(void) {
-    long page = sysconf(_SC_PAGESIZE);
-    return (page > 0) ? (usize)page : 4096u;
-}
-
 #endif /* !_WIN32 */
