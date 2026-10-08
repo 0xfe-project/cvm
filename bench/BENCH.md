@@ -294,22 +294,23 @@ just after that, so the sweeping proper happens with the program running.
 That distinction has to be in the output, or cvm's pauses will look
 artificially good next to collectors that sweep inside the stop.
 
-One inaccuracy in the current code, recorded here so the first results are
-not over-read: the world is released a few statements *after* the measured
-duration ends, so the counter update and the log line happen while the
-world is still stopped and are not counted. The gap is small and grows with
-the log level — a debug-level run writes more, so it stops the world longer
-while reporting the same collection time. The fix is to release before
-recording, which is safe because everything recorded is already in locals,
-and it is task §t39 of the plan.
+That inaccuracy was real and is fixed: the world used to be released a few
+statements *after* the measured duration ended, so the counter update and the
+log line happened while the world was still stopped and were not counted.
+The gap grew with the log level — a debug-level run wrote more, stopping the
+world longer while reporting the same collection time. The release now
+happens before the recording, and the recording happens with the world
+running.
 
 **Space** — heap size, peak RSS, and peak RSS ÷ live set.
 
 **Collector's own accounting** — collections, total time in collection, and
 whatever each backend can report: cvm's per-phase event log
-(`CVM_LOG_LEVEL=info`, or the stats channel once §t33 of the plan is wired),
-bdwgc's `GC_get_gc_no` and heap statistics, Go's `MemStats`, tgc's slot
-counts.
+(`CVM_LOG_LEVEL=info`, or the stats channel, which the collector writes to
+now), bdwgc's `GC_get_gc_no` and heap statistics, Go's `MemStats`, tgc's slot
+counts. Each backend's folder README lists what that one can and cannot
+report; bdwgc's live-object count, for instance, is zero, because it tracks
+bytes.
 
 Every figure gets the same treatment: the harness prints raw per-run values
 and the derived summary, so a surprising summary can be checked against the
