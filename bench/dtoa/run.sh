@@ -25,9 +25,10 @@ out="$root/bench/build/dtoa/dtoa-bench"
 mkdir -p "$(dirname "$out")"
 
 "$cc" -O2 -std=c11 -o "$out" \
-    -I "$root/rt" -I "$qs" -I "$lj" \
+    -I "$root/rt" -I "$root/vm" -I "$qs" -I "$lj" \
     "$here/dtoa-bench.c" \
     "$qs/dtoa.c" \
-    "$lj/jnum.c"
+    "$lj/jnum.c" \
+    "$root/vm/str/dtoa.c"
 
 exec "$out" "$@"

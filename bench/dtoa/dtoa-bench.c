@@ -48,6 +48,7 @@
 
 #include "dtoa.h"           /* quickjs: js_dtoa, js_atod, JSDTOA*TempMem */
 #include "jnum.h"           /* ljson:  jnum_dtoa, jnum_atod */
+#include "str/dtoa.h"       /* ours, ported from the quickjs one */
 
 #define BUF_CAP 64
 
@@ -82,6 +83,32 @@ static f64 parse_jnum(char const* s) {
     return jnum_atod(s);
 }
 
+/*
+ * The port itself. It is the quickjs algorithm, so its row is not a third
+ * candidate — it is the check that rewriting the file into our types and its
+ * parser onto (ptr, len) did not change a single conversion. It should be
+ * indistinguishable from the quickjs row, including bytes/value.
+ */
+static u32 fmt_ours(f64 d, char* buf) {
+    CvmDtoaTempMem tmp;
+    i32 n = cvm_dtoa((u8*)buf, d, 10, 0, CVM_DTOA_FORMAT_FREE | CVM_DTOA_MINUS_ZERO, &tmp);
+    return (u32)(n < 0 ? 0 : n);
+}
+
+static f64 parse_ours(char const* s) {
+    CvmAtodTempMem tmp;
+    usize len = strlen(s);
+    usize consumed = 0;
+    str text = {.ptr = (u8 const*)s, .len = len};
+    f64 v = cvm_atod(text, &consumed, 10, 0, &tmp);
+    /* The scanners differ in shape here: ours reports how much it used, and a
+     * number that stops early is a different answer, not a success. */
+    if (consumed != len) {
+        return 0.0 / 0.0;
+    }
+    return v;
+}
+
 typedef struct Impl {
     char const* name;
     u32 (*fmt)(f64, char*);
@@ -91,6 +118,7 @@ typedef struct Impl {
 static Impl const IMPLS[] = {
     {"quickjs", fmt_quickjs, parse_quickjs},
     {"jnum", fmt_jnum, parse_jnum},
+    {"ours", fmt_ours, parse_ours},
 };
 
 #define IMPL_COUNT (sizeof(IMPLS) / sizeof(IMPLS[0]))

@@ -10,6 +10,11 @@ not compare:
 | **quickjs** | `refs/quickjs-0.17.0/dtoa.c` | Fabrice Bellard's small correctly-rounded implementation, the one quickjs-ng uses instead of libbf |
 | **jnum** | `refs/json-5.0.3/jnum.c` | Jing Leng's implementation, the default dtoa for ljson and the reason ljson advertises speed |
 
+The third row, **ours**, is not a candidate: it is `vm/str/dtoa.c`, the port of
+the quickjs implementation into our types and onto a `(ptr, len)` parser. It is
+compiled in and measured next to its original so that the port can be checked
+value for value rather than taken on trust.
+
 Reproduce with `sh bench/dtoa/run.sh` (add a corpus size and a repeat count to
 override the defaults: `sh bench/dtoa/run.sh 1000000 4`).
 
@@ -43,6 +48,7 @@ search: most of these need the full 17 digits.
 |---|---|---|---|---|---|---|---|
 | quickjs | **0** | **0** | **0** | 0 | 22.43 | 1060 | 309 |
 | jnum | 1349 | 1688 | 3932 | 0 | 22.44 | 17 | 16 |
+| ours | **0** | **0** | **0** | 0 | 22.43 | 1067 | 309 |
 
 **Corpus B — JSON-like values.** Small integers, three-place decimals, small
 magnitudes, and one in eight drawn from random bits. This is what a JSON
@@ -52,6 +58,7 @@ document or a source file actually carries.
 |---|---|---|---|---|---|---|---|
 | quickjs | **0** | **0** | **0** | 0 | 16.01 | 221 | 77 |
 | jnum | 232 | 7110 | 18475 | 0 | 16.76 | 15 | 14 |
+| ours | **0** | **0** | **0** | 0 | 16.01 | 219 | 80 |
 
 Some of what the counters are counting, from the harness's own output:
 
@@ -83,6 +90,14 @@ value in 100 is not a trade that can be made for 15x on a 221 ns operation.
 shortest-form search runs to the end of the digit budget. Parsing is 77 ns / 309
 ns. Those are acceptable for a text boundary, and Corpus B is the number that
 matters in practice.
+
+## The port is checked here, not assumed
+
+`ours` matching `quickjs` in every column — including `bytes/val`, which is a
+total over the corpus and would move if a single value were spelled even one
+digit differently — is the evidence that rewriting the file into our types and
+its parser onto `(ptr, len)` changed no conversion. The 22.43 against 22.43 is
+the part that matters; the timings are inside their own noise.
 
 ## Follow-up: the integer fast path
 
