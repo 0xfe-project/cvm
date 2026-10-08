@@ -19,8 +19,7 @@ frontend ──generates──▶ C ──links──▶ libvm (the collector) +
 | [vm/](vm/README.md) | the collector: the algorithm, how a collection runs, what the design is good at and what it pays, and how to call it |
 | [rt/](rt/README.md) | the platform layer: the only place libc is allowed, and the ABI `vm/` calls down into |
 | [bench/](bench/README.md) | four collectors measured on seven workloads, with the figures and what is missing from them |
-| [BENCH.md](bench/BENCH.md) | the benchmark's specification: fairness rules, the scenarios, and what the numbers cannot tell you |
-| [TEST.md](TEST.md) | how the collector is tested: liveness oracles, stress patterns, and what is borrowed from other collectors |
+
 
 ## Two rules that shape everything
 

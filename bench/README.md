@@ -94,7 +94,6 @@ pnpm run bench:quick     three repetitions — unreliable on the small
 
 | path | what |
 |---|---|
-| `BENCH.md` | the specification: fairness rules, scenarios, what these numbers cannot tell you |
 | `harness/` | the interface every backend implements, the timing loop, the CSV |
 | `scenarios/` | the seven workloads, shared by all four collectors |
 | `cvm/` `bdwgc/` `tgc/` `go/` | one collector each, with its backend and a short README |
