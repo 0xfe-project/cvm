@@ -357,6 +357,15 @@ static void trace_type(CvmHeap* heap, u8* base, CvmTypeDescriptor const* type,
         break;
     }
 
+    case CVM_TYPE_SCALAR_ARRAY:
+        /*
+         * A leaf with a length. There is nothing inside to trace, and the
+         * length is read elsewhere to find where the object ends — so the
+         * whole of the work here is to not walk the elements, which for a
+         * string would be a loop per byte to find nothing.
+         */
+        break;
+
     case CVM_TYPE_STRUCT_ARRAY: {
         usize length = *(usize*)(base + type->array_length_offset);
         CvmTypeDescriptor const* element = type->array_elem_type;

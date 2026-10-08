@@ -63,6 +63,19 @@ typedef enum CvmTypeKind {
 
     /* Leaf: contains no GC pointers at all. Scanner short-circuits. */
     CVM_TYPE_SCALAR = 3,
+
+    /*
+     * Array of leaf elements (stride = element descriptor size). The object
+     * has a length-driven tail that contains no pointers anywhere, so the
+     * scanner skips it wholesale while the object's extent still follows the
+     * length.
+     *
+     * This is what a string is, and what any other opaque blob is.
+     * STRUCT_ARRAY expresses the same layout and would visit every element to
+     * discover that none of them is a pointer — a loop per byte of every
+     * string in the heap, at every collection.
+     */
+    CVM_TYPE_SCALAR_ARRAY = 4,
 } CvmTypeKind;
 
 struct CvmTypeDescriptor {
@@ -563,7 +576,8 @@ CVM_INLINE usize cvm_array_stride(CvmTypeDescriptor const* type) {
 }
 
 CVM_INLINE bool cvm_type_is_array(CvmTypeDescriptor const* type) {
-    return type->kind == CVM_TYPE_PTR_ARRAY || type->kind == CVM_TYPE_STRUCT_ARRAY;
+    return type->kind == CVM_TYPE_PTR_ARRAY || type->kind == CVM_TYPE_STRUCT_ARRAY ||
+           type->kind == CVM_TYPE_SCALAR_ARRAY;
 }
 
 /*
