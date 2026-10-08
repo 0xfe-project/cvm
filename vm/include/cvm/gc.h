@@ -459,7 +459,6 @@ CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
         return cvm_alloc_slow(type, size);
     }
     ctx->bump_ptr = p + size;
-    CVM_PREFETCH(p + 64);
 
     /*
      * Zero before publishing. Generated code assumes a fresh object has
