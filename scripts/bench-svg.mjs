@@ -352,8 +352,8 @@ function wallFigure(mode, rows) {
     return range_figure({
         title: `Wall time, ${mode} mode`,
         subtitle:
-            `${MODE_NOTE[mode]}. Median of each row's repetitions as a dot, min to ` +
-            `max as the line through it, so the line's length is that row's spread.`,
+            `${MODE_NOTE[mode]}. Dot is the median of the row's repetitions; the ` +
+            `line is that run's shortest to longest, so its length is the spread.`,
         rows,
         pick: (r, which) =>
             which === "lo" ? r.wallMin : which === "hi" ? r.wallMax : r.wallMed,
@@ -366,9 +366,19 @@ function wallFigure(mode, rows) {
 function pauseFigure(mode, rows) {
     return range_figure({
         title: `Longest stop-the-world pause, ${mode} mode`,
+        /*
+         * The line here is NOT the same interval as the wall figures' line,
+         * and the two would otherwise look identical. The results carry a min
+         * and a max for wall time but only a median and a worst for the
+         * pause, so this line runs from the typical pause to the worst one
+         * observed — a different thing, said out loud.
+         */
         subtitle:
-            `${MODE_NOTE[mode]}. Each collector's own longest pause, median across ` +
-            `repetitions — the axis the four designs differ on most, on a log scale.`,
+            `${MODE_NOTE[mode]}. Each collector's own longest pause. Dot is the ` +
+            `median across repetitions; the line runs from there to the worst ` +
+            `single pause in the run — not a min-to-max spread, which the ` +
+            `results do not record for this column. Log scale: this is the axis ` +
+            `the four designs differ on most.`,
         rows,
         pick: (r, which) =>
             which === "lo" ? r.pauseMed : which === "hi" ? r.pauseMax : r.pauseMed,
@@ -380,12 +390,8 @@ function pauseFigure(mode, rows) {
 
 const figures = [
     { name: "wall-alloc.svg", svg: wallFigure("alloc", labelled.filter((r) => r.mode === "alloc")) },
-    { name: "wall-fixed.svg", svg: wallFigure("fixed", labelled.filter((r) => r.mode === "fixed")) },
     { name: "wall-auto.svg", svg: wallFigure("auto", labelled.filter((r) => r.mode === "auto")) },
-    { name: "pause-fixed.svg", svg: pauseFigure("fixed", labelled.filter((r) => r.mode === "fixed")) },
     { name: "pause-auto.svg", svg: pauseFigure("auto", labelled.filter((r) => r.mode === "auto")) },
-    { name: "spread-alloc.svg", svg: spread_figure(labelled.filter((r) => r.mode === "alloc"), "alloc") },
-    { name: "spread-fixed.svg", svg: spread_figure(labelled.filter((r) => r.mode === "fixed"), "fixed") },
     { name: "spread-auto.svg", svg: spread_figure(labelled.filter((r) => r.mode === "auto"), "auto") },
 ];
 for (const { name, svg } of figures) {

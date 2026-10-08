@@ -94,6 +94,27 @@ export function buildRuntime({ root, toolchain, ui, verbose }) {
         "-Ivm/include",
     ];
 
+    /*
+     * Every header is a dependency of every object.
+     *
+     * Conservative on purpose. The freshness check used to compare an object
+     * only against the source file it was compiled from, which means editing
+     * a header rebuilt nothing — and the collector's constants live in
+     * headers. Chasing a performance regression through a stale build cost an
+     * hour: a value was changed, the build said nothing, and the measurement
+     * was of the previous binary twice over. Rebuilding twenty-nine small
+     * files when a header moves is a moment's work and cannot lie.
+     */
+    const headers = [
+        ...collect(path.join(root, "vm"), [".h"]),
+        ...collect(path.join(root, "rt"), [".h"]),
+    ];
+    let newestHeader = 0;
+    for (const h of headers) {
+        const t = fs.statSync(h).mtimeMs;
+        if (t > newestHeader) newestHeader = t;
+    }
+
     const objects = [];
     let built = 0;
 
@@ -103,7 +124,9 @@ export function buildRuntime({ root, toolchain, ui, verbose }) {
         objects.push(obj);
 
         const fresh =
-            fs.existsSync(obj) && fs.statSync(obj).mtimeMs >= fs.statSync(src).mtimeMs;
+            fs.existsSync(obj) &&
+            fs.statSync(obj).mtimeMs >= fs.statSync(src).mtimeMs &&
+            fs.statSync(obj).mtimeMs >= newestHeader;
         if (fresh) continue;
 
         runOrDie(
@@ -197,6 +220,7 @@ export function buildBinaries({ root, toolchain, thirdparty, ui, verbose }) {
             const fresh =
                 fs.existsSync(outAbs) &&
                 deps.every((d) => fs.existsSync(d) && fs.statSync(outAbs).mtimeMs >= fs.statSync(d).mtimeMs) &&
+                fs.statSync(outAbs).mtimeMs >= newestHeader &&
                 (!backend.bdwgc || fs.statSync(outAbs).mtimeMs >= fs.statSync(bdwgcLibrary(root)).mtimeMs);
 
             if (!fresh) {

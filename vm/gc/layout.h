@@ -127,7 +127,7 @@
  * the same argument applies to whether a thread should exist at all: a 4 MiB
  * heap gets one worker now instead of nine.
  */
-#define CVM_MARK_MIN_PACKETS_PER_THREAD 16u
+#define CVM_MARK_MIN_PACKETS_PER_THREAD 3u
 #define CVM_MARK_SPAWN_THREADS_MIN_PACKETS (2u * CVM_MARK_MIN_PACKETS_PER_THREAD)
 
 /*
