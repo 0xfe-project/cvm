@@ -423,8 +423,23 @@ void cvm_pool_wait_idle(CvmGcPool* pool) {
      * Proceeding earlier would mean a phase change landing in the middle
      * of a worker's batch.
      */
+    /*
+     * Spin before yielding. rt_thread_yield is sched_yield, a system call,
+     * and a worker finishing its share of a mark phase takes tens of
+     * microseconds — so polling with a syscall per iteration costs more than
+     * the parallelism it is waiting for. A bounded spin of the cheap hint
+     * first, then yield, keeps the CPU from being wasted while still giving
+     * the scheduler a chance when the wait is genuinely long.
+     */
+    u32 spins = 0;
     while (cvm_pool_any_active(pool)) {
-        rt_thread_yield();
+        if (spins < 256) {
+            rt_cpu_relax();
+            spins++;
+        } else {
+            rt_thread_yield();
+            spins = 0;
+        }
     }
 }
 

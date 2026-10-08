@@ -214,6 +214,12 @@ bool rt_thread_is_alive(RtThread thread);
 /* Give up the rest of the time slice. */
 void rt_thread_yield(void);
 
+/*
+ * A hint that this thread is spinning, cheap enough to call in a tight poll
+ * loop. Not a scheduling point — see the note on the implementation.
+ */
+void rt_cpu_relax(void);
+
 /* Usable parallelism, at least 1. */
 u32 rt_hardware_threads(void);
 
