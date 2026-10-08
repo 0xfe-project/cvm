@@ -236,6 +236,34 @@ i32 cvm_cr_op(CvmCharRange* cr, rune const* a, i32 a_len, rune const* b, i32 b_l
 i32 cvm_cr_invert(CvmCharRange* cr);
 
 /* ------------------------------------------------------------------ */
+/* properties, by name                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The `\p{...}` surface: a name goes in, a character range comes out.
+ *
+ * Three of them, because that is what the standards have: a general category
+ * (Lu, Lt, Nd, and the groups like L and C that are unions of them), a script
+ * (Latin, Greek, Han), and — with the ext flag — the script extensions, which is
+ * the set a character is shared between. The fourth, `\p{...}` proper with its
+ * binary properties, is built on the same range machinery and is not in yet.
+ *
+ * `cr` must be initialized and empty. The return is 0, -1 on an allocation
+ * failure, or -2 when the name is not one this knows — a distinction the caller
+ * needs, because a typo in a pattern is a different problem from a full heap.
+ */
+i32 cvm_unicode_script(CvmCharRange* cr, u8 const* script_name, bool is_ext);
+i32 cvm_unicode_general_category(CvmCharRange* cr, u8 const* gc_name);
+
+/*
+ * Case-fold a character set, for the regex engine's case-insensitive matching:
+ * every character in the set gains the characters it folds to and from. `full`
+ * is the same flag cvm_unicode_canonicalize takes, and has to be the same value
+ * on the pattern and the subject for a match to mean anything.
+ */
+i32 cvm_cr_regexp_canonicalize(CvmCharRange* cr, bool full);
+
+/* ------------------------------------------------------------------ */
 /* normalization                                                       */
 /* ------------------------------------------------------------------ */
 

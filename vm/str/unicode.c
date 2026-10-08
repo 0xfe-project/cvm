@@ -45,6 +45,7 @@
 #include "base/types.h"
 #include "cvm/builder.h"
 #include "cvm/str.h"
+#include "base/sort.h"
 #include "mem.h"
 #include "rt.h"
 
@@ -774,6 +775,487 @@ i32 cvm_cr_invert(CvmCharRange* cr) {
     cr->len = len + 2;
     cr_compress(cr);
     return 0;
+}
+
+/*
+ * The three questions cvm_cr_regexp_canonicalize can ask of a character: whether
+ * uppercasing, lowercasing or folding changes it. Upstream defines these just
+ * above the function that uses them; they are here because the slice of the port
+ * that brought the function in started after them.
+ */
+#define CASE_U (1 << 0)
+#define CASE_L (1 << 1)
+#define CASE_F (1 << 2)
+
+/* ------------------------------------------------------------------ */
+/* properties, by name                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The name tables are the one place in this file where text is NUL-terminated:
+ * they are generated data, and that is how the generator emits them. These three
+ * are what reading them needs, and they are here rather than called out to a libc
+ * that a freestanding translation unit does not have.
+ *
+ * Everywhere else in the runtime, text is a pointer and a length.
+ */
+static usize cstr_len(u8 const* s) {
+    usize n = 0;
+    while (s[n] != 0u) {
+        n++;
+    }
+    return n;
+}
+
+static bool cstr_eq(u8 const* a, u8 const* b) {
+    usize i = 0;
+    while (a[i] != 0u && a[i] == b[i]) {
+        i++;
+    }
+    return a[i] == b[i];
+}
+
+/* The first occurrence of `c`, or NULL. */
+static u8 const* cstr_find(u8 const* s, u8 c) {
+    for (usize i = 0; s[i] != 0u; i++) {
+        if (s[i] == c) {
+            return s + i;
+        }
+    }
+    return NULL;
+}
+
+static i32 unicode_find_name(const u8* name_table, const u8* name) {
+    const u8 *p, *r;
+    i32 pos;
+    usize name_len, len;
+
+    p = name_table;
+    pos = 0;
+    name_len = cstr_len(name);
+    while (*p) {
+        for (;;) {
+            r = cstr_find(p, ',');
+            if (!r)
+                len = cstr_len(p);
+            else
+                len = r - p;
+            if (len == name_len && !memcmp(p, name, name_len))
+                return pos;
+            p += len + 1;
+            if (!r)
+                break;
+        }
+        pos++;
+    }
+    return -1;
+}
+
+/* 'cr' must be initialized and empty. Return 0 if OK, -1 if error, -2
+   if not found */
+i32 cvm_unicode_script(CvmCharRange* cr, const u8* script_name, bool is_ext) {
+    i32 script_idx;
+    const u8 *p, *p_end;
+    u32 c, c1, b, n, v, v_len, i, type;
+    CvmCharRange cr1_s = {0}, *cr1 = NULL;
+    CvmCharRange cr2_s = {0}, *cr2 = &cr2_s;
+    bool is_common;
+
+    if (cstr_eq(script_name, (u8 const*)"Unknown") ||
+        cstr_eq(script_name, (u8 const*)"Zzzz")) {
+        /* "Unknown" (ISO 15924 code "Zzzz") is excluded from the name table;
+           it matches every character outside any script. */
+        script_idx = UNICODE_SCRIPT_Unknown;
+    } else {
+        script_idx = unicode_find_name(unicode_script_name_table, script_name);
+        if (script_idx < 0)
+            return -2;
+        /* Note: the name table excludes the "Unknown" Script */
+        script_idx += UNICODE_SCRIPT_Unknown + 1;
+    }
+
+    is_common =
+        (script_idx == UNICODE_SCRIPT_Common || script_idx == UNICODE_SCRIPT_Inherited);
+    if (is_ext) {
+        cr1 = &cr1_s;
+        cvm_cr_init(cr1, cr->alloc);
+        cvm_cr_init(cr2, cr->alloc);
+    } else {
+        cr1 = cr;
+    }
+
+    p = unicode_script_table;
+    p_end = unicode_script_table + countof(unicode_script_table);
+    c = 0;
+    while (p < p_end) {
+        b = *p++;
+        type = b >> 7;
+        n = b & 0x7f;
+        if (n < 96) {
+        } else if (n < 112) {
+            n = (n - 96) << 8;
+            n |= *p++;
+            n += 96;
+        } else {
+            n = (n - 112) << 16;
+            n |= *p++ << 8;
+            n |= *p++;
+            n += 96 + (1 << 12);
+        }
+        if (type == 0)
+            v = 0;
+        else
+            v = *p++;
+        c1 = c + n + 1;
+        /* only script-bearing ranges (type != 0); for Unknown, match every
+           such range and invert afterwards */
+        if (type != 0 &&
+            (v == (u32)script_idx || script_idx == UNICODE_SCRIPT_Unknown)) {
+            if (cvm_cr_add_interval(cr1, c, c1))
+                goto fail;
+        }
+        c = c1;
+    }
+
+    if (script_idx == UNICODE_SCRIPT_Unknown) {
+        /* Unknown is all the characters outside scripts */
+        if (cvm_cr_invert(cr1))
+            goto fail;
+    }
+
+    if (is_ext) {
+        /* add the script extensions */
+        p = unicode_script_ext_table;
+        p_end = unicode_script_ext_table + countof(unicode_script_ext_table);
+        c = 0;
+        while (p < p_end) {
+            b = *p++;
+            if (b < 128) {
+                n = b;
+            } else if (b < 128 + 64) {
+                n = (b - 128) << 8;
+                n |= *p++;
+                n += 128;
+            } else {
+                n = (b - 128 - 64) << 16;
+                n |= *p++ << 8;
+                n |= *p++;
+                n += 128 + (1 << 14);
+            }
+            c1 = c + n + 1;
+            v_len = *p++;
+            if (is_common) {
+                if (v_len != 0) {
+                    if (cvm_cr_add_interval(cr2, c, c1))
+                        goto fail;
+                }
+            } else {
+                for (i = 0; i < v_len; i++) {
+                    if (p[i] == script_idx) {
+                        if (cvm_cr_add_interval(cr2, c, c1))
+                            goto fail;
+                        break;
+                    }
+                }
+            }
+            p += v_len;
+            c = c1;
+        }
+        if (is_common) {
+            /* remove all the characters with script extensions */
+            if (cvm_cr_invert(cr2))
+                goto fail;
+            if (cvm_cr_op(cr, cr1->points, cr1->len, cr2->points, cr2->len,
+                          CVM_CR_OP_INTER))
+                goto fail;
+        } else {
+            if (cvm_cr_op(cr, cr1->points, cr1->len, cr2->points, cr2->len,
+                          CVM_CR_OP_UNION))
+                goto fail;
+        }
+        cvm_cr_free(cr1);
+        cvm_cr_free(cr2);
+    }
+    return 0;
+fail:
+    if (is_ext) {
+        cvm_cr_free(cr1);
+        cvm_cr_free(cr2);
+    }
+    goto fail;
+}
+#define M(id) (1U << UNICODE_GC_##id)
+
+static i32 unicode_general_category1(CvmCharRange* cr, u32 gc_mask) {
+    const u8 *p, *p_end;
+    u32 c, c0, b, n, v;
+
+    p = unicode_gc_table;
+    p_end = unicode_gc_table + countof(unicode_gc_table);
+    c = 0;
+    while (p < p_end) {
+        b = *p++;
+        n = b >> 5;
+        v = b & 0x1f;
+        if (n == 7) {
+            n = *p++;
+            if (n < 128) {
+                n += 7;
+            } else if (n < 128 + 64) {
+                n = (n - 128) << 8;
+                n |= *p++;
+                n += 7 + 128;
+            } else {
+                n = (n - 128 - 64) << 16;
+                n |= *p++ << 8;
+                n |= *p++;
+                n += 7 + 128 + (1 << 14);
+            }
+        }
+        c0 = c;
+        c += n + 1;
+        if (v == 31) {
+            /* run of Lu / Ll */
+            b = gc_mask & (M(Lu) | M(Ll));
+            if (b != 0) {
+                if (b == (M(Lu) | M(Ll))) {
+                    goto add_range;
+                } else {
+                    c0 += ((gc_mask & M(Ll)) != 0);
+                    for (; c0 < c; c0 += 2) {
+                        if (cvm_cr_add_interval(cr, c0, c0 + 1))
+                            return -1;
+                    }
+                }
+            }
+        } else if ((gc_mask >> v) & 1) {
+add_range:
+            if (cvm_cr_add_interval(cr, c0, c))
+                return -1;
+        }
+    }
+    return 0;
+}
+static i32 unicode_case1(CvmCharRange* cr, i32 case_mask) {
+#define MR(x) (1 << RUN_TYPE_##x)
+    const u32 tab_run_mask[3] = {
+        MR(U) | MR(UF) | MR(UL) | MR(LSU) | MR(U2L_399_EXT2) | MR(UF_D20) |
+            MR(UF_D1_EXT) | MR(U_EXT) | MR(UF_EXT2) | MR(UF_EXT3),
+
+        MR(L) | MR(LF) | MR(UL) | MR(LSU) | MR(U2L_399_EXT2) | MR(LF_EXT) | MR(LF_EXT2),
+
+        MR(UF) | MR(LF) | MR(UL) | MR(LSU) | MR(U2L_399_EXT2) | MR(LF_EXT) |
+            MR(LF_EXT2) | MR(UF_D20) | MR(UF_D1_EXT) | MR(LF_EXT) | MR(UF_EXT2) |
+            MR(UF_EXT3),
+    };
+#undef MR
+    u32 mask, v, code, type, len, i, idx;
+
+    if (case_mask == 0)
+        return 0;
+    mask = 0;
+    for (i = 0; i < 3; i++) {
+        if ((case_mask >> i) & 1)
+            mask |= tab_run_mask[i];
+    }
+    for (idx = 0; idx < countof(case_conv_table1); idx++) {
+        v = case_conv_table1[idx];
+        type = (v >> (32 - 17 - 7 - 4)) & 0xf;
+        code = v >> (32 - 17);
+        len = (v >> (32 - 17 - 7)) & 0x7f;
+        if ((mask >> type) & 1) {
+            //            printf("%d: type=%d %04x %04x\n", idx, type, code, code + len - 1);
+            switch (type) {
+            case RUN_TYPE_UL:
+                if ((case_mask & CASE_U) && (case_mask & (CASE_L | CASE_F)))
+                    goto def_case;
+                code += ((case_mask & CASE_U) != 0);
+                for (i = 0; i < len; i += 2) {
+                    if (cvm_cr_add_interval(cr, code + i, code + i + 1))
+                        return -1;
+                }
+                break;
+            case RUN_TYPE_LSU:
+                if ((case_mask & CASE_U) && (case_mask & (CASE_L | CASE_F)))
+                    goto def_case;
+                if (!(case_mask & CASE_U)) {
+                    if (cvm_cr_add_interval(cr, code, code + 1))
+                        return -1;
+                }
+                if (cvm_cr_add_interval(cr, code + 1, code + 2))
+                    return -1;
+                if (case_mask & CASE_U) {
+                    if (cvm_cr_add_interval(cr, code + 2, code + 3))
+                        return -1;
+                }
+                break;
+            default:
+def_case:
+                if (cvm_cr_add_interval(cr, code, code + len))
+                    return -1;
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+static i32 point_cmp(const void* p1, const void* p2, void* arg) {
+    CVM_UNUSED(arg);
+    u32 v1 = *(u32*)p1;
+    u32 v2 = *(u32*)p2;
+    return (v1 > v2) - (v1 < v2);
+}
+
+static void cr_sort_and_remove_overlap(CvmCharRange* cr) {
+    u32 start, end, start1, end1, i, j;
+
+    /* the resulting ranges are not necessarily sorted and may overlap */
+    cvm_rqsort(cr->points, cr->len / 2, sizeof(cr->points[0]) * 2, point_cmp, NULL);
+    j = 0;
+    for (i = 0; i < (u32)cr->len;) {
+        start = cr->points[i];
+        end = cr->points[i + 1];
+        i += 2;
+        while (i < (u32)cr->len) {
+            start1 = cr->points[i];
+            end1 = cr->points[i + 1];
+            if (start1 > end) {
+                /* |------|
+                 *           |-------| */
+                break;
+            } else if (end1 <= end) {
+                /* |------|
+                 *    |--| */
+                i += 2;
+            } else {
+                /* |------|
+                 *     |-------| */
+                end = end1;
+                i += 2;
+            }
+        }
+        cr->points[j] = start;
+        cr->points[j + 1] = end;
+        j += 2;
+    }
+    cr->len = j;
+}
+
+/* canonicalize a character set using the JS regex case folding rules
+   (see lre_canonicalize()) */
+i32 cvm_cr_regexp_canonicalize(CvmCharRange* cr, bool is_unicode) {
+    CvmCharRange cr_inter, cr_mask, cr_result, cr_sub;
+    u32 v, code, len, i, idx, start, end, c, d;
+    /* -1 is a sentinel here, which is why these two are signed and the rest
+     * of the locals are not. */
+    i32 d_start, d_end;
+
+    cvm_cr_init(&cr_mask, cr->alloc);
+    cvm_cr_init(&cr_inter, cr->alloc);
+    cvm_cr_init(&cr_result, cr->alloc);
+    cvm_cr_init(&cr_sub, cr->alloc);
+
+    if (unicode_case1(&cr_mask, is_unicode ? CASE_F : CASE_U))
+        goto fail;
+    if (cvm_cr_op(&cr_inter, cr_mask.points, cr_mask.len, cr->points, cr->len,
+                  CVM_CR_OP_INTER))
+        goto fail;
+
+    if (cvm_cr_invert(&cr_mask))
+        goto fail;
+    if (cvm_cr_op(&cr_sub, cr_mask.points, cr_mask.len, cr->points, cr->len,
+                  CVM_CR_OP_INTER))
+        goto fail;
+
+    /* cr_inter = cr & cr_mask */
+    /* cr_sub = cr & ~cr_mask */
+
+    /* use the case conversion table to compute the result */
+    d_start = -1;
+    d_end = -1;
+    idx = 0;
+    v = case_conv_table1[idx];
+    code = v >> (32 - 17);
+    len = (v >> (32 - 17 - 7)) & 0x7f;
+    for (i = 0; i < (u32)cr_inter.len; i += 2) {
+        start = cr_inter.points[i];
+        end = cr_inter.points[i + 1];
+
+        for (c = start; c < end; c++) {
+            for (;;) {
+                if (c >= code && c < code + len)
+                    break;
+                idx++;
+                cvm_assert(idx < countof(case_conv_table1));
+                v = case_conv_table1[idx];
+                code = v >> (32 - 17);
+                len = (v >> (32 - 17 - 7)) & 0x7f;
+            }
+            d = case_folding_entry(c, idx, v, is_unicode);
+            /* try to merge with the current interval */
+            if (d_start == -1) {
+                d_start = d;
+                d_end = d + 1;
+            } else if (d_end == (i32)d) {
+                d_end++;
+            } else {
+                cvm_cr_add_interval(&cr_result, d_start, d_end);
+                d_start = d;
+                d_end = d + 1;
+            }
+        }
+    }
+    if (d_start != -1) {
+        if (cvm_cr_add_interval(&cr_result, d_start, d_end))
+            goto fail;
+    }
+
+    /* the resulting ranges are not necessarily sorted and may overlap */
+    cr_sort_and_remove_overlap(&cr_result);
+
+    /* or with the character not affected by the case folding */
+    cr->len = 0;
+    if (cvm_cr_op(cr, cr_result.points, cr_result.len, cr_sub.points, cr_sub.len,
+                  CVM_CR_OP_UNION))
+        goto fail;
+
+    cvm_cr_free(&cr_inter);
+    cvm_cr_free(&cr_mask);
+    cvm_cr_free(&cr_result);
+    cvm_cr_free(&cr_sub);
+    return 0;
+fail:
+    cvm_cr_free(&cr_inter);
+    cvm_cr_free(&cr_mask);
+    cvm_cr_free(&cr_result);
+    cvm_cr_free(&cr_sub);
+    return -1;
+}
+static const u32 unicode_gc_mask_table[] = {
+    M(Lu) | M(Ll) | M(Lt),                                 /* LC */
+    M(Lu) | M(Ll) | M(Lt) | M(Lm) | M(Lo),                 /* L */
+    M(Mn) | M(Mc) | M(Me),                                 /* M */
+    M(Nd) | M(Nl) | M(No),                                 /* N */
+    M(Sm) | M(Sc) | M(Sk) | M(So),                         /* S */
+    M(Pc) | M(Pd) | M(Ps) | M(Pe) | M(Pi) | M(Pf) | M(Po), /* P */
+    M(Zs) | M(Zl) | M(Zp),                                 /* Z */
+    M(Cc) | M(Cf) | M(Cs) | M(Co) | M(Cn),                 /* C */
+};
+
+i32 cvm_unicode_general_category(CvmCharRange* cr, const u8* gc_name) {
+    i32 gc_idx;
+    u32 gc_mask;
+
+    gc_idx = unicode_find_name(unicode_gc_name_table, gc_name);
+    if (gc_idx < 0)
+        return -2;
+    if (gc_idx <= UNICODE_GC_Co) {
+        gc_mask = (uint64_t)1 << gc_idx;
+    } else {
+        gc_mask = unicode_gc_mask_table[gc_idx - UNICODE_GC_LC];
+    }
+    return unicode_general_category1(cr, gc_mask);
 }
 
 /* ------------------------------------------------------------------ */

@@ -509,6 +509,125 @@ TEST a_union_that_bridges_two_intervals_merges_them(void) {
     PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* properties, by name                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Membership: the intervals are sorted, so this walks them. */
+static bool range_contains(CvmCharRange* cr, rune c) {
+    for (i32 i = 0; i < cr->len; i += 2) {
+        if (c >= cr->points[i] && c < cr->points[i + 1]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool category_has(char const* name, rune c) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+    if (cvm_unicode_general_category(&cr, (u8 const*)name) != 0) {
+        cvm_cr_free(&cr);
+        return false;
+    }
+    bool found = range_contains(&cr, c);
+    cvm_cr_free(&cr);
+    return found;
+}
+
+static bool script_has(char const* name, bool ext, rune c) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+    if (cvm_unicode_script(&cr, (u8 const*)name, ext) != 0) {
+        cvm_cr_free(&cr);
+        return false;
+    }
+    bool found = range_contains(&cr, c);
+    cvm_cr_free(&cr);
+    return found;
+}
+
+TEST general_categories_are_the_ones_the_names_say(void) {
+    /* one category, and the fact that it is not the other case */
+    ASSERT(category_has("Lu", 'A'));
+    ASSERT(category_has("Lu", 0x00C9u)); /* E with acute */
+    ASSERT_FALSE(category_has("Lu", 'a'));
+    ASSERT(category_has("Ll", 'a'));
+    ASSERT_FALSE(category_has("Ll", 'A'));
+
+    /* a group is the union of what it names */
+    ASSERT(category_has("L", 'A'));
+    ASSERT(category_has("L", 'a'));
+    ASSERT(category_has("L", 0x4E2Du)); /* a Han character is Lo */
+    ASSERT_FALSE(category_has("L", '1'));
+
+    /* digits, including one outside ASCII */
+    ASSERT(category_has("Nd", '0'));
+    ASSERT(category_has("Nd", 0x0660u)); /* ARABIC-INDIC DIGIT ZERO */
+    ASSERT_FALSE(category_has("Nd", 'a'));
+
+    /* a name that is not a category is refused, and distinctly so */
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+    ASSERT_EQ_FMT(-2, cvm_unicode_general_category(&cr, (u8 const*)"NotACategory"),
+                  "%d");
+    cvm_cr_free(&cr);
+    PASS();
+}
+
+TEST scripts_are_the_sets_the_names_say(void) {
+    ASSERT(script_has("Latin", false, 'A'));
+    ASSERT(script_has("Latin", false, 0x00E9u));
+    ASSERT_FALSE(script_has("Latin", false, 0x4E2Du));
+
+    ASSERT(script_has("Han", false, 0x4E2Du));
+    ASSERT_FALSE(script_has("Han", false, 'A'));
+
+    ASSERT(script_has("Greek", false, 0x03C3u)); /* small sigma */
+    ASSERT_FALSE(script_has("Greek", false, 'A'));
+
+    /* the extensions are a superset of the script itself */
+    ASSERT(script_has("Greek", true, 0x03C3u));
+    ASSERT(script_has("Latin", true, 'A'));
+
+    /* and a name that is not a script is refused */
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+    ASSERT_EQ_FMT(-2, cvm_unicode_script(&cr, (u8 const*)"Klingon", false), "%d");
+    cvm_cr_free(&cr);
+    PASS();
+}
+
+TEST folding_a_range_adds_the_cases_it_matches(void) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+
+    /*
+     * The fold *maps* the set rather than uniting it with the original, and that
+     * is what a case-insensitive match needs: the engine folds the subject's
+     * character the same way and asks whether the result is in the folded set. A
+     * set holding only 'A' becomes a set holding only 'a', and both 'A' and 'a'
+     * as subjects fold into it.
+     */
+    (void)cvm_cr_add_interval(&cr, 'A', 'A' + 1);
+    ASSERT(range_contains(&cr, 'A'));
+    ASSERT_FALSE(range_contains(&cr, 'a'));
+
+    ASSERT_EQ_FMT(0, cvm_cr_regexp_canonicalize(&cr, true), "%d");
+    ASSERT(range_contains(&cr, 'a'));
+    ASSERT_FALSE(range_contains(&cr, 'A'));
+    /* and the fold of a subject agrees: 'A' folds to 'a', which is in the set */
+    ASSERT_EQ_FMT((u32)'a', cvm_unicode_canonicalize('A', true), "%u");
+
+    cvm_cr_free(&cr);
+    PASS();
+}
+
 SUITE(unicode_suite) {
     RUN_TEST(ascii_case_mapping);
     RUN_TEST(case_mapping_beyond_ascii);
@@ -525,6 +644,9 @@ SUITE(unicode_suite) {
     RUN_TEST(ranges_combine_with_the_four_set_operations);
     RUN_TEST(inverting_a_range_gives_the_rest_of_the_space);
     RUN_TEST(a_union_that_bridges_two_intervals_merges_them);
+    RUN_TEST(general_categories_are_the_ones_the_names_say);
+    RUN_TEST(scripts_are_the_sets_the_names_say);
+    RUN_TEST(folding_a_range_adds_the_cases_it_matches);
 }
 
 GREATEST_MAIN_DEFS();
