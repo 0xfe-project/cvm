@@ -17,41 +17,77 @@ Nobody moves objects — not cvm, not bdwgc, not Go, and not the Commix
 reference cvm ports from. So these scenarios measure allocation, marking and
 sweeping. They cannot show what a compacting or evacuating collector would do.
 
-## What it measures today
+## What it measures
 
-Median wall time over seven runs, milliseconds. The current full run is in
-`results/`; the environment block at the top of that file is part of the
-number.
+Median wall time in milliseconds. **One table per run mode, because a mode is
+an experimental condition and rows from two of them are not comparable.**
+alloc-only never collects, so it measures the allocator; auto lets each
+collector choose, so it measures the policy.
 
-| scenario | cvm | go | bdwgc | tgc | |
-|---|---|---|---|---|---|
-| churn-unary | **22.5** | 28.9 | 25.6 | 597 | allocate and drop, nothing survives |
-| write-heavy | **0.16** | 0.98 | 0.22 | 3.5 | mutate a dense pointer graph |
-| mixed-sizes | **28.6** | 75.0 | 84.1 | 213 | sizes across every allocation path |
-| growth-1.5 | **1.18** | 3.78 | 1.36 | 35.7 | live set ×1.49 per round |
-| flat-fp | **12.9** | 14.1 | 13.0 | 13.0 | n-body, almost no pointers (control) |
-| tree-keep | 47.8 | 47.1 | 45.7 | 1748 | build a tree, drop the last one |
-| read-heavy | 27.4 | **14.1** | 18.1 | — | traverse a static graph |
+**alloc-only**
 
-cvm wins five, levels with two, loses read-heavy.
+| scenario | cvm | go | bdwgc | tgc |
+|---|---|---|---|---|
+| churn-unary | 24.97 | 28.67 | 27.59 | 623.70 |
+| tree-keep | 49.10 | 48.25 | 51.03 | 4033.95 |
+| mixed-sizes | 46.90 | 81.62 | — | 220.71 |
+| flat-fp | 13.90 | 11.82 | 13.62 | 13.66 |
 
-**read-heavy is lost for a reason worth knowing.** Its graph is a chain — each
-node reaches only the one before it — so marking discovers one new object per
-pop however many threads are looking. It is serial by construction, and work
-stealing cannot help it. tree-keep, which is a tree, is the scenario that
-tests parallel marking.
+**auto**
 
-**tgc is a floor, not a competitor.** It inserts every allocation into an
-open-addressed hash table and finds roots with `setjmp`. It is here as a lower
-bound. It also crashes on read-heavy, in its own conservative stack walk.
+| scenario | cvm | go | bdwgc | tgc |
+|---|---|---|---|---|
+| tree-keep | 66.86 | 54.94 | 55.01 | 1806.66 |
+| mixed-sizes | 29.34 | 75.74 | 84.76 | 227.56 |
+| flat-fp | 13.65 | 11.78 | 13.19 | 13.20 |
+| read-heavy | 28.54 | 13.38 | 19.32 | — |
+| write-heavy | 0.31 | 1.02 | 0.52 | 5.14 |
+| growth-1.5 | 2.12 | 3.06 | 2.32 | 41.34 |
+
+The full comparison is in `results/`, and the figures below are generated from
+it by `pnpm run bench:svg`.
+
+## The figures
+
+Each is one experimental condition. They are generated, so they cannot drift
+from the data.
+
+![Wall time, alloc-only](wall-alloc.svg)
+
+![Wall time, auto](wall-auto.svg)
+
+![Longest stop-the-world pause, auto](pause-auto.svg)
+
+![How much these numbers move between runs, auto](spread-auto.svg)
+
+The last one is worth reading before any of the others. Run-to-run dispersion
+across these rows ranges from under 1% to over 500%, so a table of medians
+presents a row that swings by a factor of six with the same confidence as one
+that barely moves. In the figures, the length of a row's line is that row's
+spread — which is why most rows have no visible line and a few have a long
+one.
+
+## What is missing, and why
+
+| row | why there is no number |
+|---|---|
+| `read-heavy × tgc` | tgc's marker recurses once per pointer field and read-heavy's graph is a 200,000-node chain, so marking nests 200,000 frames deep. Stack overflow, in the collector this row exists to compare against. |
+| `mixed-sizes × bdwgc × alloc` | a conservative collector cannot reclaim between repetitions — the scenario drops its pointers but stale copies remain on the stack — so the allocations accumulate past any heap worth reserving. |
+
+Both are listed in `scripts/bench.mjs` under `KNOWN_GAPS` and reported as
+known gaps rather than failures, because a limitation and a broken harness are
+different things and a reader should not have to work out which they are
+looking at.
 
 ## Running it
 
 ```
 pnpm run bench:build     build every backend and binary
 pnpm run bench           measure, seven repetitions
+pnpm run bench:svg       redraw the figures from the latest results
+pnpm run bench:all       run, then redraw
 pnpm run bench:quick     three repetitions — unreliable on the small
-                         scenarios, see the note in results/README.md
+                         scenarios; see results/README.md
 ```
 
 ## Where things are
@@ -62,7 +98,7 @@ pnpm run bench:quick     three repetitions — unreliable on the small
 | `harness/` | the interface every backend implements, the timing loop, the CSV |
 | `scenarios/` | the seven workloads, shared by all four collectors |
 | `cvm/` `bdwgc/` `tgc/` `go/` | one collector each, with its backend and a short README |
-| `results/` | dated runs |
+| `results/` | the run the figures are drawn from |
 
 Each collector's folder README says what that backend can and cannot report —
 they are not interchangeable, and a column one of them leaves at zero is

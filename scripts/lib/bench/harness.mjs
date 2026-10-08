@@ -171,7 +171,20 @@ function scenarioSources(root) {
         .sort();
 }
 
+/** The newest header mtime under vm/ and rt/. A dependency of everything. */
+function newestHeaderMtime(root) {
+    let newest = 0;
+    for (const dir of ["vm", "rt"]) {
+        for (const h of collect(path.join(root, dir), [".h"])) {
+            const t = fs.statSync(h).mtimeMs;
+            if (t > newest) newest = t;
+        }
+    }
+    return newest;
+}
+
 export function buildBinaries({ root, toolchain, thirdparty, ui, verbose }) {
+    const newestHeader = newestHeaderMtime(root);
     const runtime = buildRuntime({ root, toolchain, ui, verbose });
     const binDir = path.join(root, BIN_DIR);
     mkdirp(binDir);

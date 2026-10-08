@@ -34,54 +34,57 @@
 <line x1="24" y1="178.0" x2="826.0" y2="178.0" stroke="#eaeef2" stroke-width="1"/>
 <text x="24" y="198.0" font-size="13" font-weight="600" fill="#1f2328">growth-1.5</text>
 <text x="150" y="198.0" font-size="12" fill="#57606a">cvm × auto</text>
-<circle cx="556.0" cy="194.0" r="4.5" fill="#1f6feb"/>
+<circle cx="594.5" cy="194.0" r="4.5" fill="#1f6feb"/>
 <text x="150" y="218.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<circle cx="570.6" cy="214.0" r="4.5" fill="#d29922"/>
+<circle cx="603.1" cy="214.0" r="4.5" fill="#d29922"/>
 <text x="150" y="238.0" font-size="12" fill="#57606a">tgc × auto</text>
-<line x1="699.4" y1="234.0" x2="720.6" y2="234.0" stroke="#8b949e" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="699.4" cy="234.0" r="4.5" fill="#8b949e"/>
+<line x1="717.9" y1="234.0" x2="718.6" y2="234.0" stroke="#8b949e" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
+<circle cx="717.9" cy="234.0" r="4.5" fill="#8b949e"/>
 <text x="150" y="258.0" font-size="12" fill="#57606a">go × auto</text>
-<circle cx="411.9" cy="254.0" r="4.5" fill="#2ea043"/>
+<circle cx="409.7" cy="254.0" r="4.5" fill="#2ea043"/>
 <line x1="24" y1="270.0" x2="826.0" y2="270.0" stroke="#eaeef2" stroke-width="1"/>
 <text x="24" y="290.0" font-size="13" font-weight="600" fill="#1f2328">mixed-sizes</text>
 <text x="150" y="290.0" font-size="12" fill="#57606a">cvm × auto</text>
-<circle cx="362.0" cy="286.0" r="4.5" fill="#1f6feb"/>
+<line x1="356.9" y1="286.0" x2="408.5" y2="286.0" stroke="#1f6feb" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
+<circle cx="356.9" cy="286.0" r="4.5" fill="#1f6feb"/>
 <text x="150" y="310.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<circle cx="456.0" cy="306.0" r="4.5" fill="#d29922"/>
+<circle cx="424.3" cy="306.0" r="4.5" fill="#d29922"/>
 <text x="150" y="330.0" font-size="12" fill="#57606a">tgc × auto</text>
-<line x1="426.9" y1="326.0" x2="445.8" y2="326.0" stroke="#8b949e" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="426.9" cy="326.0" r="4.5" fill="#8b949e"/>
+<line x1="429.4" y1="326.0" x2="435.2" y2="326.0" stroke="#8b949e" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
+<circle cx="429.4" cy="326.0" r="4.5" fill="#8b949e"/>
 <text x="150" y="350.0" font-size="12" fill="#57606a">go × auto</text>
-<line x1="468.9" y1="346.0" x2="496.9" y2="346.0" stroke="#2ea043" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="468.9" cy="346.0" r="4.5" fill="#2ea043"/>
+<line x1="494.3" y1="346.0" x2="498.1" y2="346.0" stroke="#2ea043" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
+<circle cx="494.3" cy="346.0" r="4.5" fill="#2ea043"/>
 <line x1="24" y1="362.0" x2="826.0" y2="362.0" stroke="#eaeef2" stroke-width="1"/>
 <text x="24" y="382.0" font-size="13" font-weight="600" fill="#1f2328">read-heavy</text>
 <text x="150" y="382.0" font-size="12" fill="#57606a">cvm × auto</text>
-<circle cx="622.9" cy="378.0" r="4.5" fill="#1f6feb"/>
+<circle cx="646.2" cy="378.0" r="4.5" fill="#1f6feb"/>
 <text x="150" y="402.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<circle cx="606.4" cy="398.0" r="4.5" fill="#d29922"/>
+<circle cx="626.4" cy="398.0" r="4.5" fill="#d29922"/>
 <text x="150" y="422.0" font-size="12" fill="#57606a">go × auto</text>
-<circle cx="415.7" cy="418.0" r="4.5" fill="#2ea043"/>
+<line x1="413.5" y1="418.0" x2="419.3" y2="418.0" stroke="#2ea043" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
+<circle cx="413.5" cy="418.0" r="4.5" fill="#2ea043"/>
 <line x1="24" y1="434.0" x2="826.0" y2="434.0" stroke="#eaeef2" stroke-width="1"/>
 <text x="24" y="454.0" font-size="13" font-weight="600" fill="#1f2328">tree-keep</text>
 <text x="150" y="454.0" font-size="12" fill="#57606a">cvm × auto</text>
-<line x1="652.2" y1="450.0" x2="654.8" y2="450.0" stroke="#1f6feb" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="652.2" cy="450.0" r="4.5" fill="#1f6feb"/>
+<line x1="627.1" y1="450.0" x2="627.5" y2="450.0" stroke="#1f6feb" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
+<circle cx="627.1" cy="450.0" r="4.5" fill="#1f6feb"/>
 <text x="150" y="474.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<circle cx="583.8" cy="470.0" r="4.5" fill="#d29922"/>
+<line x1="582.1" y1="470.0" x2="587.2" y2="470.0" stroke="#d29922" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
+<circle cx="582.1" cy="470.0" r="4.5" fill="#d29922"/>
 <text x="150" y="494.0" font-size="12" fill="#57606a">tgc × auto</text>
-<line x1="784.4" y1="490.0" x2="787.5" y2="490.0" stroke="#8b949e" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="784.4" cy="490.0" r="4.5" fill="#8b949e"/>
+<circle cx="783.2" cy="490.0" r="4.5" fill="#8b949e"/>
 <text x="150" y="514.0" font-size="12" fill="#57606a">go × auto</text>
-<circle cx="494.0" cy="510.0" r="4.5" fill="#2ea043"/>
+<line x1="418.7" y1="510.0" x2="428.5" y2="510.0" stroke="#2ea043" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
+<circle cx="418.7" cy="510.0" r="4.5" fill="#2ea043"/>
 <line x1="24" y1="526.0" x2="826.0" y2="526.0" stroke="#eaeef2" stroke-width="1"/>
 <text x="24" y="546.0" font-size="13" font-weight="600" fill="#1f2328">write-heavy</text>
 <text x="150" y="546.0" font-size="12" fill="#57606a">cvm × auto</text>
-<circle cx="548.2" cy="542.0" r="4.5" fill="#1f6feb"/>
+<circle cx="560.3" cy="542.0" r="4.5" fill="#1f6feb"/>
 <text x="150" y="566.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<circle cx="474.0" cy="562.0" r="4.5" fill="#d29922"/>
+<circle cx="527.6" cy="562.0" r="4.5" fill="#d29922"/>
 <text x="150" y="586.0" font-size="12" fill="#57606a">tgc × auto</text>
-<circle cx="592.9" cy="582.0" r="4.5" fill="#8b949e"/>
+<circle cx="629.5" cy="582.0" r="4.5" fill="#8b949e"/>
 <text x="150" y="606.0" font-size="12" fill="#57606a">go × auto</text>
-<circle cx="393.4" cy="602.0" r="4.5" fill="#2ea043"/>
+<circle cx="371.0" cy="602.0" r="4.5" fill="#2ea043"/>
 </svg>
