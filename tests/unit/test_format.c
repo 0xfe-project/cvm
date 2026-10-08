@@ -233,7 +233,81 @@ TEST format_a_realistic_log_line_fits(void) {
     PASS();
 }
 
+TEST fmt_u64_matches_printf_over_a_wide_range(void) {
+    /*
+     * The table-based path is compared against the library's own formatting, over
+     * the boundaries where a two-digits-at-a-time loop goes wrong: the ends of a
+     * pair, the first value with an odd number of digits, and the top of the
+     * range. The library is the reference, and it is available because this test
+     * runs hosted.
+     */
+    static u64 const boundaries[] = {
+        0ull,
+        1ull,
+        9ull,
+        10ull,
+        11ull,
+        99ull,
+        100ull,
+        101ull,
+        999ull,
+        1000ull,
+        12345ull,
+        1000000ull,
+        4294967295ull,
+        4294967296ull,
+        9999999999999999999ull,
+        18446744073709551615ull,
+    };
+
+    for (usize i = 0; i < sizeof(boundaries) / sizeof(boundaries[0]); i++) {
+        char buf[32];
+        CvmFmt f;
+        fmt_init(&f, (u8*)buf, sizeof(buf));
+        fmt_u64(&f, boundaries[i]);
+
+        char want[32];
+        snprintf(want, sizeof(want), "%llu", (unsigned long long)boundaries[i]);
+
+        usize n = 0;
+        while (want[n] != '\0') {
+            n++;
+        }
+        str got = fmt_result(&f);
+        if (got.len != n || memcmp(got.ptr, want, n) != 0) {
+            fprintf(stderr, "%llu: got %.*s, wanted %s\n",
+                    (unsigned long long)boundaries[i], (int)got.len, (char*)got.ptr,
+                    want);
+            FAILm("the conversion disagrees with printf");
+        }
+    }
+
+    /* and a sweep that hits both even and odd digit counts, plus the carries */
+    u64 v = 1ull;
+    for (u32 i = 0; i < 2000u; i++) {
+        v = v * 6364136223846793005ull + 1442695040888963407ull;
+        char buf[32];
+        CvmFmt f;
+        fmt_init(&f, (u8*)buf, sizeof(buf));
+        fmt_u64(&f, v);
+
+        char want[32];
+        snprintf(want, sizeof(want), "%llu", (unsigned long long)v);
+        str got = fmt_result(&f);
+        usize n = 0;
+        while (want[n] != '\0') {
+            n++;
+        }
+        if (got.len != n || memcmp(got.ptr, want, n) != 0) {
+            fprintf(stderr, "%llu: a sweep value disagreed\n", (unsigned long long)v);
+            FAILm("the conversion disagrees with printf on a random value");
+        }
+    }
+    PASS();
+}
+
 SUITE(format_suite) {
+    RUN_TEST(fmt_u64_matches_printf_over_a_wide_range);
     RUN_TEST(format_append_basic);
     RUN_TEST(format_unsigned_decimal);
     RUN_TEST(format_signed_decimal_including_the_minimum);

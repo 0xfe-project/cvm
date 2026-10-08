@@ -64,15 +64,48 @@ CVM_INLINE void fmt_str(CvmFmt* f, str s) {
 #define fmt_lit(f, lit) fmt_bytes((f), (span_const){(u8 const*)(lit), sizeof(lit) - 1})
 
 /* Unsigned decimal, no padding. */
+/*
+ * The digits, two at a time.
+ *
+ * The division is the cost of converting a number, not the copying: `v / 10` is a
+ * multiply and a shift on any compiler worth using, and half of them is half the
+ * work. The table is what makes the halving possible — a pair of digits is one
+ * index rather than two divisions — and it lives here because this formatter has
+ * nowhere else to keep it: it must work in a translation unit that cannot call
+ * out of itself.
+ */
+/* A string initialiser carries a terminator, which is one byte past anything
+ * the indexing below reaches. */
+static u8 const cvm_two_digits[200 + 1] = "0001020304050607080910111213141516171819"
+                                          "2021222324252627282930313233343536373839"
+                                          "4041424344454647484950515253545556575859"
+                                          "6061626364656667686970717273747576777879"
+                                          "8081828384858687888990919293949596979899";
+
 CVM_INLINE void fmt_u64(CvmFmt* f, u64 v) {
-    u8 tmp[20]; /* 2^64-1 has 20 digits */
-    usize n = 0;
-    do {
-        tmp[n++] = (u8)('0' + (u8)(v % 10u));
-        v /= 10u;
-    } while (v != 0);
-    while (n > 0) {
-        fmt_byte(f, tmp[--n]);
+    /* 2^64-1 has 20 digits. It is filled from the end, two at a time. */
+    u8 tmp[20];
+    usize n = 20u;
+
+    while (v >= 100u) {
+        u32 pair = (u32)(v % 100u);
+        v /= 100u;
+        n -= 2u;
+        tmp[n] = cvm_two_digits[(usize)pair * 2u];
+        tmp[n + 1u] = cvm_two_digits[(usize)pair * 2u + 1u];
+    }
+
+    if (v >= 10u) {
+        n -= 2u;
+        tmp[n] = cvm_two_digits[(usize)v * 2u];
+        tmp[n + 1u] = cvm_two_digits[(usize)v * 2u + 1u];
+    } else {
+        /* the last digit, and the only one written alone */
+        tmp[--n] = (u8)('0' + (u8)v);
+    }
+
+    for (usize i = n; i < 20u; i++) {
+        fmt_byte(f, tmp[i]);
     }
 }
 
