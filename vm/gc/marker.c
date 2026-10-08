@@ -171,7 +171,18 @@ static void mark_metadata(CvmHeap* heap, u8* start, ObjectMeta* meta) {
         return;
     }
 
-    block_meta_mark(block);
+    /*
+     * Only on the transition.
+     *
+     * A 32 KiB block holds about 1300 objects of 24 bytes, so marking them
+     * all would write this same byte 1300 times — and with several marker
+     * threads working through one block, those writes bounce the cache line
+     * between cores for no reason. A read and a branch is cheaper than a
+     * write that is almost always redundant.
+     */
+    if (!block_meta_is_marked(block)) {
+        block_meta_mark(block);
+    }
 
     usize size = cvm_object_size((CvmGcHeader const*)start);
     u8* last = start + size - 1;
@@ -191,8 +202,14 @@ static void mark_metadata(CvmHeap* heap, u8* start, ObjectMeta* meta) {
     u32 first_line = block_line_index_of(block_start_of(start), start);
     u32 last_line = block_line_index_of(block_start_of(last), last);
 
+    /*
+     * Same argument as the block mark, one level finer: a 256-byte line holds
+     * about ten of these objects, so nine writes in ten would be redundant.
+     */
     for (u32 line = first_line; line <= last_line; line++) {
-        line_meta_mark(&lines[line]);
+        if (!line_meta_is_marked(&lines[line])) {
+            line_meta_mark(&lines[line]);
+        }
     }
 }
 
@@ -241,7 +258,15 @@ void cvm_mark_field(CvmHeap* heap, opaque_mut field, CvmGreyPacket** out,
     }
 
     ObjectMeta* meta = bytemap_get(heap->bytemap, (u8 const*)header);
-    if (!object_meta_is_allocated(meta) || object_meta_is_marked(meta)) {
+
+    /*
+     * One load, not two. The state is a single byte compared by equality, and
+     * "allocated and not marked" is exactly "the byte says allocated" — the
+     * two states are distinct values, so asking them separately reads the
+     * same cache line twice for the same answer. This is the most-executed
+     * branch in the marker.
+     */
+    if (cvm_mark_byte_get(meta) != (u8)CVM_OM_ALLOCATED) {
         return;
     }
 

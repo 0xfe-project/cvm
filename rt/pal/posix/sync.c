@@ -136,6 +136,26 @@ void rt_thread_yield(void) {
     sched_yield();
 }
 
+void rt_cpu_relax(void) {
+    /*
+     * The architecture's spin hint: a few cycles of "I am waiting, give the
+     * other hyperthread the execution resources" rather than a system call.
+     *
+     * This exists because the collector's wait-for-workers loop polls a set
+     * of flags, and sched_yield() on every iteration makes that polling a
+     * syscall per iteration. A worker finishing a mark batch takes tens of
+     * microseconds; the loop can afford to spin for a while before asking
+     * the kernel for anything.
+     */
+#if defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+    __asm__ __volatile__("pause" ::: "memory");
+#else
+    atomic_thread_fence(memory_order_seq_cst);
+#endif
+}
+
 u32 rt_hardware_threads(void) {
 #if defined(__APPLE__)
     /* sysconf(_SC_NPROCESSORS_ONLN) is not visible under a strict POSIX

@@ -29,6 +29,14 @@
 
 #define BENCH_MAX_REPS 64
 
+/* The harness's own inline, so the fixed-cadence check costs a load and a
+ * predictable branch in the modes that do not use it. */
+#if defined(__GNUC__) || defined(__clang__)
+#define CVM_HARNESS_INLINE __attribute__((always_inline)) inline
+#else
+#define CVM_HARNESS_INLINE inline
+#endif
+
 /* ------------------------------------------------------------------ */
 /* the mode, and the one hook that implements it                       */
 /* ------------------------------------------------------------------ */
@@ -41,8 +49,20 @@ typedef enum BenchMode {
 
 static BenchMode mode = BENCH_MODE_AUTO;
 static unsigned cadence = 0;
-static uint64_t allocations = 0;
 static bool forced_collect_unsupported = false;
+
+/*
+ * Fixed-cadence bookkeeping, kept out of every other mode's way.
+ *
+ * The first version incremented a counter and took it modulo the cadence on
+ * every allocation in every mode — an integer division on the allocation
+ * path, for a counter nothing else reads. The per-repetition allocation
+ * count comes from the backend's own stats, so this exists only to decide
+ * when to force a collection, and it is a countdown rather than a modulo so
+ * that even in fixed mode there is no division.
+ */
+static bool fixed_cadence_active = false;
+static unsigned fixed_countdown = 0;
 
 static char const *mode_name(BenchMode m) {
     switch (m) {
@@ -62,26 +82,21 @@ static char const *mode_name(BenchMode m) {
  * implementation, so no scenario can be more or less eager to collect than
  * another.
  */
-static void maybe_collect(void) {
-    if (mode != BENCH_MODE_FIXED || cadence == 0) {
-        return;
-    }
-    if ((allocations % cadence) != 0) {
-        return;
-    }
-    if (!bench_collector.collect()) {
-        forced_collect_unsupported = true;
+CVM_HARNESS_INLINE void maybe_collect(void) {
+    if (fixed_cadence_active && --fixed_countdown == 0) {
+        fixed_countdown = cadence;
+        if (!bench_collector.collect()) {
+            forced_collect_unsupported = true;
+        }
     }
 }
 
 void *bench_alloc(size_t size) {
-    allocations++;
     maybe_collect();
     return bench_collector.alloc(size);
 }
 
 void *bench_alloc_obj(BenchShape const *shape) {
-    allocations++;
     maybe_collect();
     return bench_collector.alloc_typed(shape);
 }
@@ -181,6 +196,7 @@ int main(int argc, char **argv) {
     if (cadence == 0) {
         cadence = sc->default_cadence;
     }
+    fixed_cadence_active = (mode == BENCH_MODE_FIXED) && cadence > 0;
 
     /*
      * alloc-only mode needs a heap nothing can exhaust, and how big that is
@@ -230,7 +246,7 @@ int main(int argc, char **argv) {
         BenchStats before;
         bench_collector.stats(&before);
 
-        allocations = 0;
+        fixed_countdown = cadence;
         uint64_t t0 = now_ns();
         sc->run(r + 1);
         uint64_t t1 = now_ns();
