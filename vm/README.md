@@ -1,0 +1,158 @@
+# vm/ — the collector
+
+A precise mark-sweep collector with line-and-block granularity: Immix's
+reclamation strategy, Commix's phase structure, and roots that are exact
+rather than guessed at.
+
+Everything under this directory is freestanding. `vm/` compiles with
+`-ffreestanding -nostdinc`; what it cannot do for itself it asks `rt/` for.
+The public ABI that generated code includes is in `include/cvm/`; the
+implementation is in `gc/`.
+
+## The algorithm in one page
+
+**Blocks and lines.** The heap is a reservation divided into 32 KiB blocks,
+each cut into 128 lines of 256 bytes. A line is the unit of reclamation and a
+block is the unit of allocation: a sweep decides which lines survive, and a
+block with surviving lines goes back to the mutator pool with a free-line
+list describing its holes.
+
+**Objects.** An object is a header — a type descriptor pointer and a flags
+word — followed by the payload that generated code sees. Objects never span
+blocks. Allocation is a bump pointer into the current block, which is three
+instructions; a block with holes hands out its free lines before it hands out
+fresh space.
+
+**Metadata is in side tables, not in objects.** One byte per 16 payload bytes
+of bytemap says what each slot is: free, a placeholder for the interior of a
+large object, an allocated object's first slot, or a marked one. A line has a
+byte saying whether anything in it survived, and a block has one saying
+whether it needs sweeping at all. Keeping collector state out of the object
+header is what lets a two-word object stay two words.
+
+**Marking is exact.** A thread's roots are the slots of the frames it pushed —
+`cvm_frame_push` links them into a chain the collector walks. An object's
+pointers are read by following its descriptor, which may be a struct with
+pointer fields, an embedded aggregate, or an array. Nothing anywhere scans
+raw stack memory, so an integer that happens to look like a pointer cannot
+keep an object alive.
+
+## How a collection runs
+
+    stop the world
+      drive the previous sweep to its end
+      decide whether to grow the heap
+      mark: scan the frame chains, then trace, in parallel, with the worker pool
+      nullify: clear every weak reference whose target did not survive
+      prepare the sweep: empty every thread's allocator and the block free lists
+      reset the sweep cursors
+    resume the world
+      hand the sweep to the worker pool, and do not wait for it
+
+The split is the design. **Marking is inside the pause and sweeping is not.**
+A sweep only decides which lines a dead object occupied — no pointer is
+followed and nothing needs a consistent view of the graph — so it can happen
+while the program runs, driven by whoever allocates next and by the pool. The
+pause that a program actually feels is the trace.
+
+Sweeping is itself batched: a sweeper claims a run of blocks, and a run of
+free lines that crosses a batch boundary is held back with a `coalesce` mark
+for a later pass to close. That is what lets several threads sweep at once
+without two of them describing the same run.
+
+## What this design is good at, and what it pays
+
+**Good at allocation.** A bump pointer, with no free-list walk and no
+per-object collector state to maintain. On the benchmark's allocation-only
+scenarios it is the fastest of the four collectors measured, and that is the
+design claim rather than a tuning result.
+
+**Good at marking, per object.** Exact roots mean the collector reads the
+slots a frame declares and nothing else; a conservative collector reads the
+whole stack, word by word, on every collection.
+
+**Good at not taxing the program.** There is no write barrier and no read
+barrier, so a pointer store is a store. This is the trade against a
+concurrent collector, which buys short pauses with barrier cost on every
+store.
+
+**It pays in pause length.** Marking is stop-the-world, so the pause scales
+with the live set. A collector that marks concurrently has a pause that does
+not — and loses on throughput what it gains there.
+
+**It pays for its side tables in cache footprint.** Per object the marker
+touches the object, its bytemap slot, its line metadata and its block
+metadata, where a collector keeping mark bits in the object header touches
+one cache line. The benchmark measures this: marking is latency-bound on this
+collector, not instruction-bound, and the instruction-level changes that were
+tried against it all measured as noise.
+
+**It does not move objects.** Nothing is evacuated, so the fragmentation that
+sweeping cannot reach stays where it is. Pinning is therefore unobservable
+and the flag for it does not exist.
+
+## Using it
+
+```c
+#include "cvm/vm.h"
+#include "cvm/gc.h"
+
+static CvmPtrField const node_fields[] = {{.offset = 0}, {.offset = 8}};
+static CvmTypeDescriptor const node_type = {
+    .size = 24, .kind = CVM_TYPE_STRUCT,
+    .num_ptr_fields = 2, .ptr_fields = node_fields,
+};
+
+void walk(void) {
+    CVM_FRAME_DECL(f, 2);           /* two root slots, on this stack frame */
+    cvm_frame_push(&f_frame, f_roots, 2);
+    f_roots[0] = cvm_alloc(&node_type);
+    f_roots[1] = cvm_alloc_array(&node_type, 100, sizeof(void *));
+    cvm_frame_pop(&f_frame);
+}
+
+int main(void) {
+    if (!cvm_init(NULL)) return 1;   /* NULL means the defaults */
+    walk();
+    cvm_shutdown();
+}
+```
+
+Three things to get right, and none of them is optional:
+
+- **Every function that can allocate pushes a frame first**, and pops it
+  before returning. The push is also where the safepoint poll lives, so a
+  function that skips it is not merely missing roots — it has opted out of
+  being stopped.
+- **Descriptor offsets are relative to the payload**, not to the object's
+  start. `cvm_header_of` converts between the two, and the header is one
+  step back from what generated code holds.
+- **A long array is one object.** `cvm_alloc_array` writes the length where
+  the collector reads it, so the descriptor and the allocation agree about
+  how far the object reaches.
+
+`cvm_init`'s options cover the heap's minimum and maximum, how many GC
+workers to run, whether finalizers get their own thread, where the event log
+goes, and the log level. `cvm_vm_stats` reports collections, time spent,
+live objects and heap size; `cvm_collect` forces a collection, which is what
+the benchmark's fixed-cadence mode calls.
+
+## Reading the code
+
+| file | what |
+|---|---|
+| `include/cvm/gc.h` | the ABI: header, frame, context, allocation fast path, descriptors |
+| `gc/layout.h` | block and line geometry, growth policy, the constants above |
+| `gc/heap.[ch]` | the reservation, the metadata regions, growth |
+| `gc/alloc.c` | the slow path: bump, adopt a recycled block, sweep a little, collect, grow |
+| `gc/collect.c` | the driver: the phases, in the order this README lists them |
+| `gc/marker.c` | root scan, the trace, `trace_type` |
+| `gc/sweeper.c` | batches, coalescing, the finish, the consistency check |
+| `gc/block_alloc.[ch]` | free runs, the reserve, the recycled blocks |
+| `gc/pool.[ch]` | the worker pool and its phases |
+| `context.[ch]` | the thread registry, the frame chains, the TLS context |
+| `safepoint.[ch]` | stopping the world. A build chooses one of two mechanisms at compile time: a protected page per thread whose fault parks it, or a poll gated by a counter. The trap is one load and no branch; the poll is chosen where a signal handler or a mappable page is not available |
+
+`gc/collect.h` and `gc/sweeper.h` carry the contracts worth reading before
+changing anything: what the phases guarantee each other, and why the sweep
+batch boundary exists.
