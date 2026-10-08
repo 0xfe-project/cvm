@@ -75,9 +75,22 @@ static CachedDescriptor descriptors[DESCRIPTOR_CACHE];
 static unsigned descriptor_count = 0;
 
 static CvmTypeDescriptor const *descriptor_for(BenchShape const *shape) {
+    /*
+     * Last-used first. A scenario allocates the same shape millions of times
+     * in a row, so the linear scan below almost always finds it on the first
+     * comparison — but only if the first entry is the one it wants.
+     */
+    static CvmTypeDescriptor const *last_shape = NULL;
+    static CvmTypeDescriptor const *last_desc = NULL;
+    if (shape == last_shape) {
+        return last_desc;
+    }
+
     for (unsigned i = 0; i < descriptor_count; i++) {
         if (descriptors[i].shape == shape) {
-            return &descriptors[i].desc;
+            last_shape = shape;
+            last_desc = &descriptors[i].desc;
+            return last_desc;
         }
     }
 
@@ -98,7 +111,9 @@ static CvmTypeDescriptor const *descriptor_for(BenchShape const *shape) {
         .ptr_fields = slot->fields,
         .embed_fields = NULL,
     };
-    return &slot->desc;
+    last_shape = shape;
+    last_desc = &slot->desc;
+    return last_desc;
 }
 
 /* ------------------------------------------------------------------ */

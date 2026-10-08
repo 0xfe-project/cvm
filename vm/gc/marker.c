@@ -258,7 +258,15 @@ void cvm_mark_field(CvmHeap* heap, opaque_mut field, CvmGreyPacket** out,
     }
 
     ObjectMeta* meta = bytemap_get(heap->bytemap, (u8 const*)header);
-    if (!object_meta_is_allocated(meta) || object_meta_is_marked(meta)) {
+
+    /*
+     * One load, not two. The state is a single byte compared by equality, and
+     * "allocated and not marked" is exactly "the byte says allocated" — the
+     * two states are distinct values, so asking them separately reads the
+     * same cache line twice for the same answer. This is the most-executed
+     * branch in the marker.
+     */
+    if (cvm_mark_byte_get(meta) != (u8)CVM_OM_ALLOCATED) {
         return;
     }
 
