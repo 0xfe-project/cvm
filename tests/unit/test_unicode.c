@@ -695,6 +695,80 @@ TEST binary_properties_answer_by_name(void) {
     PASS();
 }
 
+/*
+ * What the callback looks for, and how many sequences it saw.
+ *
+ * The callback looks for the wanted sequences itself rather than recording a
+ * sample: RGI_Emoji has thousands of members, and a sample of the first few would
+ * be whatever the table happens to start with.
+ */
+typedef struct Wanted {
+    usize count;
+    usize looking_for;
+    usize found;
+} Wanted;
+
+typedef struct WantedSeq {
+    rune first;
+    rune second;
+    usize length;
+} WantedSeq;
+
+static void find_sequence(opaque_mut ctx, rune const* sequence, usize length) {
+    Wanted* w = (Wanted*)ctx;
+    WantedSeq const* list = (WantedSeq const*)(w + 1);
+    w->count++;
+    for (usize i = 0; i < w->looking_for; i++) {
+        if (list[i].length == length && list[i].first == sequence[0] &&
+            (length < 2u || list[i].second == sequence[1])) {
+            w->found |= ((usize)1u << i);
+        }
+    }
+}
+
+TEST properties_of_strings_are_sequences(void) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+
+    /* the wanted list rides along behind the counter, so one allocation serves
+     * the callback's context */
+    struct {
+        Wanted wanted;
+        WantedSeq list[3];
+    } ctx;
+    ctx.wanted.count = 0;
+    ctx.wanted.looking_for = 3;
+    ctx.wanted.found = 0;
+    /* a single code point: the grinning face */
+    ctx.list[0] = (WantedSeq){0x1F600u, 0u, 1u};
+    /* a flag is two regional indicators */
+    ctx.list[1] = (WantedSeq){0x1F1FAu, 0x1F1F8u, 2u};
+    /* and a family is three code points joined by a zero-width joiner */
+    ctx.list[2] = (WantedSeq){0x1F468u, 0x200Du, 3u};
+
+    ASSERT_EQ_FMT(0,
+                  cvm_unicode_sequence_prop((u8 const*)"RGI_Emoji", find_sequence,
+                                            &ctx.wanted, &cr),
+                  "%d");
+    ASSERT(ctx.wanted.count > 100u);
+    ASSERT(ctx.wanted.found & 1u);
+    ASSERT(ctx.wanted.found & 2u);
+    ASSERT(ctx.wanted.found & 4u);
+
+    /* the scratch is empty again, whatever it was used for */
+    ASSERT_EQ_FMT((i32)0, cr.len, "%d");
+
+    /* and a name that is not one of these is refused */
+    ASSERT_EQ_FMT(-2,
+                  cvm_unicode_sequence_prop((u8 const*)"NotAStringProperty",
+                                            find_sequence, &ctx.wanted, &cr),
+                  "%d");
+
+    cvm_cr_free(&cr);
+    PASS();
+}
+
 SUITE(unicode_suite) {
     RUN_TEST(ascii_case_mapping);
     RUN_TEST(case_mapping_beyond_ascii);
@@ -715,6 +789,7 @@ SUITE(unicode_suite) {
     RUN_TEST(scripts_are_the_sets_the_names_say);
     RUN_TEST(folding_a_range_adds_the_cases_it_matches);
     RUN_TEST(binary_properties_answer_by_name);
+    RUN_TEST(properties_of_strings_are_sequences);
 }
 
 GREATEST_MAIN_DEFS();

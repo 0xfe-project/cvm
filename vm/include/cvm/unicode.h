@@ -270,6 +270,24 @@ i32 cvm_unicode_general_category(CvmCharRange* cr, u8 const* gc_name);
 i32 cvm_unicode_prop(CvmCharRange* cr, u8 const* prop_name);
 
 /*
+ * The *properties of strings*: `\p{RGI_Emoji}` and the other names only a
+ * v-flag pattern can use. They are not a range because what they describe is a
+ * list of code point *sequences* — an emoji drawn with three code points is one
+ * member — so instead of filling a range they call `cb` once per sequence.
+ *
+ * `cr` is scratch space that the caller provides and must have initialized; it is
+ * empty when the call returns. The callback's array is the implementation's and
+ * is only valid for the duration of the call.
+ *
+ * Returns 0, or -2 when the name is not one of these.
+ */
+typedef void (*CvmUnicodeSequencePropCb)(opaque_mut ctx, rune const* sequence,
+                                         usize length);
+
+i32 cvm_unicode_sequence_prop(u8 const* prop_name, CvmUnicodeSequencePropCb cb,
+                              opaque_mut ctx, CvmCharRange* cr);
+
+/*
  * Case-fold a character set, for the regex engine's case-insensitive matching:
  * every character in the set gains the characters it folds to and from. `full`
  * is the same flag cvm_unicode_canonicalize takes, and has to be the same value
