@@ -98,6 +98,15 @@ typedef struct CvmMapOps {
     u32 (*hash)(opaque_mut key);
     u32 (*hash_stored)(opaque_mut stored_key);
     bool (*matches)(opaque_mut stored_key, opaque_mut key);
+    /*
+     * Whether a stored key still stands for something.
+     *
+     * True for a table whose entries live as long as the table does. False for a
+     * weak-keyed table once the key has died — its text is gone with it, so
+     * nothing can match it and nothing can tell what it was, and the only thing
+     * left to do with the entry is remove it.
+     */
+    bool (*valid)(opaque_mut stored_key);
     opaque_mut (*store)(opaque_mut key);
 } CvmMapOps;
 
@@ -172,6 +181,27 @@ opaque_mut cvm_map_put(CvmHashMap* m, opaque_mut key, opaque_mut value, bool* ab
 bool cvm_map_del(CvmHashMap* m, opaque_mut key);
 
 /*
+ * The slot holding `key`, or CVM_MAP_NO_SLOT.
+ *
+ * For a table that has to look at *what is stored* rather than at a value it put
+ * there. An intern table is the case: its entries hold their keys weakly, so the
+ * canonical string is reachable only through the stored key's wrapper, and
+ * asking for a value would ask the wrong question.
+ */
+usize cvm_map_slot(CvmHashMap const* m, opaque_mut key);
+
+/*
+ * Remove the entry in `slot`, which must be occupied.
+ *
+ * Runtime-internal rather than part of the table's surface: a caller with a slot
+ * index got it from a traversal or from cvm_map_slot, and the index stops being
+ * meaningful at the next insert or delete. It exists because a caller that has
+ * already found what it wants to remove should not have to hash the key again to
+ * say which entry it meant.
+ */
+void cvm_map_del_slot(CvmHashMap* m, usize slot);
+
+/*
  * Drop every entry, keeping the bucket array.
  *
  * The arrays are emptied slot by slot rather than dropped, because they are
@@ -198,6 +228,28 @@ CVM_INLINE usize cvm_map_buckets(CvmHashMap const* m) {
  * makes it necessary rather than nice.
  */
 bool cvm_map_resize(CvmHashMap* m, usize buckets);
+
+/*
+ * Rebuild the bucket arrays, keeping only entries whose key is still valid, in
+ * an array sized for what remains. Returns how many entries were dropped.
+ *
+ * This is the table's one maintenance operation, and it exists because dropping
+ * entries *in place* cannot be made to work. Closing a deleted entry's probe
+ * chain moves later entries backwards, and a chain that wraps past the end of
+ * the array moves an entry that a downward scan has not reached yet into a
+ * bucket it has already passed — so a walk-and-delete leaves dead entries
+ * behind, in a pattern that depends on where the chains happen to wrap.
+ *
+ * Rebuilding has neither problem: the old arrays are untouched while the new
+ * ones are filled, so nothing moves under the scan, and the result is both
+ * compact in entries and sized to fit them.
+ *
+ * It allocates when it changes anything, and allocates nothing when it does not.
+ * That is what makes it safe to call from the mutator after a collection and
+ * unsafe to call from the nullify phase, which is the same sentence as "this is
+ * why the cleanup is deferred".
+ */
+usize cvm_map_compact(CvmHashMap* m);
 
 /* ------------------------------------------------------------------ */
 /* traversal                                                           */

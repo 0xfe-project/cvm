@@ -165,10 +165,16 @@ static opaque_mut string_key_store(opaque_mut key) {
     return key;
 }
 
+static bool string_key_valid(opaque_mut stored_key) {
+    (void)stored_key;
+    return true; /* a string table's entries live as long as the table does */
+}
+
 static CvmMapOps const string_key_ops = {
     .hash = string_key_hash,
     .hash_stored = string_key_hash,
     .matches = string_key_matches,
+    .valid = string_key_valid,
     .store = string_key_store,
 };
 
@@ -347,6 +353,104 @@ bool cvm_map_resize(CvmHashMap* m, usize buckets) {
 }
 
 /* ------------------------------------------------------------------ */
+/* compaction                                                          */
+/* ------------------------------------------------------------------ */
+
+/* The smallest power of two whose load factor holds `live` entries. */
+static u32 bits_for(usize live) {
+    u32 bits = 2u;
+    while (bits < 31u && max_count(map_buckets_of(bits)) < live) {
+        bits++;
+    }
+    return bits;
+}
+
+usize cvm_map_compact(CvmHashMap* m) {
+    usize buckets = cvm_map_buckets(m);
+    if (buckets == 0u) {
+        return 0;
+    }
+
+    u32 const* old_used = bit_words(m);
+    usize occupied = 0;
+    usize live = 0;
+    for (usize i = 0; i < buckets; i++) {
+        if (!bit_used(old_used, i)) {
+            continue;
+        }
+        occupied++;
+        if (m->ops->valid(m->keys->items[i])) {
+            live++;
+        }
+    }
+
+    u32 new_bits = bits_for(live);
+    if (live == occupied && new_bits == m->bits) {
+        /* Nothing to drop and nothing to give back. Not even an allocation. */
+        return 0;
+    }
+
+    CVM_FRAME_DECL(f, 3);
+    cvm_frame_push(&f_frame, f_roots, 3);
+    f_roots[0] = m;
+
+    if (live == 0u) {
+        /* Everything died: the table goes back to being a fresh one, arrays and
+         * all, rather than keeping a large empty object alive. */
+        m->keys = NULL;
+        m->values = NULL;
+        m->used = NULL;
+        m->bits = 0;
+        m->count = 0;
+        cvm_frame_pop(&f_frame);
+        return occupied;
+    }
+
+    usize new_buckets = map_buckets_of(new_bits);
+    CvmRefArray* keys = cvm_ref_array_new(new_buckets);
+    CvmRefArray* values = cvm_ref_array_new(new_buckets);
+    CvmMapBits* used = cvm_alloc_array(&cvm_type_bits, bits_words(new_buckets), 4u);
+    f_roots[1] = keys;
+    f_roots[2] = values;
+
+    keys->used = new_buckets;
+    values->used = new_buckets;
+
+    /*
+     * Re-insert from the old arrays, which still hold everything and are still
+     * what the map points at: every key stays reachable for the whole of this,
+     * including across the allocations above.
+     */
+    usize mask = new_buckets - 1u;
+    for (usize i = 0; i < buckets; i++) {
+        if (!bit_used(old_used, i)) {
+            continue;
+        }
+        opaque_mut key = m->keys->items[i];
+        if (!m->ops->valid(key)) {
+            continue; /* dropped */
+        }
+
+        usize slot = map_bucket(m->ops->hash_stored(key), m->salt, new_bits);
+        while (bit_used(used->bits, slot)) {
+            slot = (slot + 1u) & mask;
+        }
+        bit_set(used->bits, slot);
+        keys->items[slot] = key;
+        values->items[slot] = m->values->items[i];
+    }
+
+    m->keys = keys;
+    m->values = values;
+    m->used = used;
+    m->bits = new_bits;
+    m->count = live; /* authoritative, whatever the old count had drifted to */
+
+    cvm_frame_pop(&f_frame);
+    return occupied - live;
+}
+
+/* ------------------------------------------------------------------ */
 /* lookup and update                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -459,6 +563,17 @@ static void map_vacate(CvmHashMap* m, usize i) {
     m->keys->items[i] = NULL;
     m->values->items[i] = NULL;
     m->count--;
+}
+
+usize cvm_map_slot(CvmHashMap const* m, opaque_mut key) {
+    cvm_assert(key != NULL);
+    return map_find(m, m->ops->hash(key), key);
+}
+
+void cvm_map_del_slot(CvmHashMap* m, usize slot) {
+    cvm_assert(slot < cvm_map_buckets(m));
+    cvm_assert(bit_used(bit_words(m), slot));
+    map_vacate(m, slot);
 }
 
 bool cvm_map_del(CvmHashMap* m, opaque_mut key) {
