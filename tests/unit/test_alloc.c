@@ -353,7 +353,7 @@ TEST clearing_the_allocator_drops_the_cached_region(void) {
     (void)cvm_alloc(&scalar8);
     ASSERT(cvm_ctx()->bump_ptr != NULL);
 
-    cvm_allocator_clear(alloc);
+    cvm_allocator_clear(alloc, cvm_ctx());
     ASSERT(alloc->block == NULL);
     ASSERT(alloc->large_cursor == NULL);
     ASSERT_EQ_FMT(0u, cvm_allocator_recycled_count(alloc), "%u");

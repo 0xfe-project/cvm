@@ -83,7 +83,16 @@ typedef struct CvmBlockAllocator {
 
     BlockMeta* meta_start;
 
-    /* Whether the free lists are being touched concurrently. */
+    /*
+     * Whether a sweep is in progress. Informational only.
+     *
+     * It used to select between atomic and non-atomic pops, which is safe
+     * only if it is exact — and it cannot be, because a sweeper can still be
+     * inside a batch when another thread concludes the sweep is over. The
+     * pops are always atomic now, so nothing reads this to make a decision.
+     * It is kept because it costs a byte and says something true about the
+     * heap's state to anyone reading a core dump.
+     */
     _Atomic bool concurrent;
 
     BlockList free_superblocks[CVM_SUPERBLOCK_LIST_SIZE];

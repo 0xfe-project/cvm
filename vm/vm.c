@@ -152,6 +152,23 @@ void cvm_collect(void) {
     cvm_gc_collect_and_finish(cvm_vm_heap());
 }
 
+bool cvm_thread_join(RtThread thread) {
+    /*
+     * The unmanaged state is the declaration that this thread is not
+     * touching the heap, which is what a collector needs to know to not
+     * wait for it. See the note in cvm/vm.h: without this, joining a thread
+     * that is collecting is a deadlock.
+     */
+    cvm_thread_set_activity(CVM_ACT_JOINING);
+    cvm_thread_enter_unmanaged();
+
+    bool ok = rt_thread_join(thread);
+
+    cvm_thread_leave_unmanaged();
+    cvm_thread_set_activity(CVM_ACT_IDLE);
+    return ok;
+}
+
 CvmVmStats cvm_vm_stats(void) {
     CvmVmStats stats = {0};
     if (!vm_ready) {

@@ -190,6 +190,23 @@ is on no list" and turned a one-run-in-five hang with no output into a
 findable bug in the grey lists. A diagnostic that only helps in theory is
 worth less than one that has already paid.
 
+And one suppression, which is a demonstration of a different kind.
+`tests/tsan.supp` silences a pattern that is inherent to a recycling
+collector: memory is handed from one thread to another, and the previous
+owner performed no synchronisation to give it up — nothing gave it up; the
+collector decided the object was unreachable. So there is no
+happens-before edge from its last write to the next owner's first write,
+and ThreadSanitizer reports the pair. The memory is unreachable, nobody
+reads the old value, and every tracing collector has this; bdwgc ships a
+suppression file of its own.
+
+A suppression is a claim that the tool is wrong, and the only way to make
+that claim honestly is to check that the tool still works elsewhere. The
+file is scoped to the test functions that churn allocations, and that
+scoping was verified rather than asserted: a deliberately unsynchronised
+write injected into `vm/` is still reported, with the file in effect, as a
+race in the injected function. The verification was removed afterwards.
+
 New oracles and new checks should come with the same demonstration.
 
 ## Test tiers
@@ -228,16 +245,69 @@ freestanding audit stays meaningful.
 
 ## Stress patterns
 
-**None of these are built.** The table is a plan. It is written in the
-present tense because that is how a spec reads, and the sentence in front
-of it is here to keep that from being a lie.
+**Three of the eight are built**, in `tests/stress/`, and they found four
+real defects in the collector within a day of existing — which is the
+argument for the other five.
 
-The collector is now complete enough to run all of them, so this is the
-next piece of work rather than something blocked on other work.
+Built:
 
-Each is meant to be a separate binary, parameterised by thread count,
-object sizes and survival rate, so a single pattern can be swept across
-configurations.
+- **Allocation churn, at the size boundaries** (`test_stress_boundary.c`,
+  from bdwgc's `middle.c`). Both of this collector's boundaries have a size
+  exactly on them and a size one allocation slot either side, and the sizes
+  come from the arithmetic `cvm_alloc` does rather than from round numbers.
+  Includes the random-sizes/random-lifetimes pattern with a fixed seed.
+- **Object graphs** (`test_stress_graph.c`, from Go's `TestGcDeepNesting`
+  and its rescan/array tests). Eight levels of embedded aggregate with a
+  pointer at the bottom, which is where this collector differs most from
+  the reference it ports; plus a wide tree traversed after ten collections
+  with its node count verified, subtree handover, in-place mutation, and
+  cycles reachable and detached.
+- **Threads** (`test_stress_threads.c`, from bdwgc's `threadleak.c`). Short
+  and long-lived threads registering and leaving while collections run, and
+  workers that keep objects rooted across collections taken under load.
+
+Not built: read-heavy as a distinct pattern (the graph test covers
+traversal), fragmentation as a distinct pattern (the boundary test covers
+random sizes and lifetimes), large objects as a distinct pattern (covered
+by the boundary sweep at both ends of the threshold), and the FFI-boundary
+pattern, which has no target until evacuation exists.
+
+Each is meant to be parameterised by thread count, object sizes and
+survival rate so that a single pattern can be swept across configurations.
+What is built so far hard-codes those; parameterising them is the next step
+and not a prerequisite for anything.
+
+### What the stress suite found
+
+Four defects, none of which the unit tests could have produced:
+
+- **A deadlock between two collectors.** A thread waiting for another
+  collection to finish was not "parked" as far as the incumbent collector
+  could tell, so the incumbent waited for it while it waited for the
+  incumbent. Both stopped forever, and the only sign was the collector's
+  periodic "thread(s) not parked" warning.
+- **Two threads coalescing at once.** Any thread that cannot allocate
+  sweeps a batch and then coalesces, so several arrive at the coalescing
+  pass together; the pass files results before advancing its start point,
+  so they walked the same range and added the same runs twice. The block
+  allocator's double-free assertion is what caught it.
+- **A straggler sweeping into a finished sweep.** A thread still inside a
+  batch when the sweep was declared over filed its blocks afterwards, and
+  the next sweep then re-swept blocks that were in use.
+- **The collector clearing the wrong thread's allocation cursor.**
+  `cvm_allocator_clear` looked up the *calling* thread's context, but it is
+  called for every parked thread in turn, so every other thread kept
+  allocating from a block the sweep was about to hand to someone else. The
+  debug assertion that now checks the post-condition — no thread's bump
+  region points anywhere — is what would have caught it in one run.
+
+The last one is worth dwelling on: it was found by asking why ThreadSanitizer
+reported two threads writing into the same object memory, and the answer
+came from a purpose-built probe (`tests/stress/` was not enough on its own)
+that looked for two threads receiving the same address. The first version of
+that probe was wrong — it counted sequential reuse as a collision — and
+learning that was itself useful: a correct version, using allocations large
+enough to take the validated slow path, found nothing.
 
 | Pattern | Shape | What it targets |
 |---|---|---|
@@ -318,6 +388,10 @@ minute) and a hang is reported as a failure with the binary's name. That
 was added the day a logging macro turned out not to terminate: a suite
 that can hang forever is worse than one that fails, because the failure
 is the only one that tells you anything.
+
+The test runner reads `build/config.json` to learn which sanitizer the
+build used, because one check is only relevant under ThreadSanitizer and a
+binary's name does not say. That check is the suppressions file below.
 
 `valgrind` is available on the development machine and can serve as a
 second opinion on metadata allocations and on the test harness itself,

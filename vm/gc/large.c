@@ -85,16 +85,6 @@ static CvmChunk* free_list_pop(CvmFreeList* list) {
     }
 }
 
-static CvmChunk* free_list_pop_only_thread(CvmFreeList* list) {
-    usize head = atomic_load_explicit(&list->head, memory_order_relaxed);
-    if (head == 0) {
-        return NULL;
-    }
-    CvmChunk* chunk = (CvmChunk*)head;
-    atomic_store_explicit(&list->head, (usize)chunk->next, memory_order_relaxed);
-    return chunk;
-}
-
 /* ------------------------------------------------------------------ */
 /* setup                                                               */
 /* ------------------------------------------------------------------ */
@@ -175,13 +165,15 @@ u32 cvm_large_free_chunk_count(CvmLargeAllocator const* large) {
  * in the first list it looks at.
  */
 static CvmChunk* take_chunk(CvmLargeAllocator* large, usize size) {
-    bool concurrent =
-        atomic_load_explicit(&large->block_alloc->concurrent, memory_order_relaxed);
     u32 start = size_to_list_index(size);
 
+    /*
+     * Always atomic: chunks are pushed onto these lists by sweepers without
+     * the allocator's lock, so a non-atomic pop can lose one of their pushes
+     * and hand the same chunk out twice.
+     */
     for (u32 i = start; i < CVM_LARGE_FREE_LIST_COUNT; i++) {
-        CvmChunk* chunk = concurrent ? free_list_pop(&large->free_lists[i])
-                                     : free_list_pop_only_thread(&large->free_lists[i]);
+        CvmChunk* chunk = free_list_pop(&large->free_lists[i]);
         if (chunk == NULL) {
             continue;
         }

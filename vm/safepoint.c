@@ -28,6 +28,8 @@
 #include "base/types.h"
 #include "context.h"
 #include "cvm/gc.h"
+#include "gc/heap.h"
+#include "gc/world.h"
 #include "log.h"
 #include "rt.h"
 
@@ -165,9 +167,46 @@ static void report_stuck(CvmThreadNode* self) {
             fmt_lit(&m.fmt, state == (u32)CVM_THREAD_MANAGED ? "managed" : "unmanaged");
             fmt_lit(&m.fmt, " alive=");
             fmt_bool(&m.fmt, alive);
+            fmt_lit(&m.fmt, " doing=");
+            fmt_str(&m.fmt, cvm_thread_activity_name(cvm_thread_get_activity(node)));
+            fmt_lit(&m.fmt, " sweeping=");
+            fmt_bool(&m.fmt,
+                     atomic_load_explicit(&node->sweeping, memory_order_acquire));
+            fmt_lit(&m.fmt, " sweep_done=");
+            fmt_u32(&m.fmt, atomic_load_explicit(&node->sweep_cursor_done,
+                                                 memory_order_acquire));
         }
     }
     cvm_threads_unlock_read();
+
+    /*
+     * Where the sweep had got to, and who was holding what. A collector
+     * waiting for a thread that is itself waiting for a lock cannot be
+     * understood from the outside, and "which lock, held by whom" is the
+     * first question worth answering. This is also why the owner of the
+     * coalescing lock is recorded at all.
+     */
+    if (cvm_world_ready()) {
+        CvmHeap* heap = &cvm_world()->heap;
+        CVM_LOG_WARN(m) {
+            fmt_lit(&m.fmt, "  sweep: cursor=");
+            fmt_u32(&m.fmt,
+                    atomic_load_explicit(&heap->sweep.cursor, memory_order_acquire));
+            fmt_lit(&m.fmt, " limit=");
+            fmt_u32(&m.fmt, heap->sweep.limit);
+            fmt_lit(&m.fmt, " coalesce=");
+            fmt_u32(&m.fmt, atomic_load_explicit(&heap->sweep.coalesce_done,
+                                                 memory_order_acquire));
+        }
+        CVM_LOG_WARN(m) {
+            fmt_lit(&m.fmt, "  coalesce_owner=");
+            fmt_u64(&m.fmt, (u64)atomic_load(&heap->sweep.coalesce_owner));
+            fmt_lit(&m.fmt, " acquire_waiters=");
+            fmt_u32(&m.fmt, atomic_load(&acquire_waiters));
+            fmt_lit(&m.fmt, " finishing=");
+            fmt_bool(&m.fmt, atomic_load(&heap->sweep.finishing));
+        }
+    }
 
     CVM_LOG_WARN(m) {
         fmt_lit(&m.fmt, "  a thread inside a blocking foreign call must bracket it "
@@ -190,12 +229,32 @@ bool cvm_safepoint_acquire(void) {
          * that we did not collect: by the time this returns the heap has
          * just been collected, so the caller should retry rather than
          * collect again.
+         *
+         * Waiting for another collection to end is indistinguishable, from
+         * the collector's point of view, from being stopped by it: this
+         * thread is not touching the heap and will not until the flag
+         * clears. So it declares itself parked for the duration.
+         *
+         * Not declaring it is a deadlock, and a stress test with several
+         * threads allocating found it. The incumbent collector waits for
+         * every managed thread to park; this thread is not parked, it is
+         * waiting; and it is waiting for the incumbent to finish. Both wait
+         * forever, and the only sign is the collector's periodic "thread(s)
+         * not parked" warning — which is what that diagnostic is for.
          */
+        if (self != NULL) {
+            atomic_store_explicit(&self->parked, true, memory_order_release);
+        }
+        cvm_thread_set_activity(CVM_ACT_WAITING_FOR_COLLECTION);
         atomic_fetch_add(&acquire_waiters, 1u);
         while (atomic_load_explicit(&cvm_safepoint_requested, memory_order_acquire)) {
             rt_cond_wait(&stw_cond, &stw_mutex);
         }
         atomic_fetch_sub(&acquire_waiters, 1u);
+        if (self != NULL) {
+            atomic_store_explicit(&self->parked, false, memory_order_release);
+        }
+        cvm_thread_set_activity(CVM_ACT_IDLE);
 
         rt_mutex_unlock(&stw_mutex);
         return false;
@@ -273,6 +332,14 @@ void cvm_safepoint_arm_page_if_collecting(void) {
 /* the mutator's side                                                  */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Stop this thread for the collection that is running.
+ *
+ * Sets the parked flag, which is what the collecting thread waits on, and
+ * is also what a thread waiting for someone else's collection sets — see
+ * cvm_safepoint_acquire. The flag means "this thread is not touching the
+ * heap and will not until the collection ends", which covers both.
+ */
 void cvm_safepoint_park(void) {
     CvmThreadNode* node = cvm_thread_node();
     if (node == NULL || !atomic_load(&stw_ready)) {

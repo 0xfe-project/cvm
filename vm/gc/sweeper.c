@@ -492,19 +492,36 @@ static void apply_result(CvmSweepResult* result, CvmBlockAllocator* blocks,
     cvm_sweep_result_clear(result);
 }
 
+/* Defined with the finishing logic, below; a sweep cannot start while a
+ * straggler from the previous one is still filing results. */
+static bool any_other_sweeper_is_in_flight(void);
+
 /* ------------------------------------------------------------------ */
 /* sweeping a batch                                                    */
 /* ------------------------------------------------------------------ */
 
 void cvm_sweep_begin(CvmHeap* heap) {
+    /*
+     * A sweep only starts once the previous one is finished, and finished
+     * means no thread is still inside a batch — see
+     * any_other_sweeper_is_in_flight. Resetting the cursor while a straggler
+     * held a batch would let it hand blocks to a mutator that the new sweep
+     * is about to describe again.
+     */
+    cvm_assert(!any_other_sweeper_is_in_flight());
+
     atomic_store(&heap->sweep.cursor, 0);
     heap->sweep.limit = heap->block_count;
     atomic_store(&heap->sweep.coalesce_done, 0);
     atomic_store(&heap->sweep.post_sweep_done, false);
     atomic_store(&heap->sweep.finishing, false);
 
-    atomic_store(&heap->lazy_sweep.cursor_done, 0);
-    atomic_store(&heap->lazy_sweep.active_count, 0);
+    /*
+     * Per-thread sweep progress is deliberately not reset here. A thread
+     * that has a claim in flight owns its own number, and clearing it from
+     * another thread would tell coalescing that work had been abandoned.
+     * Each thread clears its own when it stops sweeping.
+     */
 }
 
 void cvm_sweep(CvmHeap* heap, _Atomic u32* cursor_done, u32 max_count,
@@ -703,11 +720,28 @@ u32 cvm_sweeper_min_cursor(CvmHeap* heap) {
     u32 min = heap->sweep.limit;
     bool any_active = false;
 
-    if (atomic_load_explicit(&heap->lazy_sweep.active_count, memory_order_acquire) >
-        0) {
+    /*
+     * Every mutator thread that is sweeping right now, each with its own
+     * progress. This was one shared field per heap, which is what a
+     * multi-threaded stress test broke: several threads sweep a batch each
+     * when they cannot allocate, and a shared field lets them overwrite
+     * one another. True progress is monotonic, a shared field is not, and
+     * a bound computed from two threads' numbers can land past a run that
+     * was never closed — after which the sweep is declared finished with a
+     * coalesce_me block still in the heap.
+     */
+    cvm_threads_lock_read();
+    CVM_THREADS_FOREACH(node) {
+        if (!atomic_load_explicit(&node->sweeping, memory_order_acquire)) {
+            continue;
+        }
         any_active = true;
-        min = atomic_load_explicit(&heap->lazy_sweep.cursor_done, memory_order_acquire);
+        u32 done = atomic_load_explicit(&node->sweep_cursor_done, memory_order_acquire);
+        if (done < min) {
+            min = done;
+        }
     }
+    cvm_threads_unlock_read();
 
     if (heap->pool != NULL) {
         for (u32 i = 0; i < heap->pool->count; i++) {
@@ -732,10 +766,26 @@ u32 cvm_sweeper_min_cursor(CvmHeap* heap) {
 }
 
 void cvm_sweep_lazy_coalesce(CvmHeap* heap) {
+    /*
+     * One pass at a time. The pass is not idempotent in the direction that
+     * matters: it adds runs to the block allocator's free lists before
+     * advancing its start point, so two concurrent passes add the same runs
+     * twice and the second finds blocks that are already free. See the note
+     * on sweep.coalesce_lock.
+     */
+    rt_mutex_lock(&heap->sweep.coalesce_lock);
+    {
+        CvmThreadNode* holder = cvm_thread_node();
+        atomic_store(&heap->sweep.coalesce_owner,
+                     (holder != NULL) ? (usize)holder->id : 1u);
+    }
+
     CvmBlockAllocator* blocks = heap->block_alloc;
     u32 start_index = atomic_load(&heap->sweep.coalesce_done);
     u32 limit_index = cvm_sweeper_min_cursor(heap);
     if (start_index >= limit_index) {
+        atomic_store(&heap->sweep.coalesce_owner, 0);
+        rt_mutex_unlock(&heap->sweep.coalesce_lock);
         return;
     }
 
@@ -817,15 +867,52 @@ void cvm_sweep_lazy_coalesce(CvmHeap* heap) {
     }
 
     atomic_store(&heap->sweep.coalesce_done, limit_index);
+
+    atomic_store(&heap->sweep.coalesce_owner, 0);
+    rt_mutex_unlock(&heap->sweep.coalesce_lock);
 }
 
 bool cvm_sweep_is_done(CvmHeap* heap) {
     return atomic_load_explicit(&heap->sweep.post_sweep_done, memory_order_acquire);
 }
 
+/*
+ * Whether any thread other than the caller is inside a sweep batch.
+ *
+ * A batch is not atomic: it claims a range, walks it, and only then files
+ * its results. A thread that finished a collection while another was still
+ * inside a batch would let that straggler file blocks into a mutator's
+ * recycled list *after* the sweep was declared over — and the next sweep
+ * then re-sweeps those blocks while they are in use, so the same block can
+ * be handed to two threads. A multi-threaded stress test caught exactly
+ * that, as two threads writing into overlapping object memory.
+ */
+static bool any_other_sweeper_is_in_flight(void) {
+    bool busy = false;
+
+    cvm_threads_lock_read();
+    CVM_THREADS_FOREACH(node) {
+        if (atomic_load_explicit(&node->sweeping, memory_order_acquire)) {
+            busy = true;
+            break;
+        }
+    }
+    cvm_threads_unlock_read();
+
+    return busy;
+}
+
 bool cvm_sweep_try_finish(CvmHeap* heap) {
     if (atomic_load(&heap->sweep.cursor) < heap->sweep.limit ||
         atomic_load(&heap->sweep.coalesce_done) < heap->sweep.limit) {
+        return false;
+    }
+
+    /*
+     * Not while somebody is still filing a batch's results. The caller has
+     * already cleared its own flag, so this asks about everyone else.
+     */
+    if (any_other_sweeper_is_in_flight()) {
         return false;
     }
 
@@ -859,22 +946,48 @@ bool cvm_sweep_drive(CvmHeap* heap, CvmThreadNode* node, u32 max_count) {
     }
 
     /*
-     * Count this thread as a sweeper for the whole call, coalescing
-     * included. That is what lets the final batch finish the sweep:
-     * coalescing is bounded by the smallest cursor_done among the
-     * sweepers still working, and if this thread were not counted during
-     * its own coalescing call there would be no bound at all and
-     * coalescing would be held at the last block forever.
+     * This thread's own sweep record, published for the whole call,
+     * coalescing included. Counting it is what lets the final batch finish
+     * the sweep: coalescing is bounded by the smallest progress among the
+     * sweepers still working, and a thread that did not count itself during
+     * its own coalescing call would leave no bound at all, so coalescing
+     * would be held at the last block forever.
      */
-    atomic_fetch_add(&heap->lazy_sweep.active_count, 1);
-
-    if (atomic_load(&heap->sweep.cursor) < heap->sweep.limit) {
-        cvm_sweep(heap, &heap->lazy_sweep.cursor_done, max_count, node);
+    CvmThreadNode* self = (node != NULL) ? node : cvm_thread_node();
+    if (self == NULL) {
+        /*
+         * Not a registered thread: a GC worker, or teardown. Workers track
+         * their own progress in the pool, and nothing else should be
+         * driving the sweep from here.
+         */
+        cvm_sweep_lazy_coalesce(heap);
+        return cvm_sweep_try_finish(heap);
     }
 
+    /*
+     * The claim's starting point, not the finished one. Everything before
+     * the unclaimed cursor has been swept by somebody, so publishing that
+     * as the bound is correct even before this batch finishes — and unlike
+     * the end of the batch, it cannot land ahead of a run that is still
+     * open.
+     */
+    u32 claim = atomic_load(&heap->sweep.cursor);
+    if (claim > heap->sweep.limit) {
+        claim = heap->sweep.limit;
+    }
+    atomic_store(&self->sweep_cursor_done, claim);
+    atomic_store(&self->sweeping, true);
+    cvm_thread_set_activity(CVM_ACT_SWEEPING);
+
+    if (claim < heap->sweep.limit) {
+        cvm_sweep(heap, &self->sweep_cursor_done, max_count, self);
+    }
+
+    cvm_thread_set_activity(CVM_ACT_COALESCING);
     cvm_sweep_lazy_coalesce(heap);
 
-    atomic_fetch_sub(&heap->lazy_sweep.active_count, 1);
+    atomic_store(&self->sweeping, false);
+    cvm_thread_set_activity(CVM_ACT_IDLE);
 
     return cvm_sweep_try_finish(heap);
 }
@@ -902,18 +1015,48 @@ void cvm_sweep_clear_debug_state(CvmHeap* heap) {
 }
 
 void cvm_sweep_assert_consistent(CvmHeap* heap) {
+    /*
+     * On finding a block in a state the sweep should have resolved, say
+     * where and in what circumstances before giving up. "A coalesce_me block
+     * survived the sweep" without the index, the cursor and the coalesce
+     * cursor is a sentence that costs an hour to act on; with them it names
+     * the run that was not closed off and how far each pass had got.
+     */
+#define CVM_SWEEP_REPORT_AND_FAIL(cond, message)                                       \
+    do {                                                                               \
+        if (!(cond)) {                                                                 \
+            CVM_LOG_ERROR(m) {                                                         \
+                fmt_lit(&m.fmt, message " at block ");                                 \
+                fmt_u32(&m.fmt, i);                                                    \
+                fmt_lit(&m.fmt, " (flags=0x");                                         \
+                fmt_hex(&m.fmt, (u64)meta->block.simple.flags);                        \
+                fmt_lit(&m.fmt, " size=");                                             \
+                fmt_u32(&m.fmt, block_meta_superblock_size(meta));                     \
+                fmt_lit(&m.fmt, ") cursor=");                                          \
+                fmt_u32(&m.fmt, atomic_load(&heap->sweep.cursor));                     \
+                fmt_lit(&m.fmt, " coalesce=");                                         \
+                fmt_u32(&m.fmt, atomic_load(&heap->sweep.coalesce_done));              \
+                fmt_lit(&m.fmt, " limit=");                                            \
+                fmt_u32(&m.fmt, heap->sweep.limit);                                    \
+                fmt_lit(&m.fmt, " done=");                                             \
+                fmt_bool(&m.fmt, cvm_sweep_is_done(heap));                             \
+            }                                                                          \
+            cvm_assert_msg(cond, message);                                             \
+        }                                                                              \
+    } while (0)
+
     for (u32 i = 0; i < heap->block_count;) {
         BlockMeta* meta = block_meta_at(heap->block_meta_start, i);
 
-        cvm_assert_msg(!block_meta_is_coalesce_me(meta),
-                       "a coalesce_me block survived the sweep");
-        cvm_assert_msg(!block_meta_is_superblock_start_me(meta),
-                       "a superblock_start_me block survived the sweep");
-        cvm_assert_msg(!block_meta_is_superblock_tail(meta),
-                       "a superblock tail was reached directly, so its head "
-                       "was not swept");
-        cvm_assert_msg(!block_meta_is_marked(meta),
-                       "a block is still marked after sweeping");
+        CVM_SWEEP_REPORT_AND_FAIL(!block_meta_is_coalesce_me(meta),
+                                  "a coalesce_me block survived the sweep");
+        CVM_SWEEP_REPORT_AND_FAIL(!block_meta_is_superblock_start_me(meta),
+                                  "a superblock_start_me block survived the sweep");
+        CVM_SWEEP_REPORT_AND_FAIL(!block_meta_is_superblock_tail(meta),
+                                  "a superblock tail was reached directly, so "
+                                  "its head was not swept");
+        CVM_SWEEP_REPORT_AND_FAIL(!block_meta_is_marked(meta),
+                                  "a block is still marked after sweeping");
 
         u32 size = 1;
         if (block_meta_is_superblock_start(meta)) {
@@ -923,8 +1066,16 @@ void cvm_sweep_assert_consistent(CvmHeap* heap) {
         for (u32 b = 0; b < size; b++) {
             LineMeta* lines = cvm_heap_line_meta(heap, i + b);
             for (u32 l = 0; l < CVM_LINE_COUNT; l++) {
-                cvm_assert_msg(!line_meta_is_marked(&lines[l]),
-                               "a line is still marked after sweeping");
+                if (line_meta_is_marked(&lines[l])) {
+                    CVM_LOG_ERROR(m) {
+                        fmt_lit(&m.fmt, "a line is still marked after sweeping: "
+                                        "block ");
+                        fmt_u32(&m.fmt, i + b);
+                        fmt_lit(&m.fmt, " line ");
+                        fmt_u32(&m.fmt, l);
+                    }
+                    cvm_assert_msg(false, "a line is still marked after sweeping");
+                }
             }
         }
 
@@ -932,8 +1083,16 @@ void cvm_sweep_assert_consistent(CvmHeap* heap) {
             u8* block_start = cvm_heap_block_address(heap, i + b);
             ObjectMeta* slot = bytemap_get(heap->bytemap, block_start);
             for (usize s = 0; s < CVM_SLOTS_PER_BLOCK; s++) {
-                cvm_assert_msg(!object_meta_is_marked(&slot[s]),
-                               "an object is still marked after sweeping");
+                if (object_meta_is_marked(&slot[s])) {
+                    CVM_LOG_ERROR(m) {
+                        fmt_lit(&m.fmt, "an object is still marked after sweeping: "
+                                        "block ");
+                        fmt_u32(&m.fmt, i + b);
+                        fmt_lit(&m.fmt, " slot ");
+                        fmt_u32(&m.fmt, (u32)s);
+                    }
+                    cvm_assert_msg(false, "an object is still marked after sweeping");
+                }
             }
         }
 

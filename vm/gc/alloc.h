@@ -94,7 +94,25 @@ void cvm_allocator_init(CvmAllocator* alloc, CvmBlockAllocator* blocks,
 
 /* Drop every cached region. Called when a collection starts, because the
  * block a thread was bumping in may now be a block the sweeper wants. */
-void cvm_allocator_clear(CvmAllocator* alloc);
+/*
+ * Drop every cached region, so the thread stops bumping into a block the
+ * sweeper is about to reuse. Called when a collection starts.
+ *
+ * The context is a parameter, and that is not a style choice. This runs
+ * *for other threads* — the collector walks the registry and clears every
+ * parked thread's allocator — while the bump cursor lives in the context
+ * rather than in the allocator struct. Looking up "the calling thread's
+ * context" therefore cleared the collector's own cursor once per thread and
+ * left every other thread's cursor pointing into a block about to be handed
+ * to someone else. Two threads then bumped through the same memory, which a
+ * multi-threaded stress test found as overlapping object writes starting at
+ * the first block of the heap.
+ *
+ * The sweeper does not hand blocks back through a per-thread call: it
+ * pushes whole runs of partially free blocks onto each thread's recycled
+ * list, one compare-exchange per run rather than one per block.
+ */
+void cvm_allocator_clear(CvmAllocator* alloc, CvmVMContext* ctx);
 
 /*
  * The allocation fallback, called from the inlined fast path.

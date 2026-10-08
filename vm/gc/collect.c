@@ -142,10 +142,30 @@ static void reset_marking(CvmHeap* heap) {
 static void prepare_for_sweep(CvmHeap* heap) {
     cvm_threads_lock_read();
     CVM_THREADS_FOREACH(node) {
-        cvm_allocator_clear(&node->allocator);
+        /*
+         * Each node's *own* context, which is the whole point: the bump
+         * cursor lives there, and clearing the caller's instead leaves every
+         * parked thread allocating into a block the sweep is about to reuse.
+         */
+        cvm_allocator_clear(&node->allocator, &node->ctx);
         cvm_large_clear(&node->large_allocator);
     }
     cvm_threads_unlock_read();
+
+#if defined(CVM_DEBUG)
+    /*
+     * The invariant the above is supposed to establish, checked rather than
+     * assumed: no thread's bump region points anywhere any more. This is the
+     * check that would have caught the bug in one run instead of in a stress
+     * test.
+     */
+    cvm_threads_lock_read();
+    CVM_THREADS_FOREACH(node) {
+        cvm_assert(node->ctx.bump_ptr == NULL);
+        cvm_assert(node->ctx.bump_end == NULL);
+    }
+    cvm_threads_unlock_read();
+#endif
 
     /*
      * The block allocator's free lists are emptied too, for the same
@@ -167,6 +187,8 @@ static void prepare_for_sweep(CvmHeap* heap) {
 /* ------------------------------------------------------------------ */
 
 bool cvm_gc_collect(CvmHeap* heap) {
+    cvm_thread_set_activity(CVM_ACT_COLLECTING);
+
     if (!cvm_safepoint_acquire()) {
         /* Another thread is collecting, and has just finished. The
          * caller's next move is to retry its allocation. */
@@ -229,6 +251,7 @@ bool cvm_gc_collect(CvmHeap* heap) {
     reset_marking(heap);
 
     /* --- mark --- */
+    cvm_thread_set_activity(CVM_ACT_MARKING);
     u64 mark_start = rt_time_nanos();
     cvm_mark_roots(heap);
     phase_run(heap, CVM_GC_MARK, worker_count, mark_all);
@@ -296,6 +319,7 @@ bool cvm_gc_collect(CvmHeap* heap) {
     }
 
     cvm_safepoint_release();
+    cvm_thread_set_activity(CVM_ACT_IDLE);
     return true;
 }
 

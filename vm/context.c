@@ -325,3 +325,41 @@ void cvm_threads_unlock_read(void) {
 CvmThreadNode* cvm_threads_head(void) {
     return registry_head;
 }
+
+/* ------------------------------------------------------------------ */
+/* the activity breadcrumb                                             */
+/* ------------------------------------------------------------------ */
+
+static str const activity_names[CVM_ACT_TYPE_COUNT] = {
+    [CVM_ACT_IDLE] = {.ptr = (u8 const*)"idle", .len = 4},
+    [CVM_ACT_ALLOCATING] = {.ptr = (u8 const*)"allocating", .len = 10},
+    [CVM_ACT_SWEEPING] = {.ptr = (u8 const*)"sweeping", .len = 8},
+    [CVM_ACT_COALESCING] = {.ptr = (u8 const*)"coalescing", .len = 10},
+    [CVM_ACT_COLLECTING] = {.ptr = (u8 const*)"collecting", .len = 10},
+    [CVM_ACT_MARKING] = {.ptr = (u8 const*)"marking", .len = 7},
+    [CVM_ACT_WAITING_FOR_COLLECTION] = {.ptr = (u8 const*)"waiting-for-collection",
+                                        .len = 22},
+    [CVM_ACT_ATTACHING] = {.ptr = (u8 const*)"attaching", .len = 9},
+    [CVM_ACT_DETACHING] = {.ptr = (u8 const*)"detaching", .len = 9},
+    [CVM_ACT_FINALIZING] = {.ptr = (u8 const*)"finalizing", .len = 10},
+    [CVM_ACT_JOINING] = {.ptr = (u8 const*)"joining", .len = 7},
+};
+
+str cvm_thread_activity_name(CvmThreadActivity activity) {
+    if ((u32)activity >= (u32)CVM_ACT_TYPE_COUNT) {
+        return STR_LITERAL("unknown");
+    }
+    return activity_names[activity];
+}
+
+void cvm_thread_set_activity(CvmThreadActivity activity) {
+    CvmThreadNode* node = cvm_thread_node();
+    if (node != NULL) {
+        atomic_store_explicit(&node->activity, (u32)activity, memory_order_relaxed);
+    }
+}
+
+CvmThreadActivity cvm_thread_get_activity(CvmThreadNode const* node) {
+    return (CvmThreadActivity)atomic_load_explicit(&node->activity,
+                                                   memory_order_relaxed);
+}

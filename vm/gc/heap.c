@@ -164,6 +164,8 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     heap->max_heap_size = 0;
     heap->max_mark_time_ratio = CVM_MARK_TIME_RATIO_DEFAULT;
     heap->min_free_ratio = CVM_FREE_RATIO_DEFAULT;
+    heap->pool = NULL;
+    heap->block_alloc = NULL;
 
     if (min_size < CVM_MIN_HEAP_SIZE) {
         min_size = CVM_MIN_HEAP_SIZE;
@@ -188,7 +190,8 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
         return false;
     }
 
-    if (!rt_mutex_init(&heap->grow_lock)) {
+    if (!rt_mutex_init(&heap->grow_lock) ||
+        !rt_mutex_init(&heap->sweep.coalesce_lock)) {
         return false;
     }
 

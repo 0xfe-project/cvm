@@ -109,6 +109,35 @@ void cvm_shutdown(void);
 void cvm_collect(void);
 
 /* ------------------------------------------------------------------ */
+/* blocking calls, from managed code                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Wait for a thread to finish, declaring that the wait is not managed
+ * execution.
+ *
+ * This exists because the obvious call is unsafe, and the failure is a
+ * deadlock rather than a crash. A thread blocked in a join is not executing
+ * managed code and is not going to reach a safepoint, but a collector
+ * cannot tell that from the outside: it sees a managed thread that is not
+ * parked, and waits for it. Meanwhile the thread waits for the thread it is
+ * joining, which may itself be the one collecting. Both wait forever.
+ *
+ * So the runtime brackets the wait with the unmanaged state, which is
+ * exactly the declaration the FFI protocol asks of generated code around
+ * any foreign call. Any other blocking operation called from managed code
+ * needs the same treatment:
+ *
+ *     cvm_thread_enter_unmanaged();
+ *     ... blocking call ...
+ *     cvm_thread_leave_unmanaged();
+ *
+ * `rt_thread_join` is safe to call only when the caller is already
+ * unmanaged, or when no other thread can be collecting. Prefer this.
+ */
+bool cvm_thread_join(RtThread thread);
+
+/* ------------------------------------------------------------------ */
 /* what the runtime is doing                                           */
 /* ------------------------------------------------------------------ */
 

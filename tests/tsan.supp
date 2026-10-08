@@ -1,0 +1,47 @@
+# tests/tsan.supp
+#
+# ThreadSanitizer suppressions for the cvm test suite.
+#
+# One pattern, and the reasoning matters more than the pattern.
+#
+# ---------------------------------------------------------------------
+# Reclaimed memory is reused
+# ---------------------------------------------------------------------
+#
+# A tracing collector hands memory from one thread to another. The previous
+# owner performed no synchronisation to give it up — nothing gave it up; the
+# collector *decided* the object was unreachable. So there is no
+# happens-before edge from that thread's last write into the object to the
+# next owner's first write, and ThreadSanitizer reports the pair as a race.
+#
+# The report is correct by its own definition and not a defect: the memory is
+# unreachable, nobody reads the old value, and the next owner is entitled to
+# treat it as fresh. This is a mismatch between the tool's model (every
+# access to an address needs an edge) and a collector's (an unreachable
+# object's storage is free).
+#
+# Every tracing collector has this, which is why bdwgc ships a suppression
+# file of its own. The alternatives were both worse:
+#
+#   - annotate the allocator with __tsan_acquire/__tsan_release around every
+#     hand-off. That tells the tool "this thread acquired the region", but
+#     there is nothing on the other side to acquire from, so it does not
+#     silence the report; it only adds calls to the allocation path.
+#
+#   - turn ThreadSanitizer off for the stress binaries. That would blind the
+#     tool to real races in those tests, which are exactly the tests whose
+#     whole purpose is to produce the interleavings that expose them.
+#
+# So the suppression is scoped to the functions that churn allocations, in
+# the one binary where several threads allocate at once. A race inside the
+# collector still reports, because its frames are in vm/ and rt/ rather than
+# in a test worker — and that claim is checked rather than asserted: see the
+# negative control note in TEST.md, which injects a deliberate race into the
+# runtime and confirms it is still reported with this file in effect.
+#
+# The names are the thread entry points of tests/stress/test_stress_threads.c
+# and tests/unit/test_trap.c, which are the only functions that allocate from
+# more than one thread.
+race:storm_worker
+race:keeping_worker
+race:allocate_in_a_loop

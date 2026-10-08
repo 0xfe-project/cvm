@@ -37,10 +37,6 @@ static u32 size_to_list_index(u32 size) {
     return cvm_log2_floor(size);
 }
 
-static bool is_concurrent(CvmBlockAllocator* alloc) {
-    return atomic_load_explicit(&alloc->concurrent, memory_order_relaxed);
-}
-
 static BlockMeta* pop_superblock(CvmBlockAllocator* alloc, u32* index) {
     /* Acquire everything the sweepers published before reading the lists. */
     atomic_thread_fence(memory_order_acquire);
@@ -55,21 +51,19 @@ static BlockMeta* pop_superblock(CvmBlockAllocator* alloc, u32* index) {
     return NULL;
 }
 
-static BlockMeta* pop_superblock_only_thread(CvmBlockAllocator* alloc, u32* index) {
-    for (u32 i = *index; i < CVM_SUPERBLOCK_LIST_SIZE; i++) {
-        BlockMeta* run =
-            block_list_pop_only_thread(&alloc->free_superblocks[i], alloc->meta_start);
-        if (run != NULL) {
-            *index = i;
-            return run;
-        }
-    }
-    return NULL;
-}
-
+/*
+ * Always the atomic pop.
+ *
+ * The shared free lists are pushed to by sweepers *without* the allocator's
+ * lock — that is the design: a lock-free push, a locked pop — so the pop
+ * must be atomic to pair with it. Branching on a heap-wide "is sweeping"
+ * flag, as this once did, requires that flag to be exact, and it cannot be:
+ * a sweeper can still be inside a batch when another thread decides the
+ * sweep is over. A lost update there hands the same run of blocks to two
+ * threads.
+ */
 static BlockMeta* pop_superblock_mode(CvmBlockAllocator* alloc, u32* index) {
-    return is_concurrent(alloc) ? pop_superblock(alloc, index)
-                                : pop_superblock_only_thread(alloc, index);
+    return pop_superblock(alloc, index);
 }
 
 /*
@@ -247,22 +241,22 @@ static BlockMeta* get_free_block_slow(CvmBlockAllocator* alloc) {
      * fine — the sweeper only ever extends a run forward, so a block
      * taken from its front is already accounted for.
      */
+    /*
+     * The coalescing range is appended to by sweepers without the lock, so
+     * taking from it has to be atomic for the same reason the free lists do:
+     * a non-atomic read-then-write can lose one of their appends and hand
+     * the same run to two threads.
+     *
+     * Taking one block rather than the whole remaining range gives up the
+     * chance to use it as a cursor run. That was the point of the old
+     * non-concurrent branch, and it is not worth the correctness it costs:
+     * a block at a time from a range that only exists between sweeps is a
+     * rare path.
+     */
     BlockMeta* block = NULL;
-    if (is_concurrent(alloc)) {
-        u32 idx = cvm_block_range_poll_first(&alloc->coalescing, 1);
-        if (idx != CVM_NO_BLOCK_INDEX) {
-            block = block_meta_at(alloc->meta_start, idx);
-        }
-    } else {
-        CvmBlockRangeVal range = atomic_load(&alloc->coalescing);
-        atomic_store(&alloc->coalescing, CVM_EMPTY_RANGE);
-        u32 size = cvm_block_range_size(range);
-        if (size > 0) {
-            u32 idx = cvm_block_range_first(range);
-            block = block_meta_at(alloc->meta_start, idx);
-            alloc->smallest.cursor = block + 1;
-            alloc->smallest.limit = block + size;
-        }
+    u32 idx = cvm_block_range_poll_first(&alloc->coalescing, 1);
+    if (idx != CVM_NO_BLOCK_INDEX) {
+        block = block_meta_at(alloc->meta_start, idx);
     }
 
     if (block != NULL) {

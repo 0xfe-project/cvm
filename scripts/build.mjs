@@ -15,6 +15,7 @@
 // Incremental compilation is delegated entirely to ccache: every source is
 // handed to the compiler on every run, unchanged inputs are cache hits.
 
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -115,6 +116,18 @@ function buildRuntime(toolchain) {
 }
 
 function buildTests(toolchain, runtimeObjs) {
+    const binDir = path.join(BUILD, "bin");
+
+    /*
+     * Wipe the output directory before linking, so a binary whose source was
+     * deleted or renamed does not survive as a stale artefact. The test
+     * runner runs *every* binary it finds there, so a leftover is not merely
+     * untidy: it is executed, and it fails for reasons belonging to a file
+     * that no longer exists.
+     */
+    rmrf(binDir);
+    mkdirp(binDir);
+
     const srcs = collect(path.join(ROOT, "tests"), [".c"]);
     if (srcs.length === 0) {
         ui.log("tests: none found");
@@ -184,6 +197,19 @@ function main() {
     );
 
     mkdirp(BUILD);
+
+    /*
+     * Record which sanitizer this build is, in a file the test runner reads.
+     *
+     * The runner needs to know because the suppressions file is only
+     * relevant under ThreadSanitizer, and "which sanitizer" is not something
+     * a binary's name says. A file rather than an environment variable
+     * because the two are separate processes, often separated by a shell.
+     */
+    fs.writeFileSync(
+        path.join(BUILD, "config.json"),
+        JSON.stringify({ sanitizer: opts.sanitizer, config: opts.config }) + "\n",
+    );
 
     const runtime = buildRuntime(toolchain);
 

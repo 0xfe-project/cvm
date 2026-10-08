@@ -92,7 +92,70 @@ typedef struct CvmThreadNode {
      * fault and the resumption.
      */
     u64 safepoint_resume_pc;
+
+    /* --- lazy sweeping --- */
+
+    /*
+     * How far this thread has swept, and whether it is sweeping now.
+     *
+     * Per thread rather than per heap, and the reason is a bug that took a
+     * multi-threaded stress test to find: any thread that cannot allocate
+     * sweeps a batch itself, so several threads can be driving the lazy
+     * sweep at once. With one shared progress field they overwrite each
+     * other, and coalescing — which is bounded by the smallest progress of
+     * the sweepers still working — then computes a bound out of two
+     * threads' numbers. The bound came out ahead of a run that had never
+     * been closed, the sweep was declared finished, and the next collection
+     * found a coalesce_me block that should not exist.
+     *
+     * A thread's own field cannot be raced by another thread, so the bound
+     * is a bound again.
+     */
+    _Atomic u32 sweep_cursor_done;
+    _Atomic bool sweeping;
+
+    /* What this thread is doing, for diagnosing a hang. See the note above
+     * CvmThreadActivity. */
+    _Atomic u32 activity;
 } CvmThreadNode;
+
+/* ------------------------------------------------------------------ */
+/* what a thread is doing                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A breadcrumb, for diagnosing a hang.
+ *
+ * When a collector waits for a thread that is not parking, the useful
+ * question is what that thread is doing — and a stack is not available from
+ * inside the process. One word per thread, written at the entrance of the
+ * few operations that can block, answers it.
+ *
+ * A diagnostic and nothing more: nothing reads this to make a decision, so
+ * a stale value costs nothing but a misleading log line.
+ */
+typedef enum CvmThreadActivity {
+    CVM_ACT_IDLE = 0,
+    CVM_ACT_ALLOCATING,
+    CVM_ACT_SWEEPING,
+    CVM_ACT_COALESCING,
+    CVM_ACT_COLLECTING,
+    CVM_ACT_MARKING,
+    CVM_ACT_WAITING_FOR_COLLECTION,
+    CVM_ACT_ATTACHING,
+    CVM_ACT_DETACHING,
+    CVM_ACT_FINALIZING,
+    CVM_ACT_JOINING,
+    CVM_ACT_TYPE_COUNT,
+} CvmThreadActivity;
+
+str cvm_thread_activity_name(CvmThreadActivity activity);
+
+/* Set the calling thread's breadcrumb. Harmless for an unregistered
+ * thread: there is nowhere to record it, so it records nothing. */
+void cvm_thread_set_activity(CvmThreadActivity activity);
+
+CvmThreadActivity cvm_thread_get_activity(CvmThreadNode const* node);
 
 /* ------------------------------------------------------------------ */
 /* lifecycle                                                           */

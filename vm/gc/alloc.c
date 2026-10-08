@@ -52,10 +52,10 @@ void cvm_allocator_init(CvmAllocator* alloc, CvmBlockAllocator* blocks,
     block_list_init(&alloc->recycled_blocks);
     atomic_store(&alloc->recycled_block_count, 0);
 
-    cvm_allocator_clear(alloc);
+    cvm_allocator_clear(alloc, cvm_ctx());
 }
 
-void cvm_allocator_clear(CvmAllocator* alloc) {
+void cvm_allocator_clear(CvmAllocator* alloc, CvmVMContext* ctx) {
     block_list_clear(&alloc->recycled_blocks);
     atomic_store(&alloc->recycled_block_count, 0);
 
@@ -67,13 +67,11 @@ void cvm_allocator_clear(CvmAllocator* alloc) {
     alloc->large_limit = NULL;
 
     /*
-     * The bump cursor lives in the context, not here, so clearing this
-     * struct is not enough. Leaving it pointing into a block that is
-     * about to be swept is exactly the bug this function exists to
-     * prevent: the thread would keep bump-allocating into a block the
-     * sweeper is about to hand to someone else.
+     * The bump cursor lives in the context, not in this struct, so clearing
+     * one without the other leaves the thread allocating into a block the
+     * sweeper is about to hand to somebody else. The context arrives as a
+     * parameter because this runs for other threads; see gc/alloc.h.
      */
-    CvmVMContext* ctx = cvm_ctx();
     if (ctx != NULL) {
         ctx->bump_ptr = NULL;
         ctx->bump_end = NULL;
@@ -168,13 +166,27 @@ static bool allocator_next_line(CvmAllocator* alloc);
 static bool allocator_new_block(CvmAllocator* alloc) {
     BlockMeta* block;
 
-    if (atomic_load_explicit(&alloc->block_alloc->concurrent, memory_order_relaxed)) {
-        /* The sweeper is running and may be touching this list. */
-        block = block_list_pop(&alloc->recycled_blocks, alloc->heap->block_meta_start);
-    } else {
-        block = block_list_pop_only_thread(&alloc->recycled_blocks,
-                                           alloc->heap->block_meta_start);
-    }
+    /*
+     * Always atomic, and the reason is not caution.
+     *
+     * This list is filled by *other* threads: the sweeper pushes whole runs
+     * of partially free blocks into whichever mutator it chose to give them
+     * to, and it does so without the block allocator's lock. So a pop here
+     * can run concurrently with a push from a thread that holds nothing.
+     *
+     * This used to branch on one heap-wide flag saying whether sweeping was
+     * in progress, and pop non-atomically when it was not. That is safe only
+     * if the flag is exact, and it is not: a sweeper can still be inside a
+     * batch when another thread concludes the sweep is over and clears the
+     * flag. A non-atomic pop racing an atomic push loses an update, and the
+     * same block is then handed to two threads — which a multi-threaded
+     * stress test caught, as two threads writing into overlapping object
+     * memory.
+     *
+     * The cost of always being atomic is one compare-exchange per block
+     * adopted, which is once per 32 KiB of allocation.
+     */
+    block = block_list_pop(&alloc->recycled_blocks, alloc->heap->block_meta_start);
 
     CvmVMContext* ctx = cvm_ctx();
     u8* block_start;
@@ -186,6 +198,17 @@ static bool allocator_new_block(CvmAllocator* alloc) {
         atomic_thread_fence(memory_order_acquire);
 
         cvm_assert(block_meta_is_simple(block));
+
+        /*
+         * A block reaches a mutator's recycled list only through the
+         * sweeper, which marks it partially free on the way. So that is the
+         * state it must still be in: anything else means it was handed out
+         * already, and two threads are about to bump their way through the
+         * same memory.
+         */
+        cvm_assert_msg(block_meta_debug_state(block) == (u8)CVM_DBG_PARTIAL_FREE,
+                       "a recycled block was handed to a second owner");
+
         block_meta_set_debug_state(block, CVM_DBG_IN_USE);
 
         block_start = block_meta_block_start(alloc->heap->block_meta_start,
@@ -376,6 +399,8 @@ opaque_mut cvm_alloc_slow(CvmTypeDescriptor const* type, usize size) {
 
     CvmAllocator* alloc = &node->allocator;
     CvmHeap* heap = alloc->heap;
+
+    cvm_thread_set_activity(CVM_ACT_ALLOCATING);
 
     for (;;) {
         u8* payload = try_alloc(alloc, size);

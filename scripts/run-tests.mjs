@@ -32,6 +32,25 @@ const TIMEOUT_MS = Number(process.env.CVM_TEST_TIMEOUT_MS || DEFAULT_TIMEOUT_MS)
 const ui = logger("test");
 const filters = process.argv.slice(2).filter((a) => !a.startsWith("-"));
 
+/*
+ * ThreadSanitizer suppressions, when a sanitizer build is what is being run.
+ *
+ * Which build it is can be told from the binary's own name? No — the test
+ * binaries are named after their source. It is told from the environment:
+ * build.mjs leaves the marker below for exactly this purpose.
+ */
+const suppressions = path.join(ROOT, "tests", "tsan.supp");
+const configFile = path.join(ROOT, "build", "config.json");
+const buildConfig = fs.existsSync(configFile)
+    ? JSON.parse(fs.readFileSync(configFile, "utf8"))
+    : {};
+const sanEnv = {};
+if (buildConfig.sanitizer === "tsan" && fs.existsSync(suppressions)) {
+    sanEnv.TSAN_OPTIONS =
+        `${process.env.TSAN_OPTIONS ?? ""} suppressions=${suppressions}`.trim();
+    ui.log(`tsan suppressions: ${path.relative(ROOT, suppressions)}`);
+}
+
 if (!fs.existsSync(BIN)) {
     ui.fatal("no build/bin/ — run: node scripts/build.mjs --test");
 }
@@ -63,7 +82,11 @@ for (const name of bins) {
     const bin = path.join(BIN, name);
     process.stdout.write(`\n── ${name} ${"─".repeat(Math.max(0, 60 - name.length))}\n`);
 
-    const r = spawnSync(bin, [], { stdio: "inherit", timeout: TIMEOUT_MS });
+    const r = spawnSync(bin, [], {
+        stdio: "inherit",
+        timeout: TIMEOUT_MS,
+        env: { ...process.env, ...sanEnv },
+    });
 
     const timedOut = r.error !== undefined && r.error.code === "ETIMEDOUT";
     if (timedOut) {

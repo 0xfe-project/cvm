@@ -27,6 +27,7 @@ export function parseArgs(argv) {
 
     return {
         release,
+        sanitizer: asan ? "asan" : tsan ? "tsan" : null,
         config: (release ? "release" : "debug") + variant,
         asan,
         tsan,

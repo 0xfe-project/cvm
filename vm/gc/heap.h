@@ -186,6 +186,31 @@ typedef struct CvmHeap {
          * set aside.
          */
         _Atomic bool finishing;
+
+        /*
+         * Held for the duration of a coalescing pass.
+         *
+         * Any thread that cannot allocate sweeps a batch and then
+         * coalesces, so several can arrive at the coalescing pass at once.
+         * The pass reads a start point, walks forward adding runs to the
+         * block allocator, and only then advances the start point — so two
+         * threads entering together walk the same range and add the same
+         * runs, and the second add finds blocks that are already free. That
+         * is the assertion in the allocator's clear_run, and it fired
+         * before this lock existed.
+         *
+         * A pass is bounded work that is already rate-limited by the sweep
+         * cursor, so serialising it costs nothing worth measuring.
+         */
+        RtMutex coalesce_lock;
+
+        /*
+         * Who holds the coalescing lock, or zero. A diagnostic, not a
+         * mechanism: a collector waiting for a thread that is itself
+         * waiting for a lock cannot be understood from the outside, and
+         * "which lock, held by whom" is the first question worth answering.
+         */
+        _Atomic(usize) coalesce_owner;
     } sweep;
 
     /*
@@ -205,34 +230,6 @@ typedef struct CvmHeap {
      */
     CvmBlockAllocator* block_alloc;
 
-    /*
-     * State for the lazy sweeper: the sweep a mutator thread does when it
-     * cannot allocate. Tracked separately from the sweepers because it is
-     * not a GC thread and its progress must still bound coalescing.
-     */
-    struct {
-        _Atomic u32 cursor_done;
-
-        /*
-         * How many threads are driving the sweep right now.
-         *
-         * This is what coalescing is bounded by. A run of free blocks can
-         * only be closed off once every sweeper that might extend it has
-         * finished its batch, and a sweeper's cursor_done is the end of
-         * its last completed batch — so the bound is the smallest
-         * cursor_done among the sweepers that are still working.
-         *
-         * A sweeper that has stopped imposes no bound: it is not going to
-         * extend anything. That is why this is a count and not a flag —
-         * two threads may be driving at once, and one finishing must not
-         * make the other invisible.
-         *
-         * The counter is also why coalescing can finish at all: the
-         * thread doing the last batch is itself counted, so its own
-         * cursor_done provides the bound it needs.
-         */
-        _Atomic u32 active_count;
-    } lazy_sweep;
 } CvmHeap;
 
 /*
