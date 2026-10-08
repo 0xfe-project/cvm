@@ -189,6 +189,15 @@ static void prepare_for_sweep(CvmHeap* heap) {
 bool cvm_gc_collect(CvmHeap* heap) {
     cvm_thread_set_activity(CVM_ACT_COLLECTING);
 
+    /*
+     * The thread's event buffer, or NULL. Recording is a few stores, and
+     * the whole-collection event below is what a caller reads to see how
+     * long the world was stopped; without it the pause figures the
+     * benchmark reports would have no per-phase breakdown behind them.
+     */
+    CvmStats* stats = cvm_stats_this_thread();
+    u64 event_start = cvm_stats_now(stats);
+
     if (!cvm_safepoint_acquire()) {
         /* Another thread is collecting, and has just finished. The
          * caller's next move is to retry its allocation. */
@@ -256,10 +265,14 @@ bool cvm_gc_collect(CvmHeap* heap) {
     cvm_mark_roots(heap);
     phase_run(heap, CVM_GC_MARK, worker_count, mark_all);
     u64 mark_end = rt_time_nanos();
+    cvm_stats_record(stats, CVM_EVENT_MARK, mark_start, mark_end);
 
     /* --- nullify weak references --- */
+    cvm_thread_set_activity(CVM_ACT_NULLIFYING);
+    u64 nullify_start = rt_time_nanos();
     u32 weak_cleared = 0;
     phase_run(heap, CVM_GC_NULLIFY, worker_count, nullify_all);
+    cvm_stats_record(stats, CVM_EVENT_NULLIFY, nullify_start, rt_time_nanos());
 
     /*
      * --- start the sweep ---
@@ -269,7 +282,16 @@ bool cvm_gc_collect(CvmHeap* heap) {
      * preparation empties the block allocator, so there is nothing to sweep
      * until a mutator needs memory, and that mutator drives it.
      */
+    u64 sweep_start = rt_time_nanos();
     prepare_for_sweep(heap);
+    /*
+     * What this measures is the sweep's preparation, not the sweep. The
+     * sweep itself is deferred and driven by whoever allocates next, so it
+     * has no single interval to report; its cost appears as `sweepbatch`
+     * and `coalescebatch` rows, one per unit of work. Naming that here keeps
+     * a reader from adding this row to those and reading a phase twice.
+     */
+    cvm_stats_record(stats, CVM_EVENT_SWEEP, sweep_start, rt_time_nanos());
 
     if (heap->pool != NULL) {
         atomic_store_explicit(&heap->pool->phase, (u32)CVM_GC_IDLE,
@@ -320,6 +342,7 @@ bool cvm_gc_collect(CvmHeap* heap) {
         .grew = false, /* decided at the start of the next collection */
     };
 
+    cvm_stats_record(stats, CVM_EVENT_COLLECTION, event_start, end_ns);
     cvm_gc_counters_record_collection(start_ns, end_ns);
 
     CVM_LOG_INFO(m) {

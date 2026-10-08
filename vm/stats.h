@@ -112,6 +112,37 @@ typedef struct CvmStats {
 } CvmStats;
 
 /*
+ * The channel a thread's buffer is opened on, or NULL for none.
+ *
+ * Set once at startup from CvmOptions.stats_channel. A program that wants
+ * per-phase numbers points it at a file; a program that does not leaves it
+ * NULL, and then no thread allocates a buffer and every recording call is
+ * a null check.
+ */
+void cvm_stats_set_default_channel(RtChannel* channel);
+
+/*
+ * Open a buffer on the default channel, or return NULL when there is none.
+ *
+ * A pointer rather than an embedded struct, because the buffer is 34 KiB —
+ * 2000 events of 17 bytes — and a program with a hundred threads should not
+ * pay 3.4 MiB for statistics it did not ask for. NULL is the normal case.
+ *
+ * The thread id is assigned here, from a counter, so that no caller has to
+ * manage one. It only labels the CSV.
+ */
+CvmStats* cvm_stats_open(void);
+
+/* Flush and release a buffer from cvm_stats_open. NULL is accepted. */
+void cvm_stats_close(CvmStats* stats);
+
+/*
+ * The calling thread's buffer, or NULL. The convenience the collector
+ * actually calls; a thread that has none gets NULL and records nothing.
+ */
+CvmStats* cvm_stats_this_thread(void);
+
+/*
  * Prepare a buffer. Writes the CSV header immediately, so a stats file
  * that exists is always parseable even if the process dies mid-collection.
  */

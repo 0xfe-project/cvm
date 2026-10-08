@@ -7,6 +7,8 @@
 
 #include "stats.h"
 
+#include "context.h"
+
 #include "base/format.h"
 #include "base/types.h"
 #include "log.h"
@@ -51,6 +53,51 @@ str cvm_event_type_name(CvmEventType type) {
 /* ------------------------------------------------------------------ */
 /* CSV                                                                 */
 /* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* per-thread buffers                                                  */
+/* ------------------------------------------------------------------ */
+
+static RtChannel* default_channel = NULL;
+static i8 next_thread_id = 0;
+
+void cvm_stats_set_default_channel(RtChannel* channel) {
+    default_channel = channel;
+}
+
+CvmStats* cvm_stats_open(void) {
+    if (default_channel == NULL) {
+        return NULL;
+    }
+
+    CvmStats* stats = rt_mem_alloc(sizeof(CvmStats));
+    if (stats == NULL) {
+        return NULL;
+    }
+
+    /*
+     * Ids are labels, not identifiers: 0..126 for threads, -1 reserved for
+     * the mutator role. Wrapping after 127 threads means two threads can
+     * share a label in a long run, which the CSV's other columns
+     * disambiguate by time.
+     */
+    i8 id = (next_thread_id >= 127) ? 0 : next_thread_id++;
+    cvm_stats_init(stats, default_channel, id);
+    return stats;
+}
+
+void cvm_stats_close(CvmStats* stats) {
+    if (stats == NULL) {
+        return;
+    }
+    cvm_stats_shutdown(stats);
+    rt_mem_free(stats);
+}
+
+CvmStats* cvm_stats_this_thread(void) {
+    CvmThreadNode* node = cvm_thread_node();
+    return (node != NULL) ? node->stats : NULL;
+}
 
 static void write_header(CvmStats* stats) {
     static const u8 header[] = "event_type,gc_thread,start_ns,duration_ns\n";

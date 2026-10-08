@@ -38,6 +38,7 @@
 #include "cvm/gc.h"
 #include "gc/alloc.h"
 #include "gc/large.h"
+#include "stats.h"
 #include "rt.h"
 
 /*
@@ -117,6 +118,12 @@ typedef struct CvmThreadNode {
     /* What this thread is doing, for diagnosing a hang. See the note above
      * CvmThreadActivity. */
     _Atomic u32 activity;
+
+    /*
+     * This thread's event buffer, or NULL. NULL unless the program asked
+     * for stats: see cvm_stats_open, which explains why it is a pointer.
+     */
+    CvmStats* stats;
 } CvmThreadNode;
 
 /* ------------------------------------------------------------------ */
@@ -141,6 +148,7 @@ typedef enum CvmThreadActivity {
     CVM_ACT_COALESCING,
     CVM_ACT_COLLECTING,
     CVM_ACT_MARKING,
+    CVM_ACT_NULLIFYING,
     CVM_ACT_WAITING_FOR_COLLECTION,
     CVM_ACT_ATTACHING,
     CVM_ACT_DETACHING,

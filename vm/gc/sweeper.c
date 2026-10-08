@@ -526,6 +526,13 @@ void cvm_sweep_begin(CvmHeap* heap) {
 
 void cvm_sweep(CvmHeap* heap, _Atomic u32* cursor_done, u32 max_count,
                CvmThreadNode* node) {
+    /*
+     * Timed before the claim, so a batch that waits for a contended claim
+     * counts as waiting rather than as sweeping. That is the honest split:
+     * a sweep batch that costs 2 microseconds of work and 200 of lock
+     * contention should not be reported as slow sweeping.
+     */
+    u64 sweep_started = rt_time_nanos();
     CvmBlockAllocator* blocks = heap->block_alloc;
     CvmSweepResult result;
     cvm_sweep_result_init(&result);
@@ -689,6 +696,9 @@ void cvm_sweep(CvmHeap* heap, _Atomic u32* cursor_done, u32 max_count,
 
     apply_result(&result, blocks, node);
 
+    cvm_stats_record(cvm_stats_this_thread(), CVM_EVENT_SWEEP_BATCH, sweep_started,
+                     rt_time_nanos());
+
     /* The coalescing pass reads these marks, so publish them first. */
     atomic_thread_fence(memory_order_release);
     atomic_store_explicit(cursor_done, limit_index, memory_order_release);
@@ -766,6 +776,8 @@ u32 cvm_sweeper_min_cursor(CvmHeap* heap) {
 }
 
 void cvm_sweep_lazy_coalesce(CvmHeap* heap) {
+    u64 coalesce_started = rt_time_nanos();
+
     /*
      * One pass at a time. The pass is not idempotent in the direction that
      * matters: it adds runs to the block allocator's free lists before
@@ -867,6 +879,9 @@ void cvm_sweep_lazy_coalesce(CvmHeap* heap) {
     }
 
     atomic_store(&heap->sweep.coalesce_done, limit_index);
+
+    cvm_stats_record(cvm_stats_this_thread(), CVM_EVENT_COALESCE_BATCH,
+                     coalesce_started, rt_time_nanos());
 
     atomic_store(&heap->sweep.coalesce_owner, 0);
     rt_mutex_unlock(&heap->sweep.coalesce_lock);

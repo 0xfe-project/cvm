@@ -78,6 +78,13 @@ typedef struct CvmGcThread {
     _Atomic u32 sweep_cursor_done;
 
     RtThread handle;
+
+    /*
+     * This worker's event buffer, or NULL. Workers are not registered
+     * threads, so they cannot use cvm_stats_this_thread; they carry their
+     * own, which is what gives the CSV its concurrent_* rows.
+     */
+    CvmStats* stats;
 } CvmGcThread;
 
 typedef struct CvmGcPool {

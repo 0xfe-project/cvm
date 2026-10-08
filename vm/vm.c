@@ -25,6 +25,7 @@
 #include "cvm/external.h"
 #include "gc/heap.h"
 #include "gc/pool.h"
+#include "stats.h"
 #include "cvm/roots.h"
 #include "gc/sweeper.h"
 #include "gc/world.h"
@@ -60,6 +61,14 @@ bool cvm_init(CvmOptions const* options) {
 
     cvm_threads_init();
     cvm_safepoint_init();
+
+    /*
+     * Point per-thread event buffers at the program's channel, if it gave
+     * one. Before cvm_world_init, because registration happens after and a
+     * thread that attaches needs somewhere to record from its first
+     * collection.
+     */
+    cvm_stats_set_default_channel(o->stats_channel);
 
     if (!cvm_world_init(o->min_heap_size, o->max_heap_size)) {
         CVM_LOG_ERROR(m) {

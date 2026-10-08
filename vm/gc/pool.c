@@ -64,16 +64,20 @@ u32 cvm_pool_default_count(CvmHeap const* heap) {
 /* one thread's loop                                                   */
 /* ------------------------------------------------------------------ */
 
-static void do_mark(CvmHeap* heap) {
+static void do_mark(CvmHeap* heap, CvmStats* stats) {
     /* Take packets until there are none left, then stop. The collector
      * will wake this thread again if the backlog grows. */
+    u64 start = cvm_stats_now(stats);
     cvm_mark(heap, false);
+    cvm_stats_record(stats, CVM_EVENT_CONCURRENT_MARK, start, cvm_stats_now(stats));
 }
 
-static void do_nullify(CvmHeap* heap) {
+static void do_nullify(CvmHeap* heap, CvmStats* stats) {
     /* Nullifying reads marks and writes to weak slots; it is idempotent,
      * so draining whatever is there is enough. */
+    u64 start = cvm_stats_now(stats);
     (void)cvm_weak_nullify(heap);
+    cvm_stats_record(stats, CVM_EVENT_CONCURRENT_NULLIFY, start, cvm_stats_now(stats));
 }
 
 static void do_sweep(CvmGcThread* thread, CvmHeap* heap) {
@@ -110,16 +114,20 @@ static opaque_mut gc_thread_main(opaque_mut arg) {
         case CVM_GC_IDLE:
             break;
         case CVM_GC_MARK:
-            do_mark(heap);
+            do_mark(heap, thread->stats);
             break;
         case CVM_GC_NULLIFY:
-            do_nullify(heap);
+            do_nullify(heap, thread->stats);
             break;
-        case CVM_GC_SWEEP:
+        case CVM_GC_SWEEP: {
+            u64 start = cvm_stats_now(thread->stats);
             thread->sweep_cursor_done = 0;
             do_sweep(thread, heap);
             thread->sweep_cursor_done = heap->sweep.limit;
+            cvm_stats_record(thread->stats, CVM_EVENT_CONCURRENT_SWEEP, start,
+                             cvm_stats_now(thread->stats));
             break;
+        }
         }
 
         atomic_thread_fence(memory_order_seq_cst);
@@ -169,6 +177,7 @@ bool cvm_pool_init(CvmHeap* heap, u32 count) {
         thread->pool = pool;
         atomic_store(&thread->active, false);
         atomic_store(&thread->sweep_cursor_done, 0);
+        thread->stats = cvm_stats_open();
     }
 
     /*
@@ -222,6 +231,11 @@ void cvm_pool_destroy(CvmHeap* heap) {
 
     for (u32 i = 0; i < pool->count; i++) {
         rt_thread_join(pool->threads[i].handle);
+    }
+
+    for (u32 i = 0; i < pool->count; i++) {
+        cvm_stats_close(pool->threads[i].stats);
+        pool->threads[i].stats = NULL;
     }
 
     heap->pool = NULL;

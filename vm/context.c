@@ -19,6 +19,7 @@
 #include "gc/bytemap.h"
 #include "gc/world.h"
 #include "log.h"
+#include "stats.h"
 #include "safepoint.h"
 #include "rt.h"
 
@@ -111,6 +112,16 @@ bool cvm_thread_attach(void) {
      */
     node->trap = NULL;
     node->safepoint_resume_pc = 0;
+    atomic_store(&node->sweep_cursor_done, 0);
+    atomic_store(&node->sweeping, false);
+    atomic_store(&node->activity, (u32)CVM_ACT_IDLE);
+
+    /*
+     * An event buffer, if the program asked for stats. NULL otherwise, and
+     * every recording call is a null check in that case. See
+     * cvm_stats_open for why this is a pointer rather than embedded.
+     */
+    node->stats = cvm_stats_open();
 
     /* Publish to TLS before the registry, so the thread can use its own
      * context the moment attach returns. */
@@ -207,6 +218,11 @@ void cvm_thread_detach(void) {
     /* Clear TLS before freeing: leaving a dangling context installed
      * would make any later use of the thread look registered. */
     cvm_tls_ctx = NULL;
+
+    /* Flushed rather than dropped: a thread's last events are the ones that
+     * say how it finished. */
+    cvm_stats_close(node->stats);
+    node->stats = NULL;
 
     CVM_LOG_DEBUG(m) {
         fmt_lit(&m.fmt, "thread ");
@@ -337,6 +353,7 @@ static str const activity_names[CVM_ACT_TYPE_COUNT] = {
     [CVM_ACT_COALESCING] = {.ptr = (u8 const*)"coalescing", .len = 10},
     [CVM_ACT_COLLECTING] = {.ptr = (u8 const*)"collecting", .len = 10},
     [CVM_ACT_MARKING] = {.ptr = (u8 const*)"marking", .len = 7},
+    [CVM_ACT_NULLIFYING] = {.ptr = (u8 const*)"nullifying", .len = 10},
     [CVM_ACT_WAITING_FOR_COLLECTION] = {.ptr = (u8 const*)"waiting-for-collection",
                                         .len = 22},
     [CVM_ACT_ATTACHING] = {.ptr = (u8 const*)"attaching", .len = 9},
