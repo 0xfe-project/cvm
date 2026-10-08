@@ -73,6 +73,12 @@ package-lock.json
 yarn.lock
 
 # ---------------------------------------------------------------
+# Benchmark build output: third-party libraries built in place, and
+# the scenario binaries. Results are tracked; build products are not.
+# ---------------------------------------------------------------
+/bench/build/
+
+# ---------------------------------------------------------------
 # Third-party source trees. Kept on disk to read and to build
 # against; never part of our history.
 #
