@@ -465,8 +465,18 @@ CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
      * Zero before publishing. Generated code assumes a fresh object has
      * zeroed fields, which is what lets a type with pointer fields start
      * out valid rather than full of rubbish the marker would follow.
+     *
+     * Unrolled to 8-byte stores: the byte loop costs 20% of churn's time
+     * in callgrind, and rt_memset compiles to a bzero call that is slower
+     * than an inline loop for the small sizes (16–48 bytes) cvm_alloc sees.
      */
-    for (usize i = 0; i < size; i++) {
+    u64* wp = (u64*)p;
+    usize words = size / 8;
+    for (usize i = 0; i < words; i++) {
+        wp[i] = 0;
+    }
+    /* tail bytes if size not 8-aligned (shouldn't happen: CVM_ALLOC_ALIGNMENT=16) */
+    for (usize i = words * 8; i < size; i++) {
         p[i] = 0;
     }
 
