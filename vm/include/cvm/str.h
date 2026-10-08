@@ -167,4 +167,154 @@ bool cvm_string_equal(CvmString const* a, CvmString const* b);
  */
 i32 cvm_string_compare(CvmString const* a, CvmString const* b);
 
+/* ------------------------------------------------------------------ */
+/* views                                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A borrowed view of a string's units: no copy, nothing owned, and nothing to
+ * outlive the string it came from.
+ *
+ * This is a flat string's units, which is every string today. When the rope and
+ * slice forms land, this is where their cost shows up: a rope has no contiguous
+ * units to hand out, so its view has to be built and the caller has to decide
+ * whether to pay for it, while a slice's view is its parent's units at an
+ * offset. The declaration will not change; a note about when it can allocate
+ * will be added when there is something for it to describe.
+ */
+typedef struct CvmStringView {
+    u8 const* units;
+    usize length; /* code units */
+    bool wide;    /* units are 16-bit */
+} CvmStringView;
+
+CVM_INLINE CvmStringView cvm_string_view(CvmString const* s) {
+    CvmStringView v = {
+        .units = s->data, .length = s->length, .wide = cvm_string_is_wide(s)};
+    return v;
+}
+
+/*
+ * The string as a `str`, when its units are bytes.
+ *
+ * False for a 16-bit string, and that is the honest answer rather than a
+ * conversion done on the caller's behalf: a wide string's units are not bytes,
+ * and the two things a caller wants from bytes — raw storage, or UTF-8 — are
+ * answered by different calls below. Turning a wide string into bytes quietly
+ * would make every later operation on the view a lie about its width.
+ */
+bool cvm_string_as_str(CvmString const* s, str* out);
+
+/* ------------------------------------------------------------------ */
+/* conversion                                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * From UTF-8, choosing the representation: 8-bit units when every code point
+ * fits in one, 16-bit otherwise.
+ *
+ * NULL when the text is not well-formed. A lone surrogate is accepted — it is a
+ * code unit, it survives the round trip, and refusing it would mean a string
+ * could not hold what an escape sequence asked for. An overlong form, a
+ * truncated sequence and a value past U+10FFFF are refused.
+ */
+CvmString* cvm_string_from_utf8(str text);
+
+/* Bytes that cvm_string_write_utf8 needs. */
+usize cvm_string_utf8_length(CvmString const* s);
+
+/* Returned when the buffer is too small. Not zero: an empty string writes zero
+ * bytes, and that is a success. */
+#define CVM_STRING_NO_ROOM ((usize)~0u)
+
+/*
+ * Write the string as UTF-8 and return the bytes written, or CVM_STRING_NO_ROOM
+ * if `cap` cannot hold them.
+ *
+ * A code unit that is a lone surrogate comes out as WTF-8, which is what
+ * cvm_utf8_encode does with it: three bytes that decode back to the same unit,
+ * so the conversion loses nothing in either direction.
+ */
+usize cvm_string_write_utf8(CvmString const* s, u8* out, usize cap);
+
+/*
+ * The same, with a NUL after it, for the libc calls that want one. The return is
+ * the bytes written *not* counting the NUL, so the buffer needs
+ * cvm_string_utf8_length(s) + 1.
+ */
+usize cvm_string_write_utf8_nul(CvmString const* s, u8* out, usize cap);
+
+/*
+ * Code units in a UTF-16 rendering: the string's own length in either
+ * representation, since 8-bit units are all below 0x100 and a code point above
+ * U+FFFF is two units either way.
+ */
+usize cvm_string_utf16_length(CvmString const* s);
+
+/* Write UTF-16 code units. Returns the units written, or CVM_STRING_NO_ROOM. */
+usize cvm_string_write_utf16(CvmString const* s, u16* out, usize cap);
+
+/* ------------------------------------------------------------------ */
+/* code points, as opposed to units                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The code point beginning at code unit `index`, with `*next` set to where the
+ * following one begins.
+ *
+ * A surrogate pair decodes into the one code point it stands for. A *lone*
+ * surrogate is returned as its own value and costs one unit: it is a code unit
+ * and not a code point, and doing anything else with it — dropping it, or
+ * substituting a replacement character — would lose text the string holds.
+ */
+rune cvm_string_code_point_at(CvmString const* s, usize index, usize* next);
+
+/* How many code points, which is not the length: a surrogate pair is two units
+ * and one code point. */
+usize cvm_string_code_point_count(CvmString const* s);
+
+/* ------------------------------------------------------------------ */
+/* search                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The first occurrence of `needle` at or after code unit `from`, or -1.
+ *
+ * An empty needle is found at `from` (or at the length, if `from` is past it),
+ * which is what every string search does and what makes `includes` true for it.
+ *
+ * Naive search, deliberately: the strings a runtime searches are short, the step
+ * is a unit comparison, and a two-way or Boyer-Moore implementation earns its
+ * proof once a profile says so.
+ */
+isize cvm_string_index_of(CvmString const* haystack, CvmString const* needle,
+                          usize from);
+
+/* The last occurrence, or -1. */
+isize cvm_string_last_index_of(CvmString const* haystack, CvmString const* needle);
+
+bool cvm_string_includes(CvmString const* haystack, CvmString const* needle);
+
+/* ------------------------------------------------------------------ */
+/* pieces                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The code units in [from, to), as a string of its own.
+ *
+ * A copy, for now. The slice form that shares the parent's units is not in yet —
+ * the rope/slice representation is its own piece of work — and this is the
+ * signature it will keep, so a caller written against this does not change when
+ * it lands.
+ *
+ * Units rather than text: a substring of a wide string stays wide, and splitting
+ * a surrogate pair is the caller's business, as it is in every other
+ * code-unit-indexed operation here.
+ */
+CvmString* cvm_string_substring(CvmString const* s, usize from, usize to);
+
+/* The two strings' units, one after the other. A copy, for the same reason: a
+ * rope that keeps the pieces is its own piece of work. */
+CvmString* cvm_string_concat(CvmString const* a, CvmString const* b);
+
 #endif /* CVM_STR_H */
