@@ -326,34 +326,71 @@ const labelled = rows.map((r) => ({
     backendLabel: `${r.backend} × ${r.mode}`,
 }));
 
-const figures = {
-    "wall.svg": range_figure({
-        title: "Wall time, with the run-to-run range",
+/*
+ * One figure per (metric, mode).
+ *
+ * The mode is the experimental condition, not a grouping for convenience:
+ * alloc-only never collects and measures the allocator, fixed forces the same
+ * collection count on every backend and measures the mechanism, auto lets
+ * each collector choose and measures the policy. A figure holding rows from
+ * two of them invites a comparison between them and there is none to make —
+ * the fastest alloc-only row and the fastest fixed row were produced under
+ * different rules.
+ *
+ * So the mode is in the file name and the title, and a figure exists only
+ * where the mode has something to say: alloc-only performs no collection, so
+ * it has no pause to report and gets no pause figure.
+ */
+
+const MODE_NOTE = {
+    alloc: "alloc-only: no collection happens, so this is the allocator",
+    fixed: "fixed cadence: every backend forced to collect at the same allocation count",
+    auto: "auto: each collector's own policy",
+};
+
+function wallFigure(mode, rows) {
+    return range_figure({
+        title: `Wall time, ${mode} mode`,
         subtitle:
-            "median of each row's repetitions, dot; min to max, line. Log axis — these span four and a half orders of magnitude."
-        rows: labelled,
+            `${MODE_NOTE[mode]}. Median of each row's repetitions as a dot, min to ` +
+            `max as the line through it, so the line's length is that row's spread.`,
+        rows,
         pick: (r, which) =>
             which === "lo" ? r.wallMin : which === "hi" ? r.wallMax : r.wallMed,
         unit: "ms",
         scale: "log",
         zeroNote: "measured, but no time recorded",
-    }),
-    "pause.svg": range_figure({
-        title: "Longest stop-the-world pause",
+    });
+}
+
+function pauseFigure(mode, rows) {
+    return range_figure({
+        title: `Longest stop-the-world pause, ${mode} mode`,
         subtitle:
-            "each collector's own longest pause, median across repetitions. The axis the four designs differ on most.",
-        rows: labelled,
+            `${MODE_NOTE[mode]}. Each collector's own longest pause, median across ` +
+            `repetitions — the axis the four designs differ on most, on a log scale.`,
+        rows,
         pick: (r, which) =>
             which === "lo" ? r.pauseMed : which === "hi" ? r.pauseMax : r.pauseMed,
         unit: "ms",
         scale: "log",
         zeroNote: "no collection happened",
-    }),
-    "spread.svg": spread_figure(labelled),
-};
+    });
+}
 
-for (const [name, svg] of Object.entries(figures)) {
+const figures = [
+    { name: "wall-alloc.svg", svg: wallFigure("alloc", labelled.filter((r) => r.mode === "alloc")) },
+    { name: "wall-fixed.svg", svg: wallFigure("fixed", labelled.filter((r) => r.mode === "fixed")) },
+    { name: "wall-auto.svg", svg: wallFigure("auto", labelled.filter((r) => r.mode === "auto")) },
+    { name: "pause-fixed.svg", svg: pauseFigure("fixed", labelled.filter((r) => r.mode === "fixed")) },
+    { name: "pause-auto.svg", svg: pauseFigure("auto", labelled.filter((r) => r.mode === "auto")) },
+    { name: "spread-alloc.svg", svg: spread_figure(labelled.filter((r) => r.mode === "alloc"), "alloc") },
+    { name: "spread-fixed.svg", svg: spread_figure(labelled.filter((r) => r.mode === "fixed"), "fixed") },
+    { name: "spread-auto.svg", svg: spread_figure(labelled.filter((r) => r.mode === "auto"), "auto") },
+];
+for (const { name, svg } of figures) {
     fs.writeFileSync(path.join(BENCH, name), svg);
     console.log(`[bench] wrote bench/${name}`);
 }
+console.log(`[bench] ${figures.length} figure(s), one experimental condition each`);
 console.log(`[bench] from ${path.relative(ROOT, csvPath)}`);
