@@ -77,3 +77,9 @@ TAGS
 pnpm-lock.yaml
 package-lock.json
 yarn.lock
+
+# ---------------------------------------------------------------
+# Vendored third-party sources. Kept on disk to read and to build
+# against; never part of our history.
+# ---------------------------------------------------------------
+/bench/bdwgc/
