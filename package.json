@@ -1,24 +1,26 @@
 {
-  "name": "cvm",
-  "version": "0.0.0",
-  "private": true,
-  "description": "cvm \u2014 a precise-GC runtime whose compilation target is C",
-  "type": "module",
-  "engines": {
-    "node": ">=18"
-  },
-  "scripts": {
-    "build": "node scripts/build.mjs",
-    "clean": "node scripts/build.mjs --clean",
-    "test": "node scripts/build.mjs --test && node scripts/run-tests.mjs",
-    "test:asan": "node scripts/build.mjs --test --asan && node scripts/run-tests.mjs",
-    "test:tsan": "node scripts/build.mjs --test --tsan && node scripts/run-tests.mjs",
-    "test:release": "node scripts/build.mjs --test --release && node scripts/run-tests.mjs",
-    "fmt": "node scripts/fmt.mjs",
-    "fmt:check": "node scripts/fmt.mjs --check",
-    "ci": "node scripts/ci.mjs",
-    "bench": "node scripts/bench.mjs",
-    "bench:build": "node scripts/bench.mjs --build-only",
-    "bench:quick": "node scripts/bench.mjs --quick"
-  }
+    "name": "cvm",
+    "version": "0.0.0",
+    "private": true,
+    "description": "cvm \u2014 a precise-GC runtime whose compilation target is C",
+    "type": "module",
+    "engines": {
+        "node": ">=18"
+    },
+    "scripts": {
+        "build": "node scripts/build.mjs",
+        "clean": "node scripts/build.mjs --clean",
+        "test": "node scripts/build.mjs --test && node scripts/run-tests.mjs",
+        "test:asan": "node scripts/build.mjs --test --asan && node scripts/run-tests.mjs",
+        "test:tsan": "node scripts/build.mjs --test --tsan && node scripts/run-tests.mjs",
+        "test:release": "node scripts/build.mjs --test --release && node scripts/run-tests.mjs",
+        "fmt": "node scripts/fmt.mjs",
+        "fmt:check": "node scripts/fmt.mjs --check",
+        "ci": "node scripts/ci.mjs",
+        "bench": "node scripts/bench.mjs",
+        "bench:build": "node scripts/bench.mjs --build-only",
+        "bench:quick": "node scripts/bench.mjs --quick",
+        "bench:svg": "node scripts/bench-svg.mjs",
+        "bench:all": "node scripts/bench.mjs && node scripts/bench-svg.mjs"
+    }
 }
