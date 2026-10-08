@@ -89,7 +89,20 @@ typedef struct CvmHeap {
     /* --- the block-aligned heap window --- */
     CvmRegion blocks;
     u8* heap_start;
-    u8* heap_end; /* one past the last byte in use */
+    /*
+     * One past the last byte in use.
+     *
+     * Atomic because the two accessors disagree about locking. The grow path
+     * writes it under grow_lock, and cvm_heap_contains reads it on the
+     * allocation path with no lock — it is a debug assertion, and taking a
+     * lock there would put the collector's bookkeeping on the fast path it is
+     * supposed to stay off. The field only ever grows, so a reader that sees
+     * a slightly old value just answers "not in the heap" for a block that is
+     * not yet published, which is the safe direction. Making it atomic is
+     * what tells the race checker the arrangement is intentional rather than
+     * an accident.
+     */
+    _Atomic(u8*) heap_end;
     usize heap_size;
 
     /* --- metadata, sized for the maximum --- */
@@ -321,7 +334,8 @@ CVM_INLINE LineMeta* cvm_heap_line_meta(CvmHeap const* heap, u32 block) {
 
 /* Is this address inside the heap's usable window? */
 CVM_INLINE bool cvm_heap_contains(CvmHeap const* heap, u8 const* p) {
-    return p >= heap->heap_start && p < heap->heap_end;
+    u8* end = atomic_load_explicit(&heap->heap_end, memory_order_acquire);
+    return p >= heap->heap_start && p < end;
 }
 
 #endif /* CVM_GC_HEAP_H */

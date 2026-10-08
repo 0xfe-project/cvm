@@ -152,7 +152,7 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     heap->line_meta_region = (CvmRegion){0};
     heap->bytemap_region = (CvmRegion){0};
     heap->heap_start = NULL;
-    heap->heap_end = NULL;
+    atomic_store(&heap->heap_end, NULL);
     heap->heap_size = 0;
     heap->block_meta_start = NULL;
     heap->block_meta_end = NULL;
@@ -234,7 +234,7 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
      */
     heap->block_count = 0;
     heap->heap_start = heap->blocks.start;
-    heap->heap_end = heap->heap_start;
+    atomic_store(&heap->heap_end, heap->heap_start);
     heap->block_meta_end = heap->block_meta_start;
     heap->line_meta_end = heap->line_meta_start;
     heap->heap_size = 0;
@@ -304,7 +304,7 @@ void cvm_heap_destroy(CvmHeap* heap) {
     cvm_region_release(&heap->bytemap_region);
 
     heap->heap_start = NULL;
-    heap->heap_end = NULL;
+    atomic_store(&heap->heap_end, NULL);
     heap->block_meta_start = NULL;
     heap->block_meta_end = NULL;
     heap->line_meta_start = NULL;
@@ -361,7 +361,9 @@ bool cvm_heap_extend(CvmHeap* heap, u32 blocks, u32* out_first_block) {
                    "free, so CVM_OM_FREE must be zero");
 
     heap->block_count += blocks;
-    heap->heap_end = heap->heap_start + (usize)heap->block_count * CVM_BLOCK_SIZE;
+    atomic_store_explicit(&heap->heap_end,
+                          heap->heap_start + (usize)heap->block_count * CVM_BLOCK_SIZE,
+                          memory_order_release);
     heap->block_meta_end = heap->block_meta_start + heap->block_count;
     heap->line_meta_end =
         heap->line_meta_start + (usize)heap->block_count * CVM_LINE_COUNT;
