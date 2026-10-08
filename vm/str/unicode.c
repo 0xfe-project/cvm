@@ -620,6 +620,163 @@ static u8* unibuf_release(UniBuf* buf) {
 }
 
 /* ------------------------------------------------------------------ */
+/* character ranges                                                    */
+/* ------------------------------------------------------------------ */
+
+void cvm_cr_init(CvmCharRange* cr, CvmUnicodeAlloc alloc) {
+    cr->len = 0;
+    cr->size = 0;
+    cr->points = NULL;
+    cr->alloc = alloc;
+}
+
+void cvm_cr_free(CvmCharRange* cr) {
+    if (cr->points != NULL) {
+        cr->alloc.free(cr->alloc.ctx, cr->points);
+    }
+    cr->points = NULL;
+    cr->len = 0;
+    cr->size = 0;
+}
+
+i32 cvm_cr_realloc(CvmCharRange* cr, i32 size) {
+    /*
+     * Grow by allocating and copying: the allocator has no realloc, and the old
+     * length is `cr->size`, so this is the whole of what a realloc would do.
+     */
+    u32* fresh = cr->alloc.alloc(cr->alloc.ctx, (usize)size * sizeof(u32));
+    if (fresh == NULL) {
+        return -1;
+    }
+    for (i32 i = 0; i < cr->len; i++) {
+        fresh[i] = cr->points[i];
+    }
+    if (cr->points != NULL) {
+        cr->alloc.free(cr->alloc.ctx, cr->points);
+    }
+    cr->points = fresh;
+    cr->size = size;
+    return 0;
+}
+
+i32 cvm_cr_copy(CvmCharRange* cr, const CvmCharRange* cr1) {
+    if (cvm_cr_realloc(cr, cr1->len))
+        return -1;
+    memcpy(cr->points, cr1->points, sizeof(cr->points[0]) * cr1->len);
+    cr->len = cr1->len;
+    return 0;
+}
+
+/* merge consecutive intervals and remove empty intervals */
+static void cr_compress(CvmCharRange* cr) {
+    i32 i, j, k, len;
+    u32* pt;
+
+    pt = cr->points;
+    len = cr->len;
+    i = 0;
+    j = 0;
+    k = 0;
+    while ((i + 1) < len) {
+        if (pt[i] == pt[i + 1]) {
+            /* empty interval */
+            i += 2;
+        } else {
+            j = i;
+            while ((j + 3) < len && pt[j + 1] == pt[j + 2])
+                j += 2;
+            /* just copy */
+            pt[k] = pt[i];
+            pt[k + 1] = pt[j + 1];
+            k += 2;
+            i = j + 2;
+        }
+    }
+    cr->len = k;
+}
+
+/* union or intersection */
+i32 cvm_cr_op(CvmCharRange* cr, const u32* a_pt, i32 a_len, const u32* b_pt, i32 b_len,
+              i32 op) {
+    i32 a_idx, b_idx, is_in;
+    u32 v;
+
+    a_idx = 0;
+    b_idx = 0;
+    for (;;) {
+        /* get one more point from a or b in increasing order */
+        if (a_idx < a_len && b_idx < b_len) {
+            if (a_pt[a_idx] < b_pt[b_idx]) {
+                goto a_add;
+            } else if (a_pt[a_idx] == b_pt[b_idx]) {
+                v = a_pt[a_idx];
+                a_idx++;
+                b_idx++;
+            } else {
+                goto b_add;
+            }
+        } else if (a_idx < a_len) {
+a_add:
+            v = a_pt[a_idx++];
+        } else if (b_idx < b_len) {
+b_add:
+            v = b_pt[b_idx++];
+        } else {
+            break;
+        }
+        /* add the point if the in/out status changes */
+        switch (op) {
+        case CVM_CR_OP_UNION:
+            is_in = (a_idx & 1) | (b_idx & 1);
+            break;
+        case CVM_CR_OP_INTER:
+            is_in = (a_idx & 1) & (b_idx & 1);
+            break;
+        case CVM_CR_OP_XOR:
+            is_in = (a_idx & 1) ^ (b_idx & 1);
+            break;
+        case CVM_CR_OP_SUB:
+            is_in = (a_idx & 1) & ((b_idx & 1) ^ 1);
+            break;
+        default:
+            /* Not reachable: the ported code's own invariant, and a runtime
+             * that stops is better than one that writes past the end. */
+            rt_abort();
+        }
+        if (is_in != (cr->len & 1)) {
+            if (cvm_cr_add_point(cr, v))
+                return -1;
+        }
+    }
+    cr_compress(cr);
+    return 0;
+}
+
+i32 cvm_cr_op1(CvmCharRange* cr, const u32* b_pt, i32 b_len, i32 op) {
+    CvmCharRange a = *cr;
+    i32 ret;
+    cr->len = 0;
+    cr->size = 0;
+    cr->points = NULL;
+    ret = cvm_cr_op(cr, a.points, a.len, b_pt, b_len, op);
+    cvm_cr_free(&a);
+    return ret;
+}
+
+i32 cvm_cr_invert(CvmCharRange* cr) {
+    i32 len;
+    len = cr->len;
+    if (cvm_cr_realloc(cr, len + 2))
+        return -1;
+    memmove(cr->points + 1, cr->points, len * sizeof(cr->points[0]));
+    cr->points[0] = 0;
+    cr->points[len + 1] = UINT32_MAX;
+    cr->len = len + 2;
+    cr_compress(cr);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* normalization                                                       */
 /* ------------------------------------------------------------------ */
 

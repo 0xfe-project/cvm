@@ -380,6 +380,135 @@ TEST normalizing_a_string(void) {
     PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* character ranges                                                    */
+/* ------------------------------------------------------------------ */
+
+/* Whether a range holds exactly these intervals, in this order. */
+static bool range_is(CvmCharRange* cr, rune const* want, i32 want_len) {
+    if (cr->len != want_len) {
+        return false;
+    }
+    for (i32 i = 0; i < want_len; i++) {
+        if (cr->points[i] != want[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+TEST ranges_hold_half_open_intervals(void) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+
+    /* empty to start with */
+    ASSERT_EQ_FMT((i32)0, cr.len, "%d");
+
+    ASSERT_EQ_FMT(0, cvm_cr_add_interval(&cr, 0x41u, 0x5Bu), "%d"); /* A-Z */
+    static rune const az[] = {0x41u, 0x5Bu};
+    ASSERT(range_is(&cr, az, 2));
+
+    /* a second interval is kept as itself while it does not touch the first */
+    ASSERT_EQ_FMT(0, cvm_cr_add_interval(&cr, 0x61u, 0x7Bu), "%d"); /* a-z */
+    static rune const az_az[] = {0x41u, 0x5Bu, 0x61u, 0x7Bu};
+    ASSERT(range_is(&cr, az_az, 4));
+
+    cvm_cr_free(&cr);
+    /* and freeing twice is not a double free */
+    cvm_cr_free(&cr);
+    PASS();
+}
+
+TEST ranges_combine_with_the_four_set_operations(void) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+
+    /* [10,20) and [15,30) */
+    static rune const left[] = {10u, 20u};
+    static rune const right[] = {15u, 30u};
+
+    CvmCharRange unioned;
+    cvm_cr_init(&unioned, alloc);
+    ASSERT_EQ_FMT(0, cvm_cr_op(&unioned, left, 2, right, 2, CVM_CR_OP_UNION), "%d");
+    static rune const union_want[] = {10u, 30u};
+    ASSERT(range_is(&unioned, union_want, 2));
+    cvm_cr_free(&unioned);
+
+    CvmCharRange intersected;
+    cvm_cr_init(&intersected, alloc);
+    ASSERT_EQ_FMT(0, cvm_cr_op(&intersected, left, 2, right, 2, CVM_CR_OP_INTER), "%d");
+    static rune const inter_want[] = {15u, 20u};
+    ASSERT(range_is(&intersected, inter_want, 2));
+    cvm_cr_free(&intersected);
+
+    CvmCharRange xored;
+    cvm_cr_init(&xored, alloc);
+    ASSERT_EQ_FMT(0, cvm_cr_op(&xored, left, 2, right, 2, CVM_CR_OP_XOR), "%d");
+    static rune const xor_want[] = {10u, 15u, 20u, 30u};
+    ASSERT(range_is(&xored, xor_want, 4));
+    cvm_cr_free(&xored);
+
+    CvmCharRange subtracted;
+    cvm_cr_init(&subtracted, alloc);
+    ASSERT_EQ_FMT(0, cvm_cr_op(&subtracted, left, 2, right, 2, CVM_CR_OP_SUB), "%d");
+    static rune const sub_want[] = {10u, 15u};
+    ASSERT(range_is(&subtracted, sub_want, 2));
+    cvm_cr_free(&subtracted);
+    PASS();
+}
+
+TEST inverting_a_range_gives_the_rest_of_the_space(void) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+    (void)cvm_cr_add_interval(&cr, 0x41u, 0x5Bu); /* A-Z */
+    ASSERT_EQ_FMT(0, cvm_cr_invert(&cr), "%d");
+
+    /* everything below A and everything from [ onward, which is two intervals */
+    /*
+     * The complement runs to the top of the u32 range rather than to U+10FFFF,
+     * which is the ported code's convention: inverting is a property of the
+     * interval arithmetic, and a caller that cares about code points clamps.
+     */
+    static rune const want[] = {0u, 0x41u, 0x5Bu, 0xFFFFFFFFu};
+    ASSERT(range_is(&cr, want, 4));
+
+    cvm_cr_free(&cr);
+
+    /* the complement of nothing is the whole space, as one interval */
+    CvmCharRange all;
+    cvm_cr_init(&all, alloc);
+    ASSERT_EQ_FMT(0, cvm_cr_invert(&all), "%d");
+    static rune const everything[] = {0u, 0xFFFFFFFFu};
+    ASSERT(range_is(&all, everything, 2));
+    cvm_cr_free(&all);
+    PASS();
+}
+
+TEST a_union_that_bridges_two_intervals_merges_them(void) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+    (void)cvm_cr_add_interval(&cr, 10u, 20u);
+    (void)cvm_cr_add_interval(&cr, 30u, 40u);
+
+    /* [20,30) touches both, so the result is one interval and not three */
+    ASSERT_EQ_FMT(0, cvm_cr_union_interval(&cr, 20u, 29u), "%d");
+    static rune const want[] = {10u, 40u};
+    ASSERT(range_is(&cr, want, 2));
+
+    /* and a copy is independent of its source */
+    CvmCharRange copy;
+    cvm_cr_init(&copy, alloc);
+    ASSERT_EQ_FMT(0, cvm_cr_copy(&copy, &cr), "%d");
+    ASSERT(range_is(&copy, want, 2));
+    cvm_cr_free(&copy);
+    cvm_cr_free(&cr);
+    PASS();
+}
+
 SUITE(unicode_suite) {
     RUN_TEST(ascii_case_mapping);
     RUN_TEST(case_mapping_beyond_ascii);
@@ -392,6 +521,10 @@ SUITE(unicode_suite) {
     RUN_TEST(compatibility_forms_are_the_kind_with_no_composition);
     RUN_TEST(hangul_composes_and_decomposes);
     RUN_TEST(normalizing_a_string);
+    RUN_TEST(ranges_hold_half_open_intervals);
+    RUN_TEST(ranges_combine_with_the_four_set_operations);
+    RUN_TEST(inverting_a_range_gives_the_rest_of_the_space);
+    RUN_TEST(a_union_that_bridges_two_intervals_merges_them);
 }
 
 GREATEST_MAIN_DEFS();

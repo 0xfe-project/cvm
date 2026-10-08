@@ -147,6 +147,94 @@ CVM_INLINE bool cvm_unicode_is_ident_continue(rune c) {
     return cvm_unicode_is_id_continue(c) || c == 0x200Cu || c == 0x200Du;
 }
 
+/*
+ * Where scratch memory comes from.
+ *
+ * The ported code wants to grow a buffer and hand it to the caller, which in the
+ * original is a libc realloc callback. Our platform layer offers alloc and free
+ * and no realloc, so the contract is those two and whatever grows keeps track of
+ * its own size — see the note in vm/str/unicode.c. Both the normalizer and the
+ * character ranges take one of these, which is why it is here rather than next to
+ * either of them.
+ */
+typedef struct CvmUnicodeAlloc {
+    opaque_mut ctx;
+    opaque_mut (*alloc)(opaque_mut ctx, usize bytes);
+    void (*free)(opaque_mut ctx, opaque_mut p);
+} CvmUnicodeAlloc;
+
+/* ------------------------------------------------------------------ */
+/* character ranges                                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A set of code points, as a sorted list of half-open intervals: `points[2i]` is
+ * the first code point of interval i and `points[2i+1]` is one past its last. An
+ * empty interval has the two equal, so a run is always [first, last).
+ *
+ * This is what `\p{...}` produces and what a matcher tests a character against,
+ * and the set operations are what make it possible to answer a property with
+ * something a matcher can use directly. Sorted and non-overlapping is the
+ * invariant every operation here maintains.
+ */
+typedef struct CvmCharRange {
+    i32 len; /* code points, always even */
+    i32 size;
+    rune* points;
+    CvmUnicodeAlloc alloc;
+} CvmCharRange;
+
+typedef enum CvmCharRangeOp {
+    CVM_CR_OP_UNION,
+    CVM_CR_OP_INTER,
+    CVM_CR_OP_XOR,
+    CVM_CR_OP_SUB,
+} CvmCharRangeOp;
+
+void cvm_cr_init(CvmCharRange* cr, CvmUnicodeAlloc alloc);
+void cvm_cr_free(CvmCharRange* cr);
+i32 cvm_cr_realloc(CvmCharRange* cr, i32 size);
+i32 cvm_cr_copy(CvmCharRange* cr, CvmCharRange const* from);
+
+CVM_INLINE i32 cvm_cr_add_point(CvmCharRange* cr, rune v) {
+    if (cr->len >= cr->size && cvm_cr_realloc(cr, cr->len + 1) < 0) {
+        return -1;
+    }
+    cr->points[cr->len++] = v;
+    return 0;
+}
+
+CVM_INLINE i32 cvm_cr_add_interval(CvmCharRange* cr, rune first, rune last) {
+    if (cr->len + 2 > cr->size && cvm_cr_realloc(cr, cr->len + 2) < 0) {
+        return -1;
+    }
+    cr->points[cr->len++] = first;
+    cr->points[cr->len++] = last;
+    return 0;
+}
+
+/* Combine the range with one interval, without needing a second range. */
+i32 cvm_cr_op1(CvmCharRange* cr, rune const* other, i32 other_len, i32 op);
+
+CVM_INLINE i32 cvm_cr_union_interval(CvmCharRange* cr, rune first, rune last) {
+    rune other[2];
+    other[0] = first;
+    other[1] = last + 1u;
+    return cvm_cr_op1(cr, other, 2, CVM_CR_OP_UNION);
+}
+
+/* `cr` becomes the result of `cr op (a, b)`. */
+i32 cvm_cr_op(CvmCharRange* cr, rune const* a, i32 a_len, rune const* b, i32 b_len,
+              i32 op);
+
+/*
+ * Complement, over the whole u32 range rather than over the code points: the
+ * inversion is interval arithmetic, and the last interval ends at 0xFFFFFFFF.
+ * A caller that cares about code points clamps — the ported code's convention,
+ * kept rather than quietly changed.
+ */
+i32 cvm_cr_invert(CvmCharRange* cr);
+
 /* ------------------------------------------------------------------ */
 /* normalization                                                       */
 /* ------------------------------------------------------------------ */
@@ -160,20 +248,6 @@ typedef enum CvmUnicodeNormalization {
     CVM_UNICODE_NFKC = 2,
     CVM_UNICODE_NFKD = 3,
 } CvmUnicodeNormalization;
-
-/*
- * Where normalization's scratch comes from.
- *
- * The ported code wants to grow a buffer and hand it to the caller, which in the
- * original is a libc realloc callback. Our platform layer offers alloc and free
- * and no realloc, so the contract is those two and the buffer keeps track of its
- * own size — see the note in vm/str/unicode.c.
- */
-typedef struct CvmUnicodeAlloc {
-    opaque_mut ctx;
-    opaque_mut (*alloc)(opaque_mut ctx, usize bytes);
-    void (*free)(opaque_mut ctx, opaque_mut p);
-} CvmUnicodeAlloc;
 
 /* The runtime's own: rt_mem_alloc and rt_mem_free. */
 CvmUnicodeAlloc cvm_unicode_system_alloc(void);
