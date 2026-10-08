@@ -32,6 +32,7 @@
 #include "collector.h"
 
 static tgc_t gc;
+static uint64_t our_failures = 0;
 
 static bool tgc_backend_init(size_t heap_hint, bool alloc_only) {
     (void)alloc_only;
@@ -43,6 +44,7 @@ static bool tgc_backend_init(size_t heap_hint, bool alloc_only) {
      * happened.
      */
     (void)heap_hint;
+    our_failures = 0;
     memset(&gc, 0, sizeof(gc));
 
     /*
@@ -64,14 +66,22 @@ static void tgc_backend_shutdown(void) {
 }
 
 static void *tgc_backend_alloc(size_t size) {
-    return tgc_alloc(&gc, size);
+    void *p = tgc_alloc(&gc, size);
+    if (p == NULL) {
+        our_failures++;
+    }
+    return p;
 }
 
 static void *tgc_backend_alloc_typed(BenchShape const *shape) {
     /* Conservative: the shape's pointer offsets are not used, because tgc
      * does not have a way to use them. */
     (void)shape;
-    return tgc_alloc(&gc, shape->size);
+    void *p = tgc_alloc(&gc, shape->size);
+    if (p == NULL) {
+        our_failures++;
+    }
+    return p;
 }
 
 static bool tgc_backend_collect(void) {
@@ -87,6 +97,7 @@ static void tgc_backend_stats(BenchStats *out) {
     out->pause_total_ns = 0; /* not tracked: the maximum is what matters */
     out->live_objects = gc.nitems;
     out->heap_bytes = gc.nslots * sizeof(tgc_ptr_t);
+    out->failed_allocations = our_failures;
 }
 
 BenchCollector const bench_collector = {

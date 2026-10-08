@@ -50,8 +50,23 @@ incremental collection and make the two numbers incomparable.
 All three. alloc-only disables the collector; fixed and auto use bdwgc's own
 policy with the scenario's heap hint as a maximum.
 
-## Known gap
+## The alloc-only row it used to fail
 
-`mixed-sizes × alloc` fails intermittently **under the runner** and passes
-standalone. It is the one row this backend does not always produce, and it is
-listed rather than hidden.
+`mixed-sizes × alloc` used to fail. Two causes, both worth knowing:
+
+**The harness re-initialised between measured repetitions but not after the
+warm-up**, so the warm-up's allocation was still held when the first
+repetition ran, on the same instance — two repetitions against a heap sized
+for one. Fixed in `harness/run.c`.
+
+**And it needed more room than the scenario allowed.** One repetition
+allocates about 780 MiB of objects; bdwgc, conservative and with per-object
+headers and size classes, needs about 2.6× the object bytes and hit its 2047
+MiB ceiling. The scenario's `heap_hint_bytes` is 6 GiB now, sized for the
+most demanding backend rather than for the objects — a hint only some
+collectors fit in is a comparison that silently drops the others.
+
+While it was happening, the row looked clean: the scenario allocates without
+checking for NULL, so 400,000 failed allocations still produced a line with
+the right allocation count. `BenchStats.failed_allocations` exists because of
+it, and the harness refuses a row with any failure in it.

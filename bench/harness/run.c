@@ -237,6 +237,26 @@ int main(int argc, char **argv) {
         /* BENCH.md §2.5: one clean run, discarded, so the first measurement
          * is not also the run that faults in the heap. */
         sc->run(0);
+
+        /*
+         * And then start over, in the mode that needs it.
+         *
+         * alloc-only never returns memory to the heap, so the warm-up's
+         * allocation would still be held when the first measured
+         * repetition ran, on the same instance — two repetitions' worth of
+         * allocations against a heap sized for one. bdwgc hit exactly that:
+         * "Out of Memory! Heap size: 2047 MiB" on mixed-sizes, because the
+         * re-initialisation happened between measured repetitions and had
+         * no counterpart after the warm-up.
+         */
+        if (alloc_only) {
+            bench_collector.shutdown();
+            if (!bench_collector.init(heap_hint, alloc_only)) {
+                fprintf(stderr, "%s: re-init after warm-up failed\n",
+                        bench_collector.name);
+                return 1;
+            }
+        }
     }
 
     uint64_t wall[BENCH_MAX_REPS], allocs[BENCH_MAX_REPS];
@@ -293,6 +313,24 @@ int main(int argc, char **argv) {
 
     BenchStats final;
     bench_collector.stats(&final);
+
+    if (final.failed_allocations > 0) {
+        /*
+         * Reported, not measured. A run that kept allocating after the heap
+         * ran out has the right allocation count and wrong everything else,
+         * and the row it produces is indistinguishable from a result —
+         * bdwgc in alloc-only mode on mixed-sizes failed 669,601 allocations
+         * and printed a clean-looking line. Saying so is the only honest
+         * option: raising the heap until it fits would hide how much this
+         * backend needs to run that workload without collecting.
+         */
+        printf("%-14s %-8s %-8s  invalid: %llu allocation(s) failed — the heap "
+               "could not hold the run\n",
+               sc->name, bench_collector.name, mode_name(mode),
+               (unsigned long long)final.failed_allocations);
+        bench_collector.shutdown();
+        return 0;
+    }
 
     bench_print_row(sc->name, bench_collector.name, mode_name(mode), reps, wall,
                     allocs, colls, pauses, final.live_objects, final.heap_bytes);

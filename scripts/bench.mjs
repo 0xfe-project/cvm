@@ -60,6 +60,30 @@ const REPETITIONS = opts.quick ? 3 : 7;
 const MODE_BITS = { alloc: 1, fixed: 2, auto: 4 };
 
 /**
+ * Rows a backend cannot produce, and why.
+ *
+ * A bare "failed" leaves a reader unable to tell a limitation of the
+ * collector from a broken harness, and the difference matters: one of these
+ * is a fact about a 459-line toy and the other would be a bug in this
+ * directory.
+ *
+ *   tgc × read-heavy — tgc_mark_ptr recurses once per pointer field, and
+ *   read-heavy's graph is a chain 200,000 nodes long, so marking nests
+ *   200,000 frames deep. At roughly 56 bytes a frame that is about 11 MiB
+ *   against an 8 MiB stack. It is a stack overflow in the collector's own
+ *   marker, arithmetic rather than a race, and "fixing" it would mean
+ *   rewriting the collector this row exists to compare against.
+ */
+const KNOWN_GAPS = [
+    { scenario: "read-heavy", backend: "tgc",
+      why: "its recursive marker overflows the stack on a 200k-node chain" },
+];
+
+function knownGap(scenario, backend) {
+    return KNOWN_GAPS.find((g) => g.scenario === scenario && g.backend === backend);
+}
+
+/**
  * Which modes to run for a scenario.
  *
  * Read from the binary rather than duplicated here: the scenario declares
@@ -171,6 +195,7 @@ function main() {
     console.log("");
     let rows = 0;
     let unavailable = 0;
+    let gaps = 0;
 
     for (const binary of binaries) {
         binary.scenarioName = scenarioName(binary.path);
@@ -185,9 +210,18 @@ function main() {
 
             if (r.stdout) process.stdout.write(r.stdout);
             if (r.status !== 0) {
-                process.stderr.write(
-                    `       ${binary.scenario} × ${binary.backend} × ${mode} failed\n`,
-                );
+                const gap = knownGap(binary.scenarioName, binary.backend);
+                if (gap) {
+                    process.stderr.write(
+                        `       ${binary.scenario} × ${binary.backend} × ${mode}` +
+                            `: known gap — ${gap.why}\n`,
+                    );
+                    gaps++;
+                } else {
+                    process.stderr.write(
+                        `       ${binary.scenario} × ${binary.backend} × ${mode} failed\n`,
+                    );
+                }
                 continue;
             }
             if (r.stdout.includes("unavailable")) unavailable++;
@@ -236,6 +270,10 @@ function main() {
     if (unavailable > 0) {
         ui.log(`${unavailable} row(s) unavailable: a backend that cannot be asked`);
         ui.log("        to collect is reported rather than approximated");
+    }
+    if (gaps > 0) {
+        ui.log(`${gaps} row(s) are known gaps, not failures — see KNOWN_GAPS`);
+        ui.log("        in this file for what each one is");
     }
     ui.log("done");
 }

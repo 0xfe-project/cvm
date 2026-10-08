@@ -64,9 +64,26 @@ had no automatic policy and reported auto mode unavailable; that was wrong —
 the call is at `gc/tgc.c:369` and it is why the churn rows show more than a
 million collections.
 
-## Known gap
+## Known gap: it cannot mark read-heavy
 
-**It crashes on read-heavy**, in its own conservative stack walk
-(`tgc_mark_ptr`, on a stack address). That is a limitation of the floor
-collector at a 200k-node live set, recorded rather than avoided by choosing a
-size that happens to work.
+**Stack overflow in its own marker**, and it is arithmetic rather than a
+race. `tgc_mark_ptr` recurses once per pointer field:
+
+```c
+for (k = 0; k < gc->items[i].size/sizeof(void*); k++) {
+    tgc_mark_ptr(gc, ((void**)gc->items[i].ptr)[k]);
+}
+```
+
+read-heavy's graph is a chain 200,000 nodes long, so marking one end nests
+200,000 frames deep. At roughly 56 bytes a frame that is about 11 MiB
+against an 8 MiB stack, and the fault lands on the guard page — which is why
+the diagnosis was "segfault in the stack walk" for a while before the
+recursion was noticed.
+
+This is a property of the collector this row exists to compare against, not
+of the benchmark, and "fixing" it would mean rewriting that collector into
+something else. So the row is not produced, and `scripts/bench.mjs` lists it
+under `KNOWN_GAPS` with this explanation rather than reporting a bare
+failure — the difference between a limitation and a broken harness is one a
+reader should not have to work out.

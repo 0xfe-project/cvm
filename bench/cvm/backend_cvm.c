@@ -121,6 +121,7 @@ static CvmTypeDescriptor const *descriptor_for(BenchShape const *shape) {
 /* ------------------------------------------------------------------ */
 
 static uint64_t our_allocations = 0;
+static uint64_t our_failures = 0;
 static bool init_ok = false;
 
 static bool cvm_backend_init(size_t heap_hint, bool alloc_only) {
@@ -171,6 +172,7 @@ static bool cvm_backend_init(size_t heap_hint, bool alloc_only) {
 
     init_ok = cvm_init(&opts);
     our_allocations = 0;
+    our_failures = 0;
     return init_ok;
 }
 
@@ -184,7 +186,11 @@ static void cvm_backend_shutdown(void) {
 static void *cvm_backend_alloc(size_t size) {
     raw_desc.size = (u32)size;
     our_allocations++;
-    return cvm_alloc(&raw_desc);
+    void *p = cvm_alloc(&raw_desc);
+    if (p == NULL) {
+        our_failures++;
+    }
+    return p;
 }
 
 static void *cvm_backend_alloc_typed(BenchShape const *shape) {
@@ -193,7 +199,11 @@ static void *cvm_backend_alloc_typed(BenchShape const *shape) {
         return NULL;
     }
     our_allocations++;
-    return cvm_alloc(desc);
+    void *p = cvm_alloc(desc);
+    if (p == NULL) {
+        our_failures++;
+    }
+    return p;
 }
 
 static bool cvm_backend_collect(void) {
@@ -210,6 +220,7 @@ static void cvm_backend_stats(BenchStats *out) {
     out->pause_total_ns = vm.collection_ns;
     out->live_objects = vm.objects_live;
     out->heap_bytes = vm.heap_size;
+    out->failed_allocations = our_failures;
 }
 
 BenchCollector const bench_collector = {

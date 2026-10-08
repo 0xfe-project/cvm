@@ -61,6 +61,18 @@ typedef struct BenchStats {
      */
     uint64_t live_objects;
     uint64_t heap_bytes;
+
+    /*
+     * Allocations the backend could not satisfy.
+     *
+     * Zero in every run that is a measurement. A workload that kept
+     * allocating after the heap ran out produces a row with the right
+     * allocation count and wrong everything else — bdwgc in alloc-only mode
+     * on mixed-sizes failed 669,601 allocations this way and the row read as
+     * a clean run. The harness refuses a row with any failure in it, because
+     * the alternative is a number that looks like a result.
+     */
+    uint64_t failed_allocations;
 } BenchStats;
 
 /*

@@ -44,6 +44,7 @@ static uint64_t now_ns(void) {
 static uint64_t pause_start_ns = 0;
 static uint64_t pause_max_ns = 0;
 static uint64_t our_allocations = 0;
+static uint64_t our_failures = 0;
 static bool gc_disabled = false;
 
 /*
@@ -89,6 +90,7 @@ static bool bdwgc_backend_init(size_t heap_hint, bool alloc_only) {
 
     GC_INIT();
     our_allocations = 0;
+    our_failures = 0;
     pause_max_ns = 0;
     gc_disabled = false;
     return true;
@@ -106,11 +108,16 @@ static void bdwgc_backend_shutdown(void) {
 
 static void *bdwgc_backend_alloc(size_t size) {
     our_allocations++;
-    return GC_MALLOC(size);
+    void *p = GC_MALLOC(size);
+    if (p == NULL) {
+        our_failures++;
+    }
+    return p;
 }
 
 static void *bdwgc_backend_alloc_typed(BenchShape const *shape) {
     our_allocations++;
+    void *p;
     if (shape->nptrs == 0) {
         /*
          * No pointers, so the object does not need to be scanned. This is
@@ -118,9 +125,14 @@ static void *bdwgc_backend_alloc_typed(BenchShape const *shape) {
          * distinguishes everywhere, and using it is not cheating: it is the
          * feature the collector offers for exactly this case.
          */
-        return GC_MALLOC_ATOMIC(shape->size);
+        p = GC_MALLOC_ATOMIC(shape->size);
+    } else {
+        p = GC_MALLOC(shape->size);
     }
-    return GC_MALLOC(shape->size);
+    if (p == NULL) {
+        our_failures++;
+    }
+    return p;
 }
 
 static bool bdwgc_backend_collect(void) {
@@ -138,6 +150,7 @@ static void bdwgc_backend_stats(BenchStats *out) {
     out->pause_max_ns = pause_max_ns;
     out->pause_total_ns = 0; /* not exposed; the maximum is what matters */
     out->live_objects = 0;   /* bytes, not objects: see the note above */
+    out->failed_allocations = our_failures;
     out->heap_bytes = (uint64_t)heap_size;
 }
 

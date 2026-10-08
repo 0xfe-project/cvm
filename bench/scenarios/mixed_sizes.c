@@ -74,7 +74,21 @@ static void mixed(unsigned iteration) {
 BenchScenario const bench_scenario = {
     .name = "mixed-sizes",
     .modes = BENCH_RUN_ALL_MODES,
-    .heap_hint_bytes = 2ull * 1024ull * 1024ull * 1024ull,
+    /*
+     * 6 GiB, sized for the most demanding backend rather than for the
+     * objects.
+     *
+     * One repetition allocates about 780 MiB of objects. cvm holds those in
+     * about 1 GiB; bdwgc, being conservative with per-object headers and
+     * size classes, needs about 2.6x the object bytes and hit 2047 MiB
+     * against the old 2 GiB hint — and then, because the scenario allocates
+     * without checking, produced a row that looked like a clean run while
+     * 400,000 allocations had failed. The harness refuses such a row now,
+     * which is the right behaviour and also the reason this number has to be
+     * generous: a hint that only some collectors fit in is a comparison that
+     * silently drops the others.
+     */
+    .heap_hint_bytes = 6ull * 1024ull * 1024ull * 1024ull,
     .auto_heap_bytes = 256ull * 1024ull * 1024ull,
     .default_cadence = 20000u,
     .run = mixed,
