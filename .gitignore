@@ -50,7 +50,6 @@ compile_commands.json
 node_modules/
 .pnpm-store/
 *.log
-refs/
 
 # ---------------------------------------------------------------
 # Editors
@@ -63,11 +62,6 @@ refs/
 tags
 TAGS
 
-# ---------------------------------------------------------------
-# Third-party reference material (Scala Native Commix, Apache 2.0).
-# Kept on disk for reading; never part of our history.
-# ---------------------------------------------------------------
-/refs/
 
 # ---------------------------------------------------------------
 # Package-manager noise. This project has no npm dependencies;
@@ -79,7 +73,13 @@ package-lock.json
 yarn.lock
 
 # ---------------------------------------------------------------
-# Vendored third-party sources. Kept on disk to read and to build
+# Third-party source trees. Kept on disk to read and to build
 # against; never part of our history.
+#
+# Deliberately file-by-file rather than one /bench/ rule: the notes
+# and glue that sit next to a vendored tree are ours, and rules that
+# are wider than the thing they describe are how a project ends up
+# ignoring its own work.
 # ---------------------------------------------------------------
-/bench/bdwgc/gc-8.2.12/
+/refs/
+/bench/bdwgc/gc-*/
