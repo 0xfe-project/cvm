@@ -112,7 +112,22 @@
  */
 #define CVM_ARRAY_SPLIT_THRESHOLD 512u
 #define CVM_ARRAY_SPLIT_BATCH CVM_ARRAY_SPLIT_THRESHOLD
-#define CVM_MARK_MIN_PACKETS_PER_THREAD 3u
+/*
+ * Packets of backlog per marker thread, and it is derived from what a wake
+ * costs rather than chosen.
+ *
+ * A packet is 254 items; marking runs at about 12 ns per object on this
+ * machine, so a packet is roughly 3 us of work. Waking a worker costs a
+ * semaphore post, a context switch and a scheduling round trip — tens of
+ * microseconds, measured at 20-60 us for the whole pool wake. So a worker
+ * needs on the order of seven packets of work before waking it breaks even,
+ * and the old value of 3 asked it to break even at 9 us.
+ *
+ * This number also sizes the pool itself (see cvm_pool_default_count), where
+ * the same argument applies to whether a thread should exist at all: a 4 MiB
+ * heap gets one worker now instead of nine.
+ */
+#define CVM_MARK_MIN_PACKETS_PER_THREAD 16u
 #define CVM_MARK_SPAWN_THREADS_MIN_PACKETS (2u * CVM_MARK_MIN_PACKETS_PER_THREAD)
 
 /*
