@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 600" width="940" height="600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <rect width="940" height="600" fill="#ffffff"/>
+
+  <text x="40" y="58" font-size="20" font-weight="600" fill="#111827">bench — implementation status</text>
+  <text x="40" y="80" font-size="13" fill="#6b7280">The specification is written and the two C baselines build.</text>
+  <text x="40" y="98" font-size="13" fill="#6b7280">Nothing in this directory is a measurement.</text>
+
+  <!-- legend: two lines, swatch and text on each, clear of the subtitle -->
+  <rect x="700" y="44" width="13" height="13" rx="3" fill="#16a34a"/>
+  <text x="719" y="55" font-size="12" fill="#374151">built, verified runnable</text>
+  <rect x="700" y="66" width="13" height="13" rx="3" fill="#e5e7eb" stroke="#d1d5db"/>
+  <text x="719" y="77" font-size="12" fill="#374151">not written</text>
+
+  <!-- ============ panel 1: infrastructure ============ -->
+  <rect x="40" y="102" width="840" height="176" rx="8" fill="#f9fafb" stroke="#e5e7eb"/>
+  <text x="60" y="126" font-size="14" font-weight="600" fill="#111827">Infrastructure</text>
+
+  <!-- items: 3 per row, 2 rows -->
+  <!-- row 1 -->
+  <rect x="60" y="140" width="253" height="52" rx="6" fill="#dcfce7" stroke="#86efac"/>
+  <text x="74" y="161" font-size="12" font-weight="600" fill="#166534">bdwgc 8.2.12 baseline</text>
+  <text x="74" y="180" font-size="11" fill="#166534">bench/build/bdwgc — -O1, static, threads on</text>
+
+  <rect x="327" y="140" width="253" height="52" rx="6" fill="#dcfce7" stroke="#86efac"/>
+  <text x="341" y="161" font-size="12" font-weight="600" fill="#166534">tgc baseline</text>
+  <text x="341" y="180" font-size="11" fill="#166534">bench/build/tgc — -O1</text>
+
+  <rect x="594" y="140" width="266" height="52" rx="6" fill="#dcfce7" stroke="#86efac"/>
+  <text x="608" y="161" font-size="12" font-weight="600" fill="#166534">bench driver</text>
+  <text x="608" y="180" font-size="11" fill="#166534">scripts/bench.mjs, pnpm run bench</text>
+
+  <!-- row 2 -->
+  <rect x="60" y="202" width="253" height="52" rx="6" fill="#f3f4f6" stroke="#d1d5db"/>
+  <text x="74" y="223" font-size="12" font-weight="600" fill="#6b7280">collector.h</text>
+  <text x="74" y="242" font-size="11" fill="#9ca3af">the interface every backend implements</text>
+
+  <rect x="327" y="202" width="253" height="52" rx="6" fill="#f3f4f6" stroke="#d1d5db"/>
+  <text x="341" y="223" font-size="12" font-weight="600" fill="#6b7280">run.c + report.c</text>
+  <text x="341" y="242" font-size="11" fill="#9ca3af">timing loop, modes, medians, percentiles</text>
+
+  <rect x="594" y="202" width="266" height="52" rx="6" fill="#f3f4f6" stroke="#d1d5db"/>
+  <text x="608" y="223" font-size="12" font-weight="600" fill="#6b7280">backends (cvm, bdwgc, tgc, go)</text>
+  <text x="608" y="242" font-size="11" fill="#9ca3af">Go needs a toolchain installed</text>
+
+  <!-- ============ panel 2: scenarios ============ -->
+  <rect x="40" y="298" width="840" height="282" rx="8" fill="#f9fafb" stroke="#e5e7eb"/>
+  <text x="60" y="322" font-size="14" font-weight="600" fill="#111827">Scenarios — seven planned, none written</text>
+
+  <!-- column headers -->
+  <text x="60"  y="348" font-size="11" font-weight="600" fill="#6b7280">SCENARIO</text>
+  <text x="248" y="348" font-size="11" font-weight="600" fill="#6b7280">ISOLATES</text>
+  <text x="486" y="348" font-size="11" font-weight="600" fill="#6b7280">PREDICTED TO FAVOUR</text>
+  <text x="672" y="348" font-size="11" font-weight="600" fill="#6b7280">SOURCE</text>
+  <text x="760" y="348" font-size="11" font-weight="600" fill="#6b7280">MEASURED</text>
+  <line x1="60" y1="356" x2="860" y2="356" stroke="#d1d5db"/>
+
+  <!-- rows -->
+  <g font-size="12">
+    <!-- 1 -->
+    <text x="60"  y="378" fill="#111827" font-family="ui-monospace, Menlo, monospace">churn-unary</text>
+    <text x="248" y="378" fill="#4b5563">allocator path only</text>
+    <text x="486" y="378" fill="#2563eb" font-weight="600">cvm</text>
+    <!-- 2 -->
+    <text x="60"  y="402" fill="#111827" font-family="ui-monospace, Menlo, monospace">tree-keep</text>
+    <text x="248" y="402" fill="#4b5563">mark + sweep together</text>
+    <text x="486" y="402" fill="#6b7280">unresolved — main event</text>
+    <!-- 3 -->
+    <text x="60"  y="426" fill="#111827" font-family="ui-monospace, Menlo, monospace">mixed-sizes</text>
+    <text x="248" y="426" fill="#4b5563">every path, both thresholds</text>
+    <text x="486" y="426" fill="#6b7280">unresolved</text>
+    <!-- 4 -->
+    <text x="60"  y="450" fill="#111827" font-family="ui-monospace, Menlo, monospace">flat-fp</text>
+    <text x="248" y="450" fill="#4b5563">control: no pointers</text>
+    <text x="486" y="450" fill="#2563eb" font-weight="600">cvm</text>
+    <!-- 5 -->
+    <text x="60"  y="474" fill="#111827" font-family="ui-monospace, Menlo, monospace">read-heavy</text>
+    <text x="248" y="474" fill="#4b5563">mark throughput, locality</text>
+    <text x="486" y="474" fill="#2563eb" font-weight="600">cvm</text>
+    <!-- 6 -->
+    <text x="60"  y="498" fill="#111827" font-family="ui-monospace, Menlo, monospace">write-heavy</text>
+    <text x="248" y="498" fill="#4b5563">store cost: free vs taxed</text>
+    <text x="486" y="498" fill="#0891b2" font-weight="600">go</text>
+    <!-- 7 -->
+    <text x="60"  y="522" fill="#111827" font-family="ui-monospace, Menlo, monospace">growth-1.5</text>
+    <text x="248" y="522" fill="#4b5563">heap growth policy</text>
+    <text x="486" y="522" fill="#7c3aed" font-weight="600">bdwgc</text>
+
+    <!-- source + measured columns, all empty -->
+    <g fill="#cbd5e1" font-size="11">
+      <text x="672" y="378">—</text><text x="760" y="378">—</text>
+      <text x="672" y="402">—</text><text x="760" y="402">—</text>
+      <text x="672" y="426">—</text><text x="760" y="426">—</text>
+      <text x="672" y="450">—</text><text x="760" y="450">—</text>
+      <text x="672" y="474">—</text><text x="760" y="474">—</text>
+      <text x="672" y="498">—</text><text x="760" y="498">—</text>
+      <text x="672" y="522">—</text><text x="760" y="522">—</text>
+    </g>
+    <line x1="60" y1="386" x2="860" y2="386" stroke="#f3f4f6"/>
+    <line x1="60" y1="410" x2="860" y2="410" stroke="#f3f4f6"/>
+    <line x1="60" y1="434" x2="860" y2="434" stroke="#f3f4f6"/>
+    <line x1="60" y1="458" x2="860" y2="458" stroke="#f3f4f6"/>
+    <line x1="60" y1="482" x2="860" y2="482" stroke="#f3f4f6"/>
+    <line x1="60" y1="506" x2="860" y2="506" stroke="#f3f4f6"/>
+  </g>
+
+  <text x="60" y="564" font-size="11" fill="#9ca3af">Every scenario runs in three modes (alloc-only, fixed-cadence, auto) against every backend that can be forced to collect on demand.</text>
+</svg>
