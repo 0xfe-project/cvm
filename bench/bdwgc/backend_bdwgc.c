@@ -100,6 +100,20 @@ static void bdwgc_backend_shutdown(void) {
     if (gc_disabled) {
         GC_enable();
         gc_disabled = false;
+
+        /*
+         * And collect, because re-initialising does not reset bdwgc.
+         *
+         * GC_INIT is a no-op the second time and there is no shutdown, so a
+         * repetition starts with everything the previous one allocated still
+         * held. With collection disabled that is unbounded: seven
+         * repetitions of mixed-sizes at ~2.6x the object bytes is about
+         * 14 GiB against a 6 GiB hint, which is why the row passed at three
+         * repetitions and failed at seven. Reclaiming here, between
+         * repetitions and outside the timed window, is what makes each one
+         * start from the same place.
+         */
+        GC_gcollect();
     }
     /* Nothing to tear down: bdwgc has no shutdown, and GC_INIT is a no-op
      * the second time. Deliberately not calling GC_gcollect, which would

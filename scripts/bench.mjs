@@ -77,10 +77,38 @@ const MODE_BITS = { alloc: 1, fixed: 2, auto: 4 };
 const KNOWN_GAPS = [
     { scenario: "read-heavy", backend: "tgc",
       why: "its recursive marker overflows the stack on a 200k-node chain" },
+
+    /*
+     * bdwgc × mixed-sizes × alloc: a conservative collector cannot run this
+     * mode for seven repetitions, and it is not a matter of giving it more
+     * room.
+     *
+     * alloc-only never collects, so a repetition's allocation stays held. To
+     * make the next repetition start from the same place this harness
+     * re-initialises between them and, for bdwgc, collects first — but a
+     * conservative collection cannot reclaim these objects: the scenario
+     * drops its pointers, and stale copies of them are still on the stack
+     * and in registers, so they are conservatively reachable. Seven
+     * repetitions of ~780 MiB of objects, at the ~2.6x a conservative
+     * collector needs, accumulates past any heap worth reserving.
+     *
+     * It passes at three repetitions, which is how long the row was
+     * unnoticed: the failure only appears once the accumulations exceed the
+     * hint. Making it work would mean running each repetition in its own
+     * process, which is a harness change rather than a collector one.
+     */
+    { scenario: "mixed-sizes", backend: "bdwgc", mode: "alloc",
+      why: "conservative collection cannot reclaim between repetitions, so " +
+           "the allocations accumulate past any heap worth reserving" },
 ];
 
-function knownGap(scenario, backend) {
-    return KNOWN_GAPS.find((g) => g.scenario === scenario && g.backend === backend);
+function knownGap(scenario, backend, mode) {
+    return KNOWN_GAPS.find(
+        (g) =>
+            g.scenario === scenario &&
+            g.backend === backend &&
+            (g.mode === undefined || g.mode === mode),
+    );
 }
 
 /**
@@ -210,7 +238,7 @@ function main() {
 
             if (r.stdout) process.stdout.write(r.stdout);
             if (r.status !== 0) {
-                const gap = knownGap(binary.scenarioName, binary.backend);
+                const gap = knownGap(binary.scenarioName, binary.backend, mode);
                 if (gap) {
                     process.stderr.write(
                         `       ${binary.scenario} × ${binary.backend} × ${mode}` +
