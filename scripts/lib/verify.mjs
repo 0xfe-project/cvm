@@ -401,6 +401,7 @@ const PROBE_HEADERS = [
     "base/math.h",
     "base/assert.h",
     "base/format.h",
+    "base/sort.h",
     "rt.h",
     "log.h",
     "stats.h",
