@@ -1061,6 +1061,22 @@ bool cvm_sweep_drive(CvmHeap* heap, CvmThreadNode* node, u32 max_count) {
     cvm_sweep_lazy_coalesce(heap);
 
     atomic_store(&self->sweeping, false);
+
+    /*
+     * Clear this thread's published bound now that it is no longer sweeping.
+     *
+     * `cvm_sweep_begin` says each thread clears its own progress when it stops,
+     * and this path was the one that did not — so the number left behind was the
+     * end of the last batch of the *previous* sweep. The next sweep starts its
+     * cursor at zero, and the claim assertion then compared a fresh
+     * start_index against a bound from a sweep that was over.
+     *
+     * After the withdrawal, deliberately: a reader that filters on `sweeping`
+     * cannot see this value, so it cannot be mistaken for progress. A zero
+     * published while the flag was still set would instead hold coalescing back,
+     * which is the safe direction but not free.
+     */
+    atomic_store(&self->sweep_cursor_done, 0);
     cvm_thread_set_activity(CVM_ACT_IDLE);
 
     return cvm_sweep_try_finish(heap);

@@ -99,7 +99,29 @@ static void do_nullify(CvmHeap* heap, CvmStats* stats) {
  * and the kind that never shows up in a test small enough to notice.
  */
 static void do_sweep(CvmGcThread* thread, CvmHeap* heap) {
-    while (atomic_load(&heap->sweep.cursor) < heap->sweep.limit) {
+    for (;;) {
+        u32 cursor = atomic_load(&heap->sweep.cursor);
+        if (cursor >= heap->sweep.limit) {
+            break;
+        }
+
+        /*
+         * The cursor is behind what this worker has already published as done,
+         * which within a round cannot happen: the cursor advances and a
+         * sweeper's own bound trails it. The one way to see it is that the round
+         * this worker was woken for ended and a new one began, resetting the
+         * cursor to zero.
+         *
+         * Carrying the old bound into the new round is what cvm_sweep's
+         * assertion catches — in the words of the comment there, a thread that
+         * goes on to sweep a new round while still carrying the previous round's
+         * progress. Clearing it here is cheaper than a round counter and says
+         * the same thing: this worker holds nothing from a round that is over.
+         */
+        if (cursor < atomic_load(&thread->sweep_cursor_done)) {
+            atomic_store(&thread->sweep_cursor_done, 0);
+        }
+
         cvm_sweep(heap, &thread->sweep_cursor_done, CVM_SWEEP_BATCH_SIZE, NULL);
     }
 }
