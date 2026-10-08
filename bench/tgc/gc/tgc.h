@@ -26,6 +26,24 @@ typedef struct {
   tgc_ptr_t *items, *frees;
   double loadfactor, sweepfactor;
   size_t nitems, nslots, mitems, nfrees;
+
+  /*
+   * Metrics added by this project, not part of the upstream tiny GC.
+   *
+   * Upstream reports only table occupancy (nitems/nslots), which cannot
+   * answer the two questions the benchmark asks of every backend: how many
+   * allocations happened, and how long the longest collection stopped the
+   * program. Both are counted here rather than inferred, and both are
+   * additive — nothing in tgc's own behaviour reads them.
+   *
+   * They are in the vendored copy because a tgc that reports different
+   * numbers than it did upstream would make the comparison a comparison of
+   * two collectors. The three fields below are the entire difference, and
+   * bench/tgc/README.md says so.
+   */
+  uint64_t bench_allocations;
+  uint64_t bench_collections;
+  uint64_t bench_pause_max_ns;
 } tgc_t;
 
 void tgc_start(tgc_t *gc, void *stk);

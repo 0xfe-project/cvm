@@ -166,9 +166,24 @@ void cvm_gc_counters_record_collection(u64 start_ns, u64 end_ns) {
     if (start_ns == 0) {
         return;
     }
+    u64 duration = end_ns - start_ns;
+
     atomic_fetch_add_explicit(&gc_counters.collections, 1u, memory_order_relaxed);
-    atomic_fetch_add_explicit(&gc_counters.collection_ns, end_ns - start_ns,
+    atomic_fetch_add_explicit(&gc_counters.collection_ns, duration,
                               memory_order_relaxed);
+
+    /*
+     * Monotonic maximum, by compare-exchange rather than a plain store: two
+     * collections can end at once, and the loser of that race must not
+     * overwrite a longer pause with a shorter one. A store here would make
+     * the reported maximum depend on which thread finished last, which is
+     * exactly the kind of number that looks like a measurement and is not.
+     */
+    u64 seen = atomic_load_explicit(&gc_counters.pause_max_ns, memory_order_relaxed);
+    while (duration > seen && !atomic_compare_exchange_weak_explicit(
+                                  &gc_counters.pause_max_ns, &seen, duration,
+                                  memory_order_relaxed, memory_order_relaxed)) {
+    }
 }
 
 u64 cvm_gc_counters_collections(void) {
@@ -177,4 +192,8 @@ u64 cvm_gc_counters_collections(void) {
 
 u64 cvm_gc_counters_collection_ns(void) {
     return atomic_load_explicit(&gc_counters.collection_ns, memory_order_relaxed);
+}
+
+u64 cvm_gc_counters_pause_max_ns(void) {
+    return atomic_load_explicit(&gc_counters.pause_max_ns, memory_order_relaxed);
 }

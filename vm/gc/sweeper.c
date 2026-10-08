@@ -446,21 +446,39 @@ static u32 cvm_sweep_superblock(CvmHeap* heap, CvmLargeAllocator* large,
 static void apply_result(CvmSweepResult* result, CvmBlockAllocator* blocks,
                          CvmThreadNode* node) {
     /*
-     * A worker's partially free blocks go nowhere: there is no thread to own
-     * them, and giving them to one means touching that thread's node after
-     * the registry's read lock has been released — which is the window in
-     * which the thread can leave and its node be freed underneath. The block
-     * is simply not swept this round and becomes the next round's garbage
-     * instead. That is a leak of address space, not of correctness, and it
-     * cannot be the common case, because it only happens when a worker
-     * sweeps while no mutator is registered to receive the result.
+     * Who takes the partially free blocks.
+     *
+     * A mutator sweeps for itself and keeps them in its own list. A worker
+     * has no list, so its blocks go to the shared stack instead — that is
+     * what the stack is for, and handing them to a mutator by round-robin
+     * would mean touching that mutator's node after the registry's read
+     * lock was released, which is the window in which the thread leaves and
+     * its node is freed underneath the write.
+     *
+     * Before this, a worker's swept blocks were simply dropped: not handed
+     * to anyone, not counted as free, not swept to completion. Every
+     * collection leaked every partially free block a worker touched, the
+     * growth check then read a free ratio that stayed low, and the heap
+     * grew without bound — 529 MiB for a 6 MB live set was the visible
+     * number. That was not "a leak of address space, not of correctness";
+     * it was the heap policy being fed a lie.
      */
-    if (node != NULL) {
-        BlockMeta* first = result->recycled_blocks.first;
-        if (first != NULL) {
+    BlockMeta* first = result->recycled_blocks.first;
+    if (first != NULL) {
+        if (node != NULL) {
             block_list_push_all(&node->allocator.recycled_blocks,
                                 node->allocator.heap->block_meta_start, first,
                                 result->recycled_blocks.last);
+        } else {
+            u32 count = 0;
+            for (BlockMeta* b = first; b != NULL;
+                 b = block_meta_next(blocks->meta_start, b)) {
+                count++;
+            }
+            block_list_push_all(&blocks->recycled_shared, blocks->meta_start, first,
+                                result->recycled_blocks.last);
+            atomic_fetch_add_explicit(&blocks->recycled_shared_count, count,
+                                      memory_order_release);
         }
     }
 
@@ -1157,3 +1175,48 @@ void cvm_sweep_assert_consistent(CvmHeap* heap) {
 }
 
 #endif /* CVM_DEBUG */
+
+/*
+ * Drive the sweep to its end, or to the point where this thread can do no
+ * more.
+ *
+ * Used from inside a collection, where the world is stopped, from just
+ * after one, where it is not — which is why "am I the only sweeper?" cannot
+ * be assumed and "no progress" cannot simply end the loop. A worker holding
+ * the remaining work makes the cursor stand still while it works, and a
+ * handoff that has been posted but not consumed stands the cursor still
+ * before that. Breaking on either would abandon a sweep that is perfectly
+ * alive: the visible symptom was a collection that reported most of its heap
+ * still in use, because the blocks had not been swept rather than because
+ * they held live objects.
+ *
+ * So the escape hatch is conditioned on there being nobody who could still
+ * be working. When there is, yielding is not hope: a sweep batch is a bounded
+ * loop and a handoff is consumed by a thread already blocked on a semaphore.
+ */
+void cvm_sweep_finish(CvmHeap* heap, str const where) {
+    while (!cvm_sweep_is_done(heap)) {
+        u32 cursor_before = atomic_load(&heap->sweep.cursor);
+        u32 coalesce_before = atomic_load(&heap->sweep.coalesce_done);
+
+        cvm_sweep_drive(heap, cvm_thread_node(), CVM_SWEEP_BATCH_SIZE);
+
+        if (atomic_load(&heap->sweep.cursor) == cursor_before &&
+            atomic_load(&heap->sweep.coalesce_done) == coalesce_before) {
+            if (cvm_sweep_any_in_flight(heap) || cvm_sweep_handoff_pending(heap)) {
+                rt_thread_yield();
+                continue;
+            }
+
+            CVM_LOG_DEBUG(m) {
+                fmt_lit(&m.fmt, "sweep left unfinished ");
+                fmt_str(&m.fmt, where);
+                fmt_lit(&m.fmt, ": cursor ");
+                fmt_u32(&m.fmt, atomic_load(&heap->sweep.cursor));
+                fmt_lit(&m.fmt, "/");
+                fmt_u32(&m.fmt, heap->sweep.limit);
+            }
+            break;
+        }
+    }
+}

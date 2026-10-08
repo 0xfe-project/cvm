@@ -2,26 +2,36 @@
 //
 // Builds and runs the collector benchmark described in bench/BENCH.md.
 //
-// Same shape as scripts/build.mjs: this file orchestrates, and everything
+// Same shape as scripts/build.mjs: this file orchestrates and everything
 // substantive lives in scripts/lib/. The bench-specific parts are in
 // scripts/lib/bench/.
 //
-//   node scripts/bench.mjs                build everything, then run
+//   node scripts/bench.mjs                build everything, then measure
 //   node scripts/bench.mjs --build-only   build only
-//   node scripts/bench.mjs --quick        fewer repetitions (for a smoke run)
+//   node scripts/bench.mjs --quick        fewer repetitions
 //   node scripts/bench.mjs -v             echo every command
 //
-// Results are written under bench/results/ with the date, the machine and
-// the flags, because a number without those three is not a result.
+// Results go to bench/results/<date>-<machine>.csv, with a header line and
+// one row per (scenario, backend, mode). A row carries the median of K runs
+// and the spread around it, because a median with no dispersion is a number
+// pretending to be a measurement.
 
 import fs from "node:fs";
 import os from "node:os";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { logger, mkdirp } from "./lib/util.mjs";
 import { discover } from "./lib/toolchain.mjs";
 import { buildThirdParty } from "./lib/bench/thirdparty.mjs";
+import {
+    BACKENDS,
+    buildBinaries,
+    buildGoBinary,
+    runOne,
+    runGoOne,
+} from "./lib/bench/harness.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BENCH = path.join(ROOT, "bench");
@@ -33,7 +43,6 @@ const has = (f) => argv.includes(f);
 
 const opts = {
     buildOnly: has("--build-only"),
-    runOnly: has("--run-only"),
     quick: has("--quick"),
     verbose: has("-v") || has("--verbose"),
 };
@@ -41,14 +50,54 @@ const opts = {
 /*
  * Repetitions per measurement.
  *
- * The median of several runs rather than the best of them: a collector's
- * timing is noisy because collection points depend on allocation counts,
- * and the minimum systematically flatters whichever run happened to collect
- * least.
+ * The median of several runs rather than the best of them: collection
+ * points depend on allocation counts, so wall time is noisy in a way that
+ * makes the minimum systematically flatter whichever run collected least.
  */
 const REPETITIONS = opts.quick ? 3 : 7;
 
-/** What a run of the benchmark records about the machine it ran on. */
+/** The modes a scenario asks for, by name. */
+const MODE_BITS = { alloc: 1, fixed: 2, auto: 4 };
+
+/**
+ * Which modes to run for a scenario.
+ *
+ * Read from the binary rather than duplicated here: the scenario declares
+ * them (see bench/scenarios/scenario.h), and a second copy in this file
+ * would be a second source of truth about what was measured. `--modes` on
+ * the command line prints them.
+ */
+function modesFor(scenario) {
+    const r = runScenarioProbe(scenario, "--modes");
+    return r
+        .trim()
+        .split(/\s+/)
+        .filter((m) => MODE_BITS[m] !== undefined);
+}
+
+/** Ask a binary something; it answers on stdout without measuring. */
+function runScenarioProbe(scenario, arg) {
+    const r = spawnSync(scenario, [arg], { encoding: "utf8" });
+    return r.stdout ?? "";
+}
+
+/** Which modes the Go binary declares for one scenario. */
+/** The scenario name a C binary declares for itself. */
+function scenarioName(binary) {
+    const r = spawnSync(binary, ["--name"], { encoding: "utf8" });
+    return (r.stdout ?? "").trim();
+}
+
+function goModes(goBin, scenario) {
+    const r = spawnSync(goBin, [`--scenario=${scenario}`, "--modes"], {
+        encoding: "utf8",
+    });
+    return (r.stdout ?? "")
+        .trim()
+        .split(/\s+/)
+        .filter((m) => MODE_BITS[m] !== undefined);
+}
+
 function environment() {
     const cpus =
         typeof os.availableParallelism === "function"
@@ -61,61 +110,17 @@ function environment() {
         cpuCount: cpus,
         cpuModel: os.cpus()[0]?.model ?? "unknown",
         totalMemoryBytes: os.totalmem(),
+        compiler: process.env.CC ?? "cc",
+        optimization: "-O1",
+        repetitions: REPETITIONS,
     };
 }
 
-/* ------------------------------------------------------------------ */
-/* steps                                                              */
-/* ------------------------------------------------------------------ */
-
-/**
- * Build the scenario binaries.
- *
- * One binary per (scenario, backend) pair, linked from the same scenario
- * source so that the workload cannot drift between backends. See BENCH.md
- * §2.4.
- *
- * Not written yet: the harness in bench/harness/ and the scenarios in
- * bench/scenarios/ are the next pieces of work. Until they exist this
- * reports what is missing rather than pretending to have run something.
- */
-function buildScenarios({ toolchain, thirdparty }) {
-    const harness = path.join(BENCH, "harness", "run.c");
-    const scenarios = fs.existsSync(path.join(BENCH, "scenarios"))
-        ? fs
-              .readdirSync(path.join(BENCH, "scenarios"))
-              .filter((f) => f.endsWith(".c"))
-        : [];
-
-    if (!fs.existsSync(harness) || scenarios.length === 0) {
-        ui.log("scenarios: not built yet");
-        ui.log("        the harness (bench/harness/run.c) and the");
-        ui.log("        scenario sources (bench/scenarios/) are the next step;");
-        ui.log("        see bench/BENCH.md §6 for the list and §8 for the layout");
-        return [];
-    }
-
-    // Reachable once the harness exists. Left as the shape the work takes
-    // rather than a guess at its details.
-    ui.log(
-        `scenarios: ${scenarios.length} source(s), ${thirdparty ? 1 : 0} backend set(s)`,
-    );
-    return [];
+function resultsPath() {
+    const stamp = environment().date.replace(/[:.]/g, "-");
+    const machine = `${process.platform}-${process.arch}`;
+    return path.join(BENCH, "results", `${stamp}-${machine}.csv`);
 }
-
-function writeResults(record) {
-    const dir = path.join(BENCH, "results");
-    mkdirp(dir);
-    const stamp = record.environment.date.replace(/[:.]/g, "-");
-    const file = path.join(dir, `env-${stamp}.json`);
-    fs.writeFileSync(file, JSON.stringify(record, null, 2) + "\n");
-    ui.log(`results: ${path.relative(ROOT, file)}`);
-    return file;
-}
-
-/* ------------------------------------------------------------------ */
-/* main                                                               */
-/* ------------------------------------------------------------------ */
 
 function main() {
     const toolchain = discover();
@@ -128,8 +133,6 @@ function main() {
 
     mkdirp(path.join(BENCH, "build"));
 
-    /* The third-party collectors are needed either way: a build-only run
-     * should leave everything ready to run. */
     const thirdparty = buildThirdParty({
         root: ROOT,
         toolchain,
@@ -137,32 +140,103 @@ function main() {
         verbose: opts.verbose,
     });
 
-    const binaries = buildScenarios({ toolchain, thirdparty });
+    const binaries = buildBinaries({
+        root: ROOT,
+        toolchain,
+        thirdparty,
+        ui,
+        verbose: opts.verbose,
+    });
 
     if (opts.buildOnly) {
         ui.log("done (build only)");
         return;
     }
 
-    if (binaries.length === 0) {
-        /*
-         * Nothing to measure, so no results file. Writing one would put a
-         * dated artefact in bench/results/ that records no measurement, and
-         * a directory of those is worse than an empty one: the point of the
-         * directory is that every file in it is a result.
-         *
-         * Not a failure: the third-party builds succeeding is real
-         * progress, and the log says so.
-         */
-        ui.log("done (nothing measured: no scenarios to run yet)");
-        return;
+    const csv = resultsPath();
+    mkdirp(path.dirname(csv));
+
+    /*
+     * The header is written here rather than by the binaries: one file, one
+     * header, and a binary that appends cannot get the columns wrong.
+     */
+    fs.writeFileSync(
+        csv,
+        "scenario,backend,mode,runs," +
+            "wall_ns_min,wall_ns_median,wall_ns_max," +
+            "allocations_median,allocations_min,collections_median," +
+            "pause_max_ns_median,pause_max_ns_max,live_objects,heap_bytes\n",
+    );
+
+    console.log("");
+    let rows = 0;
+    let unavailable = 0;
+
+    for (const binary of binaries) {
+        binary.scenarioName = scenarioName(binary.path);
+        for (const mode of modesFor(binary.path)) {
+            const r = runOne({
+                binary: binary.path,
+                mode,
+                reps: REPETITIONS,
+                csvPath: csv,
+                verbose: opts.verbose,
+            });
+
+            if (r.stdout) process.stdout.write(r.stdout);
+            if (r.status !== 0) {
+                process.stderr.write(
+                    `       ${binary.scenario} × ${binary.backend} × ${mode} failed\n`,
+                );
+                continue;
+            }
+            if (r.stdout.includes("unavailable")) unavailable++;
+            rows++;
+        }
     }
 
-    ui.log(`running ${binaries.length} scenario(s)`);
-    writeResults({
-        environment: environment(),
-        measured: binaries.map((b) => path.relative(ROOT, b)),
-    });
+    /*
+     * The Go backend, if there is a toolchain. Its rows are produced by a
+     * separate binary and land in the same CSV, because a comparison whose
+     * numbers live in two files is a comparison nobody does.
+     */
+    const goBin = buildGoBinary({ root: ROOT, ui, verbose: opts.verbose });
+    if (goBin !== null) {
+        /*
+         * The names come from the C binaries rather than from their file
+         * names: a file called churn_unary.c declares the scenario
+         * "churn-unary", and matching the two by hand is how a Go row ends
+         * up attached to the wrong scenario.
+         */
+        const names = [...new Set(binaries.map((b) => b.scenarioName))].sort();
+        for (const name of names) {
+            for (const mode of goModes(goBin, name)) {
+                const r = runGoOne({
+                    binary: goBin,
+                    scenario: name,
+                    mode,
+                    reps: REPETITIONS,
+                    csvPath: csv,
+                    verbose: opts.verbose,
+                });
+                if (r.stdout) process.stdout.write(r.stdout);
+                if (r.status !== 0) {
+                    process.stderr.write(
+                        `       ${name} × go × ${mode} failed\n`,
+                    );
+                    continue;
+                }
+                rows++;
+            }
+        }
+    }
+
+    console.log("");
+    ui.log(`${rows} row(s) → ${path.relative(ROOT, csv)}`);
+    if (unavailable > 0) {
+        ui.log(`${unavailable} row(s) unavailable: a backend that cannot be asked`);
+        ui.log("        to collect is reported rather than approximated");
+    }
     ui.log("done");
 }
 

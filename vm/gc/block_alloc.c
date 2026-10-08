@@ -172,6 +172,9 @@ void cvm_block_alloc_init(CvmBlockAllocator* alloc, BlockMeta* meta_start,
     alloc->smallest.limit = meta_start + block_count - CVM_SWEEP_RESERVE_BLOCKS;
     atomic_store(&alloc->reserved, meta_start + block_count - CVM_SWEEP_RESERVE_BLOCKS);
 
+    block_list_init(&alloc->recycled_shared);
+    atomic_store(&alloc->recycled_shared_count, 0);
+
     atomic_store(&alloc->concurrent, false);
     atomic_store(&alloc->free_block_count, block_count);
     cvm_block_range_clear(&alloc->coalescing);
@@ -202,6 +205,9 @@ void cvm_block_alloc_clear(CvmBlockAllocator* alloc) {
      * mutators are running, so the free lists have to be manipulated
      * atomically from here until coalescing finishes.
      */
+    block_list_clear(&alloc->recycled_shared);
+    atomic_store(&alloc->recycled_shared_count, 0);
+
     atomic_store(&alloc->concurrent, true);
     atomic_store(&alloc->free_block_count, 0);
     alloc->smallest.cursor = NULL;

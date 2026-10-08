@@ -145,6 +145,15 @@ typedef struct CvmVmStats {
     u64 collections;
     u64 collection_ns;
 
+    /*
+     * The longest single stop-the-world window so far, in nanoseconds.
+     *
+     * Distinct from collection_ns / collections, which is an average and
+     * therefore hides the thing a program with a deadline actually cares
+     * about. One 40 ms pause and forty 1 ms pauses have the same total.
+     */
+    u64 pause_max_ns;
+
     /* Live objects. Counted on demand: see the note in gc/collect.h. */
     u64 objects_live;
 

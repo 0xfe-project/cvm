@@ -191,6 +191,20 @@ static bool allocator_new_block(CvmAllocator* alloc) {
     CvmVMContext* ctx = cvm_ctx();
     u8* block_start;
 
+    if (block == NULL) {
+        /*
+         * Own list empty: fall back to the shared stack of worker-swept
+         * blocks. Same pop discipline as above — the stack is filled by
+         * threads that hold nothing, so this is always an atomic pop.
+         */
+        block = block_list_pop(&alloc->block_alloc->recycled_shared,
+                               alloc->heap->block_meta_start);
+        if (block != NULL) {
+            atomic_fetch_sub_explicit(&alloc->block_alloc->recycled_shared_count, 1,
+                                      memory_order_relaxed);
+        }
+    }
+
     if (block != NULL) {
         atomic_fetch_sub_explicit(&alloc->recycled_block_count, 1,
                                   memory_order_relaxed);
@@ -408,9 +422,15 @@ opaque_mut cvm_alloc_slow(CvmTypeDescriptor const* type, usize size) {
             return publish(alloc, payload, size, type);
         }
 
-        /* (2) Help sweep, if a sweep is in progress. */
+        /* (2) Help sweep, if a sweep is in progress.
+         *
+         * To completion, not one batch. commix waits for the sweep here too:
+         * a thread that cannot allocate has nothing better to do than finish
+         * the sweep that is holding it back, and sweeping one batch and then
+         * marching on to "grow the heap" is exactly how a heap with plenty of
+         * reclaimable memory reports itself out of space. */
         if (!cvm_sweep_is_done(heap)) {
-            cvm_sweep_drive(heap, node, CVM_LAZY_SWEEP_MIN_BATCH);
+            cvm_sweep_finish(heap, STR_LITERAL("allocation failed"));
             payload = try_alloc(alloc, size);
             if (payload != NULL) {
                 return publish(alloc, payload, size, type);
@@ -429,7 +449,7 @@ opaque_mut cvm_alloc_slow(CvmTypeDescriptor const* type, usize size) {
         }
 
         if (!cvm_sweep_is_done(heap)) {
-            cvm_sweep_drive(heap, node, CVM_LAZY_SWEEP_MIN_BATCH);
+            cvm_sweep_finish(heap, STR_LITERAL("allocation failed"));
             payload = try_alloc(alloc, size);
             if (payload != NULL) {
                 return publish(alloc, payload, size, type);

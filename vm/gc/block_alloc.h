@@ -97,6 +97,21 @@ typedef struct CvmBlockAllocator {
 
     BlockList free_superblocks[CVM_SUPERBLOCK_LIST_SIZE];
 
+    /*
+     * Partially free blocks swept by a thread with no allocator of its own.
+     *
+     * A GC worker sweeping a batch has no recycled_blocks list, and handing
+     * its blocks to a mutator means touching that mutator's node after the
+     * registry's read lock was released — the window in which the thread
+     * leaves and its node is freed underneath the write. So worker-swept
+     * blocks go here instead: one lock-free stack, and any mutator whose own
+     * list is empty takes from it. The free-line lists live in the blocks'
+     * own metadata, so a block popped from here is as usable as one from a
+     * per-thread list.
+     */
+    BlockList recycled_shared;
+    _Atomic u32 recycled_shared_count;
+
     /* A run held back so the sweeper always has somewhere to work. */
     _Atomic(BlockMeta*) reserved;
 
@@ -169,6 +184,11 @@ void cvm_block_alloc_release(CvmBlockAllocator* alloc);
 
 CVM_INLINE u32 cvm_block_alloc_free_count(CvmBlockAllocator const* alloc) {
     return atomic_load_explicit(&alloc->free_block_count, memory_order_relaxed);
+}
+
+/* Partially free blocks available in the shared stack (worker-swept). */
+CVM_INLINE u32 cvm_block_alloc_recycled_shared_count(CvmBlockAllocator const* alloc) {
+    return atomic_load_explicit(&alloc->recycled_shared_count, memory_order_relaxed);
 }
 
 #endif /* CVM_GC_BLOCK_ALLOC_H */

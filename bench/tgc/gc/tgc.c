@@ -1,5 +1,8 @@
 #include "tgc.h"
 
+/* For the added collection timings; see tgc.h. */
+#include <time.h>
+
 static size_t tgc_hash(void *ptr) {
     uintptr_t ad = (uintptr_t) ptr;
     return (size_t) ((13*ad) ^ (ad >> 15));
@@ -326,9 +329,29 @@ void tgc_resume(tgc_t *gc) {
   gc->paused = 0;
 }
 
+static uint64_t tgc_now_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 void tgc_run(tgc_t *gc) {
+  /*
+   * Timed around both halves. Marking and sweeping are both inside the
+   * stop, which is the honest boundary for this collector: it does not
+   * resume the world between them. Metrics added by this project; see
+   * tgc.h.
+   */
+  uint64_t started = tgc_now_ns();
+
   tgc_mark(gc);
   tgc_sweep(gc);
+
+  uint64_t took = tgc_now_ns() - started;
+  gc->bench_collections++;
+  if (took > gc->bench_pause_max_ns) {
+    gc->bench_pause_max_ns = took;
+  }
 }
 
 static void *tgc_add(
@@ -416,6 +439,9 @@ void *tgc_alloc_opt(tgc_t *gc, size_t size, int flags, void(*dtor)(void*)) {
   void *ptr = malloc(size);
   if (ptr != NULL) {
     ptr = tgc_add(gc, ptr, size, flags, dtor);
+    /* Metric added by this project; see tgc.h. Counted on success, so the
+     * number agrees with the other backends' counts. */
+    gc->bench_allocations++;
   }
   return ptr;
 }

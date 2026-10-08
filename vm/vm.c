@@ -213,6 +213,7 @@ CvmVmStats cvm_vm_stats(void) {
         }
     }
     stats.objects_live = live;
+    stats.pause_max_ns = cvm_gc_counters_pause_max_ns();
 
     return stats;
 }

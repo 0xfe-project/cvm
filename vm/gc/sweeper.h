@@ -84,7 +84,20 @@
 #define CVM_SWEEP_BATCH_SIZE 32
 
 /* Blocks a mutator sweeps when it cannot allocate. */
-#define CVM_LAZY_SWEEP_MIN_BATCH 1
+/*
+ * 16, matching the reference's LAZY_SWEEP_MIN_BATCH.
+ *
+ * It was 1 for most of this project's life, and the number was load-bearing
+ * in the worst way: every allocation failure drove the sweep forward by one
+ * 32 KiB block, and each of those single blocks also paid for a coalescing
+ * pass and a finish attempt. Against a deferred sweep that is exactly what
+ * makes the sweep fall behind — the collector completes a collection, hands
+ * the sweep to whoever allocates next, and that thread's one-block-at-a-time
+ * driving never catches up before the next collection starts. The visible
+ * numbers were a heap that grew without bound and live-object counts seven
+ * trees high on a one-tree workload.
+ */
+#define CVM_LAZY_SWEEP_MIN_BATCH 16
 
 /*
  * Free runs shorter than this are accumulated locally and pushed in one
@@ -185,6 +198,14 @@ bool cvm_sweep_try_finish(CvmHeap* heap);
  * the symptom was a block described twice in the same round.
  */
 bool cvm_sweep_any_in_flight(CvmHeap* heap);
+
+/*
+ * Drive the sweep to its end, or to the point where this thread can do no
+ * more. This is what an allocator that cannot allocate and cannot grow must
+ * do instead of dying: commix waits for the sweep the same way, and it is
+ * the difference between "the heap is full" and "the heap is full right now".
+ */
+void cvm_sweep_finish(CvmHeap* heap, str const where);
 
 /*
  * Whether a sweep handoff has been posted and not yet consumed — a worker on

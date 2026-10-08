@@ -210,6 +210,18 @@ CVM_INLINE void cvm_stats_record(CvmStats* stats, CvmEventType type, u64 start_n
 typedef struct CvmGcCounters {
     _Atomic u64 collections;
     _Atomic u64 collection_ns;
+
+    /*
+     * The longest single collection so far.
+     *
+     * Kept because a total and a maximum answer different questions and only
+     * one of them is about pauses: a collector that stops the world for 40 ms
+     * once and 1 ms forty times has the same total as one that stops it for
+     * 5 ms eight times, and only the first is a problem for a program with a
+     * frame deadline. Updated with a compare-exchange loop because two
+     * threads can finish collections concurrently.
+     */
+    _Atomic u64 pause_max_ns;
 } CvmGcCounters;
 
 void cvm_gc_counters_record_collection(u64 start_ns, u64 end_ns);
@@ -217,5 +229,6 @@ void cvm_gc_counters_record_collection(u64 start_ns, u64 end_ns);
 /* Convenience for tests and for the exit path. */
 u64 cvm_gc_counters_collections(void);
 u64 cvm_gc_counters_collection_ns(void);
+u64 cvm_gc_counters_pause_max_ns(void);
 
 #endif /* CVM_STATS_H */

@@ -10,6 +10,7 @@
 
 #include "base/math.h"
 #include "base/types.h"
+#include "context.h"
 #include "gc/bytemap.h"
 #include "gc/layout.h"
 #include "gc/meta.h"
@@ -410,7 +411,25 @@ bool cvm_heap_should_grow(CvmHeap* heap, u64 mark_time_ns, u64 period_ns,
 }
 
 void cvm_heap_grow_if_needed(CvmHeap* heap) {
+    /*
+     * "Free" for the growth decision is free *plus* recycled: partially free
+     * blocks are available memory too, and not counting them is how the
+     * check used to conclude the heap was starved right after a sweep. The
+     * reference (commix Heap_shouldGrow) counts freeBlockCount +
+     * recycledBlockCount for exactly this reason; for most of this project's
+     * life we counted only fully free blocks, and the heap grew without
+     * bound in reply.
+     */
     u32 free_blocks = cvm_block_alloc_free_count(heap->block_alloc);
+
+    free_blocks += cvm_block_alloc_recycled_shared_count(heap->block_alloc);
+
+    cvm_threads_lock_read();
+    CVM_THREADS_FOREACH(node) {
+        free_blocks += atomic_load_explicit(&node->allocator.recycled_block_count,
+                                            memory_order_acquire);
+    }
+    cvm_threads_unlock_read();
 
     if (!cvm_heap_should_grow(heap, heap->mark.last_mark_ns, heap->mark.last_period_ns,
                               free_blocks)) {
