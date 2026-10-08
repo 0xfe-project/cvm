@@ -34,6 +34,7 @@
 
 #include <stdatomic.h>
 
+#include "base/list.h"
 #include "base/types.h"
 #include "cvm/gc.h"
 #include "gc/alloc.h"
@@ -50,7 +51,7 @@
  * sides so neither direction depends on the embedding offset.
  */
 typedef struct CvmThreadNode {
-    struct CvmThreadNode* next; /* registry link */
+    CvmList link; /* registry link */
 
     CvmVMContext ctx; /* embedded; ctx.owner points back at this node */
 
@@ -236,8 +237,10 @@ void cvm_threads_lock_read(void);
 void cvm_threads_unlock_read(void);
 
 CvmThreadNode* cvm_threads_head(void);
+CvmThreadNode* cvm_threads_next(CvmThreadNode* node);
 
 #define CVM_THREADS_FOREACH(node)                                                      \
-    for (CvmThreadNode* node = cvm_threads_head(); node != NULL; node = node->next)
+    for (CvmThreadNode* node = cvm_threads_head(); node != NULL;                       \
+         node = cvm_threads_next(node))
 
 #endif /* CVM_CONTEXT_H */

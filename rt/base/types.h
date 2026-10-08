@@ -39,6 +39,23 @@ typedef double f64;
 typedef size_t usize;
 typedef ptrdiff_t isize;
 
+/*
+ * A Unicode code point.
+ *
+ * u32, and not u16, because the two are different things and the
+ * difference is where bugs live. A code point runs up to U+10FFFF, which
+ * does not fit in 16 bits; a 16-bit "code unit" is either a whole BMP
+ * character or one half of a surrogate pair, and a surrogate half is not
+ * a code point at all. Giving them separate types is what stops a
+ * string's UTF-16 unit from being passed where a rune is expected.
+ *
+ * This is the project's only spelling of a code point: utf8.h decodes
+ * into it, a string's code point accessors return it, libunicode
+ * classifies it, and the regex engine matches it. A rune is a value, not
+ * a cursor; nothing here is NUL-terminated or index-addressed.
+ */
+typedef u32 rune;
+
 /* A word: the unit the GC thinks in. Pointer-sized, unsigned. */
 typedef uintptr_t word;
 typedef intptr_t sword;

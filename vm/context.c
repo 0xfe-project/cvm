@@ -4,10 +4,15 @@
  * The thread registry. See vm/context.h for what this deliberately does
  * not do, compared to the reference.
  *
- * The registry is a singly-linked list with prepend on attach and unlink
- * on detach, guarded by a reader-writer lock. Prepend makes the common
- * case — a thread appearing — a single pointer store, and the walk order
- * does not matter because a collection visits every node.
+ * The registry is an intrusive doubly-linked list — see base/list.h for
+ * the shape — guarded by a reader-writer lock. Attach prepends, so a
+ * thread appearing costs a constant number of pointer stores, and detach
+ * unlinks in constant time. The doubly-linked form is what buys the
+ * second of those: a singly-linked registry has to walk to find the
+ * predecessor of the node being removed, and threads come and go for the
+ * whole life of the process.
+ *
+ * The walk order carries no meaning: a collection visits every node.
  */
 
 #include "context.h"
@@ -32,7 +37,11 @@
 static void cvm_threads_lock_write(void);
 static void cvm_threads_unlock_write(void);
 
-static CvmThreadNode* registry_head = NULL;
+/*
+ * The registry. `registry` is a sentinel head, not a node: it is never
+ * handed out and never visited by iteration.
+ */
+static CvmList registry = CVM_LIST_HEAD_INIT(registry);
 static RtRwlock registry_lock;
 static _Atomic u32 registry_count = 0;
 static _Atomic bool registry_ready = false;
@@ -55,7 +64,7 @@ void cvm_threads_init(void) {
     if (!rt_rwlock_init(&registry_lock)) {
         rt_fatal(STR_LITERAL("could not create the thread registry lock"));
     }
-    registry_head = NULL;
+    cvm_list_init(&registry);
     atomic_store(&registry_count, 0u);
 }
 
@@ -100,7 +109,7 @@ bool cvm_thread_attach(void) {
     node->id = rt_thread_id();
     atomic_store(&node->state, (u32)CVM_THREAD_MANAGED);
     atomic_store(&node->parked, false);
-    node->next = NULL;
+    cvm_list_unlink(&node->link);
 
     /*
      * Every field, including the ones only one build configuration uses.
@@ -137,8 +146,7 @@ bool cvm_thread_attach(void) {
     cvm_safepoint_trap_attach(node);
 
     cvm_threads_lock_write();
-    node->next = registry_head;
-    registry_head = node;
+    cvm_list_add(&node->link, &registry);
     cvm_threads_unlock_write();
 
     atomic_fetch_add(&registry_count, 1u);
@@ -189,20 +197,14 @@ void cvm_thread_detach(void) {
 
     cvm_threads_lock_write();
 
-    if (registry_head == node) {
-        registry_head = node->next;
-    } else {
-        CvmThreadNode* prev = registry_head;
-        while (prev != NULL && prev->next != node) {
-            prev = prev->next;
-        }
-        if (prev != NULL) {
-            prev->next = node->next;
-        }
-        /* If prev is NULL the node was not in the list, which means
-         * detach raced with something that already removed it. Nothing to
-         * unlink, and the free below is still correct because we own the
-         * node. */
+    /*
+     * Detach may race with something that already removed the node, in
+     * which case its link is NULLed and there is nothing left to unlink.
+     * The free below is still correct either way, because this thread owns
+     * the node.
+     */
+    if (cvm_list_is_linked(&node->link)) {
+        cvm_list_del(&node->link);
     }
 
     cvm_threads_unlock_write();
@@ -339,7 +341,14 @@ void cvm_threads_unlock_read(void) {
 }
 
 CvmThreadNode* cvm_threads_head(void) {
-    return registry_head;
+    CvmList* first = cvm_list_first(&registry);
+    return first == NULL ? NULL : cvm_list_entry(first, CvmThreadNode, link);
+}
+
+CvmThreadNode* cvm_threads_next(CvmThreadNode* node) {
+    CvmList* next = node->link.next;
+    /* The sentinel is the end of the list, and is not a node. */
+    return next == &registry ? NULL : cvm_list_entry(next, CvmThreadNode, link);
 }
 
 /* ------------------------------------------------------------------ */
