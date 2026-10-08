@@ -115,6 +115,15 @@
 #define CVM_MARK_MIN_PACKETS_PER_THREAD 3u
 #define CVM_MARK_SPAWN_THREADS_MIN_PACKETS (2u * CVM_MARK_MIN_PACKETS_PER_THREAD)
 
+/*
+ * How many marker threads to wake before any backlog exists.
+ *
+ * Small on purpose: the scaling above brings more as packets accumulate, and
+ * the measurement behind this is that waking the whole pool buys nothing
+ * over waking a few while costing a wake and a context switch per thread.
+ */
+#define CVM_MARK_INITIAL_WORKERS 2u
+
 /* ------------------------------------------------------------------ */
 /* heap growth policy                                                  */
 /* ------------------------------------------------------------------ */
