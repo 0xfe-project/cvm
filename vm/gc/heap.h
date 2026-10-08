@@ -334,7 +334,15 @@ CVM_INLINE LineMeta* cvm_heap_line_meta(CvmHeap const* heap, u32 block) {
 
 /* Is this address inside the heap's usable window? */
 CVM_INLINE bool cvm_heap_contains(CvmHeap const* heap, u8 const* p) {
-    u8* end = atomic_load_explicit(&heap->heap_end, memory_order_acquire);
+    /*
+     * Relaxed, and it matters. This runs once per pointer field of every
+     * object the marker visits — the hottest read in the collector — and an
+     * acquire load on AArch64 is `ldar`, which is several times the cost of a
+     * plain one. Nothing here needs the ordering: the bound only grows, so a
+     * stale value is conservative, and the marking that calls this runs with
+     * the world stopped, when no growth can be in flight.
+     */
+    u8* end = atomic_load_explicit(&heap->heap_end, memory_order_relaxed);
     return p >= heap->heap_start && p < end;
 }
 
