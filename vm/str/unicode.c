@@ -45,6 +45,8 @@
 #include "base/types.h"
 #include "cvm/builder.h"
 #include "cvm/str.h"
+#include <stdarg.h>
+
 #include "base/sort.h"
 #include "mem.h"
 #include "rt.h"
@@ -1256,6 +1258,245 @@ i32 cvm_unicode_general_category(CvmCharRange* cr, const u8* gc_name) {
         gc_mask = unicode_gc_mask_table[gc_idx - UNICODE_GC_LC];
     }
     return unicode_general_category1(cr, gc_mask);
+}
+
+/* ------------------------------------------------------------------ */
+/* binary properties, by name                                          */
+/* ------------------------------------------------------------------ */
+
+static i32 unicode_prop1(CvmCharRange* cr, i32 prop_idx) {
+    const u8 *p, *p_end;
+    u32 c, c0, b, bit;
+
+    p = unicode_prop_table[prop_idx];
+    p_end = p + unicode_prop_len_table[prop_idx];
+    c = 0;
+    bit = 0;
+    while (p < p_end) {
+        c0 = c;
+        b = *p++;
+        if (b < 64) {
+            c += (b >> 3) + 1;
+            if (bit) {
+                if (cvm_cr_add_interval(cr, c0, c))
+                    return -1;
+            }
+            bit ^= 1;
+            c0 = c;
+            c += (b & 7) + 1;
+        } else if (b >= 0x80) {
+            c += b - 0x80 + 1;
+        } else if (b < 0x60) {
+            c += (((b - 0x40) << 8) | p[0]) + 1;
+            p++;
+        } else {
+            c += (((b - 0x60) << 16) | (p[0] << 8) | p[1]) + 1;
+            p += 2;
+        }
+        if (bit) {
+            if (cvm_cr_add_interval(cr, c0, c))
+                return -1;
+        }
+        bit ^= 1;
+    }
+    return 0;
+}
+typedef enum {
+    POP_GC,
+    POP_PROP,
+    POP_CASE,
+    POP_UNION,
+    POP_INTER,
+    POP_XOR,
+    POP_INVERT,
+    POP_END,
+} PropOPEnum;
+
+#define POP_STACK_LEN_MAX 4
+
+static i32 unicode_prop_ops(CvmCharRange* cr, ...) {
+    va_list ap;
+    CvmCharRange stack[POP_STACK_LEN_MAX];
+    i32 stack_len, op, ret, i;
+    u32 a;
+
+    va_start(ap, cr);
+    stack_len = 0;
+    for (;;) {
+        op = va_arg(ap, i32);
+        switch (op) {
+        case POP_GC:
+            cvm_assert(stack_len < POP_STACK_LEN_MAX);
+            a = va_arg(ap, i32);
+            cvm_cr_init(&stack[stack_len++], cr->alloc);
+            if (unicode_general_category1(&stack[stack_len - 1], a))
+                goto fail;
+            break;
+        case POP_PROP:
+            cvm_assert(stack_len < POP_STACK_LEN_MAX);
+            a = va_arg(ap, i32);
+            cvm_cr_init(&stack[stack_len++], cr->alloc);
+            if (unicode_prop1(&stack[stack_len - 1], a))
+                goto fail;
+            break;
+        case POP_CASE:
+            cvm_assert(stack_len < POP_STACK_LEN_MAX);
+            a = va_arg(ap, i32);
+            cvm_cr_init(&stack[stack_len++], cr->alloc);
+            if (unicode_case1(&stack[stack_len - 1], a))
+                goto fail;
+            break;
+        case POP_UNION:
+        case POP_INTER:
+        case POP_XOR: {
+            CvmCharRange *cr1, *cr2, *cr3;
+            cvm_assert(stack_len >= 2);
+            cvm_assert(stack_len < POP_STACK_LEN_MAX);
+            cr1 = &stack[stack_len - 2];
+            cr2 = &stack[stack_len - 1];
+            cr3 = &stack[stack_len++];
+            cvm_cr_init(cr3, cr->alloc);
+            if (cvm_cr_op(cr3, cr1->points, cr1->len, cr2->points, cr2->len,
+                          op - POP_UNION + CVM_CR_OP_UNION))
+                goto fail;
+            cvm_cr_free(cr1);
+            cvm_cr_free(cr2);
+            *cr1 = *cr3;
+            stack_len -= 2;
+        } break;
+        case POP_INVERT:
+            cvm_assert(stack_len >= 1);
+            if (cvm_cr_invert(&stack[stack_len - 1]))
+                goto fail;
+            break;
+        case POP_END:
+            goto done;
+        default:
+            rt_abort();
+        }
+    }
+done:
+    va_end(ap);
+    cvm_assert(stack_len == 1);
+    ret = cvm_cr_copy(cr, &stack[0]);
+    cvm_cr_free(&stack[0]);
+    return ret;
+fail:
+    va_end(ap);
+    for (i = 0; i < stack_len; i++)
+        cvm_cr_free(&stack[i]);
+    return -1;
+}
+
+i32 cvm_unicode_prop(CvmCharRange* cr, const u8* prop_name) {
+    i32 prop_idx, ret;
+
+    prop_idx = unicode_find_name(unicode_prop_name_table, prop_name);
+    if (prop_idx < 0)
+        return -2;
+    prop_idx += UNICODE_PROP_ASCII_Hex_Digit;
+
+    ret = 0;
+    switch (prop_idx) {
+    case UNICODE_PROP_ASCII:
+        if (cvm_cr_add_interval(cr, 0x00, 0x7f + 1))
+            return -1;
+        break;
+    case UNICODE_PROP_Any:
+        if (cvm_cr_add_interval(cr, 0x00000, 0x10ffff + 1))
+            return -1;
+        break;
+    case UNICODE_PROP_Assigned:
+        ret = unicode_prop_ops(cr, POP_GC, M(Cn), POP_INVERT, POP_END);
+        break;
+    case UNICODE_PROP_Math:
+        ret = unicode_prop_ops(cr, POP_GC, M(Sm), POP_PROP, UNICODE_PROP_Other_Math,
+                               POP_UNION, POP_END);
+        break;
+    case UNICODE_PROP_Lowercase:
+        ret = unicode_prop_ops(cr, POP_GC, M(Ll), POP_PROP,
+                               UNICODE_PROP_Other_Lowercase, POP_UNION, POP_END);
+        break;
+    case UNICODE_PROP_Uppercase:
+        ret = unicode_prop_ops(cr, POP_GC, M(Lu), POP_PROP,
+                               UNICODE_PROP_Other_Uppercase, POP_UNION, POP_END);
+        break;
+    case UNICODE_PROP_Cased:
+        ret = unicode_prop_ops(cr, POP_GC, M(Lu) | M(Ll) | M(Lt), POP_PROP,
+                               UNICODE_PROP_Other_Uppercase, POP_UNION, POP_PROP,
+                               UNICODE_PROP_Other_Lowercase, POP_UNION, POP_END);
+        break;
+    case UNICODE_PROP_Alphabetic:
+        ret = unicode_prop_ops(cr, POP_GC,
+                               M(Lu) | M(Ll) | M(Lt) | M(Lm) | M(Lo) | M(Nl), POP_PROP,
+                               UNICODE_PROP_Other_Uppercase, POP_UNION, POP_PROP,
+                               UNICODE_PROP_Other_Lowercase, POP_UNION, POP_PROP,
+                               UNICODE_PROP_Other_Alphabetic, POP_UNION, POP_END);
+        break;
+    case UNICODE_PROP_Grapheme_Base:
+        ret = unicode_prop_ops(cr, POP_GC,
+                               M(Cc) | M(Cf) | M(Cs) | M(Co) | M(Cn) | M(Zl) | M(Zp) |
+                                   M(Me) | M(Mn),
+                               POP_PROP, UNICODE_PROP_Other_Grapheme_Extend, POP_UNION,
+                               POP_INVERT, POP_END);
+        break;
+    case UNICODE_PROP_Grapheme_Extend:
+        ret = unicode_prop_ops(cr, POP_GC, M(Me) | M(Mn), POP_PROP,
+                               UNICODE_PROP_Other_Grapheme_Extend, POP_UNION, POP_END);
+        break;
+    case UNICODE_PROP_XID_Start:
+        ret = unicode_prop_ops(
+            cr, POP_GC, M(Lu) | M(Ll) | M(Lt) | M(Lm) | M(Lo) | M(Nl), POP_PROP,
+            UNICODE_PROP_Other_ID_Start, POP_UNION, POP_PROP,
+            UNICODE_PROP_Pattern_Syntax, POP_PROP, UNICODE_PROP_Pattern_White_Space,
+            POP_UNION, POP_PROP, UNICODE_PROP_XID_Start1, POP_UNION, POP_INVERT,
+            POP_INTER, POP_END);
+        break;
+    case UNICODE_PROP_XID_Continue:
+        ret = unicode_prop_ops(cr, POP_GC,
+                               M(Lu) | M(Ll) | M(Lt) | M(Lm) | M(Lo) | M(Nl) | M(Mn) |
+                                   M(Mc) | M(Nd) | M(Pc),
+                               POP_PROP, UNICODE_PROP_Other_ID_Start, POP_UNION,
+                               POP_PROP, UNICODE_PROP_Other_ID_Continue, POP_UNION,
+                               POP_PROP, UNICODE_PROP_Pattern_Syntax, POP_PROP,
+                               UNICODE_PROP_Pattern_White_Space, POP_UNION, POP_PROP,
+                               UNICODE_PROP_XID_Continue1, POP_UNION, POP_INVERT,
+                               POP_INTER, POP_END);
+        break;
+    case UNICODE_PROP_Changes_When_Uppercased:
+        ret = unicode_case1(cr, CASE_U);
+        break;
+    case UNICODE_PROP_Changes_When_Lowercased:
+        ret = unicode_case1(cr, CASE_L);
+        break;
+    case UNICODE_PROP_Changes_When_Casemapped:
+        ret = unicode_case1(cr, CASE_U | CASE_L | CASE_F);
+        break;
+    case UNICODE_PROP_Changes_When_Titlecased:
+        ret = unicode_prop_ops(cr, POP_CASE, CASE_U, POP_PROP,
+                               UNICODE_PROP_Changes_When_Titlecased1, POP_XOR, POP_END);
+        break;
+    case UNICODE_PROP_Changes_When_Casefolded:
+        ret = unicode_prop_ops(cr, POP_CASE, CASE_F, POP_PROP,
+                               UNICODE_PROP_Changes_When_Casefolded1, POP_XOR, POP_END);
+        break;
+    case UNICODE_PROP_Changes_When_NFKC_Casefolded:
+        ret = unicode_prop_ops(cr, POP_CASE, CASE_F, POP_PROP,
+                               UNICODE_PROP_Changes_When_NFKC_Casefolded1, POP_XOR,
+                               POP_END);
+        break;
+        /* we use the existing tables */
+    case UNICODE_PROP_ID_Continue:
+        ret = unicode_prop_ops(cr, POP_PROP, UNICODE_PROP_ID_Start, POP_PROP,
+                               UNICODE_PROP_ID_Continue1, POP_XOR, POP_END);
+        break;
+    default:
+        if ((usize)prop_idx >= countof(unicode_prop_table))
+            return -2;
+        ret = unicode_prop1(cr, prop_idx);
+        break;
+    }
+    return ret;
 }
 
 /* ------------------------------------------------------------------ */

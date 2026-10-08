@@ -256,6 +256,20 @@ i32 cvm_unicode_script(CvmCharRange* cr, u8 const* script_name, bool is_ext);
 i32 cvm_unicode_general_category(CvmCharRange* cr, u8 const* gc_name);
 
 /*
+ * `\p{...}` proper: the binary properties — Alphabetic, ASCII, Math, Cased,
+ * Changes_When_Lowercased, the ID_Start family, and the rest of the table. The
+ * names are the standard's, and the ones that are a union of a general category
+ * with something else are built with the same range operations a caller could
+ * have used.
+ *
+ * Not here: the *properties of strings* — `\p{RGI_Emoji}` and the other names a
+ * v-flag pattern can use, which describe sequences rather than characters and so
+ * are not a range at all. Upstream has them behind a separate entry point, and so
+ * will this, when the regex engine that needs them lands.
+ */
+i32 cvm_unicode_prop(CvmCharRange* cr, u8 const* prop_name);
+
+/*
  * Case-fold a character set, for the regex engine's case-insensitive matching:
  * every character in the set gains the characters it folds to and from. `full`
  * is the same flag cvm_unicode_canonicalize takes, and has to be the same value

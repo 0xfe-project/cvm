@@ -628,6 +628,73 @@ TEST folding_a_range_adds_the_cases_it_matches(void) {
     PASS();
 }
 
+static bool prop_has(char const* name, rune c) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+    if (cvm_unicode_prop(&cr, (u8 const*)name) != 0) {
+        cvm_cr_free(&cr);
+        return false;
+    }
+    bool found = range_contains(&cr, c);
+    cvm_cr_free(&cr);
+    return found;
+}
+
+static i32 prop_result(char const* name) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+    CvmCharRange cr;
+    cvm_cr_init(&cr, alloc);
+    i32 ret = cvm_unicode_prop(&cr, (u8 const*)name);
+    cvm_cr_free(&cr);
+    return ret;
+}
+
+TEST binary_properties_answer_by_name(void) {
+    /* Alphabetic is the letters, in every script */
+    ASSERT(prop_has("Alphabetic", 'A'));
+    ASSERT(prop_has("Alphabetic", 'a'));
+    ASSERT(prop_has("Alphabetic", 0x00E9u));
+    ASSERT(prop_has("Alphabetic", 0x4E2Du));
+    ASSERT_FALSE(prop_has("Alphabetic", '1'));
+    ASSERT_FALSE(prop_has("Alphabetic", ' '));
+
+    /* ASCII is exactly the range, and 0x80 is not in it */
+    ASSERT(prop_has("ASCII", 'A'));
+    ASSERT(prop_has("ASCII", 0x7Fu));
+    ASSERT_FALSE(prop_has("ASCII", 0x80u));
+
+    /* Any is the whole space, and Assigned is everything that has a category
+     * other than Cn — U+0378 is unassigned and is the usual probe */
+    ASSERT(prop_has("Any", 0));
+    ASSERT(prop_has("Any", 0x10FFFFu));
+    ASSERT(prop_has("Assigned", 0x4E2Du));
+    ASSERT_FALSE(prop_has("Assigned", 0x0378u));
+
+    /* the ones built by combining a general category with another property */
+    /* Math is Sm plus the Other_Math derivations: the operator characters, and
+     * not the letters that merely look mathematical */
+    ASSERT(prop_has("Math", '+'));
+    ASSERT(prop_has("Math", 0x2211u)); /* N-ARY SUMMATION */
+    ASSERT_FALSE(prop_has("Math", 'a'));
+    ASSERT_FALSE(prop_has("Math", 0x03C0u)); /* GREEK SMALL LETTER PI is Ll */
+
+    ASSERT(prop_has("Cased", 'A'));
+    ASSERT(prop_has("Cased", 'a'));
+    ASSERT_FALSE(prop_has("Cased", '1'));
+
+    ASSERT(prop_has("White_Space", ' '));
+    ASSERT(prop_has("White_Space", 0x00A0u));
+
+    /* a property that is a change under a case operation, not a set of letters */
+    ASSERT(prop_has("Changes_When_Lowercased", 'A'));
+    ASSERT_FALSE(prop_has("Changes_When_Lowercased", 'a'));
+
+    /* and a name that is not a property is refused, distinctly */
+    ASSERT_EQ_FMT(-2, prop_result("NotAProperty"), "%d");
+    PASS();
+}
+
 SUITE(unicode_suite) {
     RUN_TEST(ascii_case_mapping);
     RUN_TEST(case_mapping_beyond_ascii);
@@ -647,6 +714,7 @@ SUITE(unicode_suite) {
     RUN_TEST(general_categories_are_the_ones_the_names_say);
     RUN_TEST(scripts_are_the_sets_the_names_say);
     RUN_TEST(folding_a_range_adds_the_cases_it_matches);
+    RUN_TEST(binary_properties_answer_by_name);
 }
 
 GREATEST_MAIN_DEFS();
