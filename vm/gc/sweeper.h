@@ -174,6 +174,25 @@ bool cvm_sweep_drive(CvmHeap* heap, CvmThreadNode* node, u32 max_count);
  */
 bool cvm_sweep_try_finish(CvmHeap* heap);
 
+/*
+ * Whether any sweep is in flight, over every kind of sweeper: a registered
+ * thread inside a batch, a worker inside a batch, or a worker that has been
+ * handed the sweep and has not arrived yet.
+ *
+ * One function because there is one question, and three places that have to
+ * agree on the answer: before finishing a sweep, before beginning a new one,
+ * and before giving up on finishing the current one. They disagreed once, and
+ * the symptom was a block described twice in the same round.
+ */
+bool cvm_sweep_any_in_flight(CvmHeap* heap);
+
+/*
+ * Whether a sweep handoff has been posted and not yet consumed — a worker on
+ * its way, which blocks *finishing* a sweep and does not block beginning one.
+ * See the comment on the definition for why those are two questions.
+ */
+bool cvm_sweep_handoff_pending(CvmHeap* heap);
+
 #if defined(CVM_DEBUG)
 /*
  * Reset every block's debug state to "must be swept", which is what the

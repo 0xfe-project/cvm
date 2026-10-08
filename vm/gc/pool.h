@@ -65,6 +65,8 @@ typedef enum CvmGcPhase {
     CVM_GC_MARK = 0x1,
     CVM_GC_NULLIFY = 0x2,
     CVM_GC_SWEEP = 0x3,
+    /* Not a phase the world stops for: "there is a run waiting to close". */
+    CVM_GC_COALESCE = 0x4,
 } CvmGcPhase;
 
 typedef struct CvmGcThread {
@@ -76,6 +78,21 @@ typedef struct CvmGcThread {
 
     /* How far this thread has swept, for the coalescing bound. */
     _Atomic u32 sweep_cursor_done;
+
+    /*
+     * Whether this thread is inside a sweep batch right now.
+     *
+     * Separate from `active`, and it has to be. `active` says a worker is
+     * between waking and finishing *some* phase, and a worker can be in that
+     * window tracing a grey packet while a collector asks whether a sweep is
+     * finished — which would then answer yes to a sweep nobody is performing.
+     * The first version of parallel sweeping asked `active`, and
+     * cvm_sweep_begin's assertion fired within a handful of runs.
+     *
+     * Registered threads answer this from CvmThreadNode.sweeping; workers are
+     * not registered, so they carry their own.
+     */
+    _Atomic bool sweeping;
 
     RtThread handle;
 
@@ -96,6 +113,29 @@ typedef struct CvmGcPool {
 
     /* Counts of threads to run. See the note above. */
     RtSem start;
+
+    /*
+     * Handoffs posted and not yet consumed.
+     *
+     * The piece the "is any sweep in flight" question needs, and neither of
+     * the two obvious answers is enough. A worker that has not woken yet holds
+     * no claim and has `sweeping` clear, so asking about threads answers "no
+     * sweep in flight" — which is the dangerous direction: the collector
+     * declares the sweep finished, or stops trying to finish it, and the
+     * worker arrives to sweep a heap that has already moved on.
+     *
+     * It counts handoffs rather than sweep handoffs, because the semaphore
+     * does not type its posts: a wake for sweeping and a wake for marking are
+     * the same increment, and a thread cannot say which one it consumed. What
+     * makes the number usable anyway is that it is retired once per consumed
+     * post whatever the worker then goes on to do, so it always drains,
+     * combined with the phase — a pending post can only turn into sweeping
+     * while the phase still says sweep, which is the qualifier that keeps a
+     * handoff overtaken by a new collection from being counted forever. That
+     * matters, because a count that can be wedged above zero turns
+     * "is the sweep over" into "never".
+     */
+    _Atomic u32 wake_pends;
 
     /* Set to make every thread leave its loop and exit. */
     _Atomic bool shutdown;

@@ -32,11 +32,13 @@ opportunistic evacuation would address — and because nothing moves objects,
 there is no pinning either. The flag for it was removed rather than left in
 the header describing behaviour no code implements.
 
-What is not, and is easy to mistake for present: parallel sweeping. The
-worker pool exists and marks in parallel, and `pool.c` has a `CVM_GC_SWEEP`
-case, but the collector never wakes workers into it — so sweeping is
-single-threaded today. The case is reachable code that nothing reaches,
-which is the shape of a feature that looks shipped.
+What is now wired rather than merely present: sweeping by the worker pool.
+`pool.c` had a `CVM_GC_SWEEP` case that nothing reached, and the code behind
+it assumed a mutator was always the sweeper — it read the bytemap out of the
+sweeping thread's allocator, so the first time a worker got there it followed
+a NULL node. Sweeping is now handed to the pool after the world resumes, the
+collector never waits for it, and the metadata a sweep walks comes from the
+heap, which is where it lives.
 
 ## Two safepoint mechanisms
 

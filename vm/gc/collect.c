@@ -182,6 +182,51 @@ static void prepare_for_sweep(CvmHeap* heap) {
     cvm_sweep_begin(heap);
 }
 
+/*
+ * Drive the sweep to its end, or to the point where this thread can do no
+ * more.
+ *
+ * Used from inside a collection, where the world is stopped, and from just
+ * after one, where it is not — which is why "am I the only sweeper?" cannot
+ * be assumed and "no progress" cannot simply end the loop. A worker holding
+ * the remaining work makes the cursor stand still while it works, and a
+ * handoff that has been posted but not consumed stands the cursor still
+ * before that. Breaking on either would abandon a sweep that is perfectly
+ * alive: the visible symptom was a collection that reported most of its heap
+ * still in use, because the blocks had not been swept rather than because
+ * they held live objects.
+ *
+ * So the escape hatch is conditioned on there being nobody who could still
+ * be working. When there is, yielding is not hope: a sweep batch is a bounded
+ * loop and a handoff is consumed by a thread already blocked on a semaphore.
+ */
+static void finish_sweep(CvmHeap* heap, str const where) {
+    while (!cvm_sweep_is_done(heap)) {
+        u32 cursor_before = atomic_load(&heap->sweep.cursor);
+        u32 coalesce_before = atomic_load(&heap->sweep.coalesce_done);
+
+        cvm_sweep_drive(heap, cvm_thread_node(), CVM_SWEEP_BATCH_SIZE);
+
+        if (atomic_load(&heap->sweep.cursor) == cursor_before &&
+            atomic_load(&heap->sweep.coalesce_done) == coalesce_before) {
+            if (cvm_sweep_any_in_flight(heap) || cvm_sweep_handoff_pending(heap)) {
+                rt_thread_yield();
+                continue;
+            }
+
+            CVM_LOG_DEBUG(m) {
+                fmt_lit(&m.fmt, "sweep left unfinished ");
+                fmt_str(&m.fmt, where);
+                fmt_lit(&m.fmt, ": cursor ");
+                fmt_u32(&m.fmt, atomic_load(&heap->sweep.cursor));
+                fmt_lit(&m.fmt, "/");
+                fmt_u32(&m.fmt, heap->sweep.limit);
+            }
+            break;
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* the driver                                                          */
 /* ------------------------------------------------------------------ */
@@ -210,22 +255,7 @@ bool cvm_gc_collect(CvmHeap* heap) {
      * waiting would hang if no mutator had any reason to sweep. The world
      * is stopped, so driving it is as cheap as it can be.
      */
-    while (!cvm_sweep_is_done(heap)) {
-        u32 cursor_before = atomic_load(&heap->sweep.cursor);
-        u32 coalesce_before = atomic_load(&heap->sweep.coalesce_done);
-
-        cvm_sweep_drive(heap, cvm_thread_node(), CVM_SWEEP_BATCH_SIZE);
-
-        if (atomic_load(&heap->sweep.cursor) == cursor_before &&
-            atomic_load(&heap->sweep.coalesce_done) == coalesce_before) {
-            /*
-             * No progress is possible from here. Break rather than spin,
-             * and let the sweep that is left be finished by the mutators
-             * that are about to resume.
-             */
-            break;
-        }
-    }
+    finish_sweep(heap, STR_LITERAL("before marking"));
 
     /*
      * Now that any unfinished sweep has been driven to completion, the
@@ -332,6 +362,38 @@ bool cvm_gc_collect(CvmHeap* heap) {
     cvm_safepoint_release();
     u64 end_ns = rt_time_nanos();
 
+    /*
+     * Hand the sweep to the pool.
+     *
+     * After the release, deliberately, and not through phase_run: the point
+     * of a deferred sweep is that nobody waits for it, and phase_run's
+     * contract is to wait for every worker to go idle. Waking them inside the
+     * stop would put the sweep's cost into the pause, which is the one thing
+     * this design exists to avoid.
+     *
+     * The number woken is bounded by the work rather than by the pool. Each
+     * handoff costs a semaphore post and a thread wakeup, which is real
+     * money next to a batch of 32 blocks, so waking seven threads to look at
+     * two batches makes the sweep slower for everyone, including the mutators
+     * that would have swept it themselves on the way back from an allocation.
+     *
+     * Workers do not finish the sweep — only its batches. Deciding that the
+     * sweep is over means the coalescing pass has run and the post-sweep
+     * bookkeeping is done, and that is the collector's or a mutator's job,
+     * because a worker that decided it would be a thread with the least
+     * information about the heap making the call with the widest consequences.
+     */
+    if (heap->pool != NULL) {
+        u32 swept = atomic_load(&heap->sweep.cursor);
+        u32 left = (heap->sweep.limit > swept) ? heap->sweep.limit - swept : 0;
+        u32 batches = left / CVM_SWEEP_BATCH_SIZE;
+
+        if (batches >= 2) {
+            cvm_pool_wake(heap->pool, CVM_GC_SWEEP,
+                          (batches < worker_count) ? batches : worker_count);
+        }
+    }
+
     last_collection = (CvmCollectionStats){
         .start_ns = start_ns,
         .end_ns = end_ns,
@@ -372,23 +434,5 @@ bool cvm_gc_collect(CvmHeap* heap) {
  */
 void cvm_gc_collect_and_finish(CvmHeap* heap) {
     cvm_gc_collect(heap);
-
-    /*
-     * Drive the sweep to the end. cvm_sweep_drive's return value says
-     * whether the sweep is finished, not whether this call made progress,
-     * so the loop tests the state and breaks only on genuine lack of
-     * progress — which cannot happen here, since this thread is the only
-     * one sweeping, but is worth guarding against rather than spinning.
-     */
-    while (!cvm_sweep_is_done(heap)) {
-        u32 cursor_before = atomic_load(&heap->sweep.cursor);
-        u32 coalesce_before = atomic_load(&heap->sweep.coalesce_done);
-
-        cvm_sweep_drive(heap, cvm_thread_node(), CVM_SWEEP_BATCH_SIZE);
-
-        if (atomic_load(&heap->sweep.cursor) == cursor_before &&
-            atomic_load(&heap->sweep.coalesce_done) == coalesce_before) {
-            break;
-        }
-    }
+    finish_sweep(heap, STR_LITERAL("after the collection"));
 }

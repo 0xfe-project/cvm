@@ -262,12 +262,12 @@ TEST a_worker_has_a_buffer_of_its_own(void) {
     allocate_churn(4000, &keep);
     cvm_gc_collect_and_finish(heap());
 
-    for (u32 i = 0; i < pool->count; i++) {
-        /* Nothing asks a worker to shut down mid-run, so the test flushes
-         * by hand; a worker's own events would otherwise sit in its ring
-         * until it filled it. */
-        cvm_stats_flush(pool->threads[i].stats);
-    }
+    /*
+     * Workers flush their own buffers before sleeping, so their rows are in
+     * the file already. The test must not flush them: reading another thread's
+     * ring is a data race on that thread's buffer index, and ThreadSanitizer
+     * says so.
+     */
 
     static char csv[1 << 16];
     ASSERTm("the stats file was never written", recorded(csv, sizeof(csv)) > 0);

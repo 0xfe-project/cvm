@@ -160,9 +160,24 @@ static void sweep_line_with_finalizers(ObjectMeta* line_cursor, u8* line_start) 
  * allocator follows it to find the next run of free lines, so a block
  * with a few surviving objects still contributes its holes.
  */
-static u32 cvm_sweep_simple_block(CvmThreadNode* node, BlockMeta* block_meta,
-                                  u8* block_start, LineMeta* line_metas,
-                                  CvmSweepResult* result) {
+/*
+ * Sweep one simple block.
+ *
+ * The heap, not a thread, owns the metadata this walks: the bytemap and the
+ * block table are heap-level objects, and a thread's allocator only caches a
+ * pointer to them. Taking them from the thread was harmless while every
+ * sweeper was a mutator, and broke the moment a GC worker started sweeping
+ * without one — it read a bytemap pointer out of a NULL node. So `target` is
+ * now only about *ownership of the result*: which thread's recycled list the
+ * partially-free block lands on. It may be NULL, and the block is swept
+ * anyway. Skipping the sweep for want of an owner was the other shape of the
+ * same mistake: the block stays described as in use, and the symptom is a
+ * collection that reclaims nothing.
+ */
+static u32 cvm_sweep_simple_block(CvmHeap* heap, CvmThreadNode* target,
+                                  BlockMeta* block_meta, u8* block_start,
+                                  LineMeta* line_metas, CvmSweepResult* result) {
+    Bytemap* bytemap = heap->bytemap;
     cvm_assert(block_meta_debug_state(block_meta) == (u8)CVM_DBG_MUST_SWEEP);
 
     if (!block_meta_is_marked(block_meta)) {
@@ -173,20 +188,18 @@ static u32 cvm_sweep_simple_block(CvmThreadNode* node, BlockMeta* block_meta,
          * flag at all: it clears the metadata in one go and would never
          * look at an individual object.
          */
-        extract_finalizers_if_flagged(node->allocator.bytemap, block_meta, block_start,
+        extract_finalizers_if_flagged(bytemap, block_meta, block_start,
                                       block_end(block_start));
 
         block_meta_clear(block_meta);
         block_meta_set_debug_state(block_meta, CVM_DBG_FREE);
 
-        object_meta_clear_block(bytemap_get(node->allocator.bytemap, block_start));
+        object_meta_clear_block(bytemap_get(bytemap, block_start));
         return 1;
     }
 
     cvm_assert(block_meta_is_marked(block_meta));
     block_meta_unmark(block_meta);
-
-    Bytemap* bytemap = node->allocator.bytemap;
 
     /* Three cursors advancing together: line index, line metadata, and the
      * bytemap entry for the line's first slot. */
@@ -258,8 +271,15 @@ static u32 cvm_sweep_simple_block(CvmThreadNode* node, BlockMeta* block_meta,
         cvm_assert(block_meta_first_free_line(block_meta) >= 0);
         cvm_assert((i32)block_meta_first_free_line(block_meta) < CVM_LINE_INDEX_LIMIT);
 
-        atomic_fetch_add_explicit(&node->allocator.recycled_block_count, 1,
-                                  memory_order_relaxed);
+        /*
+         * The count belongs to whoever will allocate from this block. With no
+         * owner there is nothing to count for — the block still goes on the
+         * batch's list, and apply_result decides where it lands.
+         */
+        if (target != NULL) {
+            atomic_fetch_add_explicit(&target->allocator.recycled_block_count, 1,
+                                      memory_order_relaxed);
+        }
         block_meta_set_debug_state(block_meta, CVM_DBG_PARTIAL_FREE);
 
         /*
@@ -269,8 +289,8 @@ static u32 cvm_sweep_simple_block(CvmThreadNode* node, BlockMeta* block_meta,
          * reader's side is in the allocator's new-block path.
          */
         atomic_thread_fence(memory_order_release);
-        local_block_list_push(&result->recycled_blocks,
-                              node->allocator.heap->block_meta_start, block_meta);
+        local_block_list_push(&result->recycled_blocks, heap->block_meta_start,
+                              block_meta);
     } else {
         /* Every line held something live: the block stays in use. */
         block_meta_set_debug_state(block_meta, CVM_DBG_NOT_FREE);
@@ -301,12 +321,13 @@ static u32 cvm_sweep_simple_block(CvmThreadNode* node, BlockMeta* block_meta,
  * sweeper handling the next batch may extend it; it is marked
  * superblock_start_me and left for the coalescing pass.
  */
-static u32 cvm_sweep_superblock(CvmLargeAllocator* large, BlockMeta* block_meta,
-                                u8* block_start, BlockMeta* batch_limit) {
+static u32 cvm_sweep_superblock(CvmHeap* heap, CvmLargeAllocator* large,
+                                BlockMeta* block_meta, u8* block_start,
+                                BlockMeta* batch_limit) {
     u32 superblock_size = block_meta_superblock_size(block_meta);
     u8* block_end = block_start + (usize)superblock_size * CVM_BLOCK_SIZE;
 
-    ObjectMeta* first_object = bytemap_get(large->bytemap, block_start);
+    ObjectMeta* first_object = bytemap_get(heap->bytemap, block_start);
     cvm_assert(!object_meta_is_free(first_object));
 
     BlockMeta* last_block = block_meta + superblock_size - 1;
@@ -354,7 +375,7 @@ static u32 cvm_sweep_superblock(CvmLargeAllocator* large, BlockMeta* block_meta,
      * starts until the next live one.
      */
     u8* current = last_block_start + CVM_LARGE_OBJECT_MIN_SIZE;
-    ObjectMeta* current_meta = bytemap_get(large->bytemap, current);
+    ObjectMeta* current_meta = bytemap_get(heap->bytemap, current);
 
     while (current < block_end) {
         if (chunk_start == NULL) {
@@ -387,7 +408,7 @@ static u32 cvm_sweep_superblock(CvmLargeAllocator* large, BlockMeta* block_meta,
              * object's tail ended becomes a placeholder: something starts
              * there, but it is not a live object.
              */
-            object_meta_set_placeholder(bytemap_get(large->bytemap, last_block_start));
+            object_meta_set_placeholder(bytemap_get(heap->bytemap, last_block_start));
         }
 
         if (free_count > 0) {
@@ -417,36 +438,6 @@ static u32 cvm_sweep_superblock(CvmLargeAllocator* large, BlockMeta* block_meta,
 
 /* ------------------------------------------------------------------ */
 /* choosing where recycled blocks go                                   */
-/* ------------------------------------------------------------------ */
-
-/*
- * Which mutator thread receives the next recycled block.
- *
- * Round-robin over the registered threads, so a long sweep does not pile
- * every partially free block onto one thread's allocator. A GC worker has
- * no allocator of its own, so it always asks for a thread this way.
- */
-static CvmThreadNode* pick_mutator_round_robin(void) {
-    static _Atomic u32 counter = 0;
-
-    cvm_threads_lock_read();
-    CvmThreadNode* head = cvm_threads_head();
-
-    u32 count = cvm_thread_count();
-    if (head == NULL || count == 0) {
-        cvm_threads_unlock_read();
-        return NULL;
-    }
-
-    u32 which = atomic_fetch_add(&counter, 1) % count;
-    CvmThreadNode* node = head;
-    for (u32 i = 0; i < which && node->next != NULL; i++) {
-        node = node->next;
-    }
-
-    cvm_threads_unlock_read();
-    return node;
-}
 
 /* ------------------------------------------------------------------ */
 /* applying a batch's results                                          */
@@ -454,29 +445,21 @@ static CvmThreadNode* pick_mutator_round_robin(void) {
 
 static void apply_result(CvmSweepResult* result, CvmBlockAllocator* blocks,
                          CvmThreadNode* node) {
-    CvmThreadNode* target = node;
-    if (target == NULL) {
-        target = pick_mutator_round_robin();
-    }
-
     /*
-     * Partially free blocks go to a mutator thread's own recycled list
-     * rather than to the shared free list. A thread that is about to
-     * allocate is the right owner for a block with holes in it, and it
-     * avoids a round trip through the allocator's lock.
-     *
-     * If there is no registered thread — during teardown, or a test that
-     * never attached — the blocks cannot be given away. Returning them to
-     * the shared list would lose their free-line lists, which only the
-     * per-thread allocator knows how to use, so they are left out of the
-     * sweep. That is a leak of address space, not of correctness, and it
-     * cannot happen while any thread is allocating.
+     * A worker's partially free blocks go nowhere: there is no thread to own
+     * them, and giving them to one means touching that thread's node after
+     * the registry's read lock has been released — which is the window in
+     * which the thread can leave and its node be freed underneath. The block
+     * is simply not swept this round and becomes the next round's garbage
+     * instead. That is a leak of address space, not of correctness, and it
+     * cannot be the common case, because it only happens when a worker
+     * sweeps while no mutator is registered to receive the result.
      */
-    if (target != NULL) {
+    if (node != NULL) {
         BlockMeta* first = result->recycled_blocks.first;
         if (first != NULL) {
-            block_list_push_all(&target->allocator.recycled_blocks,
-                                target->allocator.heap->block_meta_start, first,
+            block_list_push_all(&node->allocator.recycled_blocks,
+                                node->allocator.heap->block_meta_start, first,
                                 result->recycled_blocks.last);
         }
     }
@@ -494,7 +477,6 @@ static void apply_result(CvmSweepResult* result, CvmBlockAllocator* blocks,
 
 /* Defined with the finishing logic, below; a sweep cannot start while a
  * straggler from the previous one is still filing results. */
-static bool any_other_sweeper_is_in_flight(void);
 
 /* ------------------------------------------------------------------ */
 /* sweeping a batch                                                    */
@@ -504,11 +486,11 @@ void cvm_sweep_begin(CvmHeap* heap) {
     /*
      * A sweep only starts once the previous one is finished, and finished
      * means no thread is still inside a batch — see
-     * any_other_sweeper_is_in_flight. Resetting the cursor while a straggler
+     * cvm_sweep_any_in_flight. Resetting the cursor while a straggler
      * held a batch would let it hand blocks to a mutator that the new sweep
      * is about to describe again.
      */
-    cvm_assert(!any_other_sweeper_is_in_flight());
+    cvm_assert(!cvm_sweep_any_in_flight(heap));
 
     atomic_store(&heap->sweep.cursor, 0);
     heap->sweep.limit = heap->block_count;
@@ -586,13 +568,6 @@ void cvm_sweep(CvmHeap* heap, _Atomic u32* cursor_done, u32 max_count,
     /* Head of the free run being accumulated, if any. */
     BlockMeta* last_free_block_start = NULL;
 
-    /*
-     * Whether recycled blocks are spread over threads by the caller
-     * (round-robin) or all given to one. A mutator sweeping its own batch
-     * keeps them; a worker spreads them.
-     */
-    bool spread = (node == NULL);
-
     while (current < limit) {
         u32 size = 1;
         u32 free_count = 0;
@@ -623,26 +598,15 @@ void cvm_sweep(CvmHeap* heap, _Atomic u32* cursor_done, u32 max_count,
                 last_free_block_start = NULL;
             }
         } else if (block_meta_is_simple(current)) {
-            CvmThreadNode* target = node;
-            if (spread) {
-                target = pick_mutator_round_robin();
-            }
-            if (target != NULL) {
-                free_count = cvm_sweep_simple_block(
-                    target, current, current_block_start, line_metas, &result);
-            }
+            free_count = cvm_sweep_simple_block(
+                heap, node, current, current_block_start, line_metas, &result);
         } else if (block_meta_is_superblock_start(current)) {
             size = block_meta_superblock_size(current);
             cvm_assert(size > 0);
 
-            CvmThreadNode* target = node;
-            if (spread) {
-                target = pick_mutator_round_robin();
-            }
-            if (target != NULL) {
-                free_count = cvm_sweep_superblock(&target->large_allocator, current,
-                                                  current_block_start, limit);
-            }
+            free_count = cvm_sweep_superblock(
+                heap, (node != NULL) ? &node->large_allocator : NULL, current,
+                current_block_start, limit);
         } else {
             /* Already free from an earlier phase. */
             cvm_assert(block_meta_is_free(current));
@@ -692,6 +656,9 @@ void cvm_sweep(CvmHeap* heap, _Atomic u32* cursor_done, u32 max_count,
         cvm_assert(total > 0);
         block_meta_set_flag_and_size(last_free_block_start, CVM_BLOCK_COALESCE_ME,
                                      (i32)total);
+
+        /* See below: the marker and the bound, or nobody takes this run in. */
+        atomic_thread_fence(memory_order_release);
     }
 
     apply_result(&result, blocks, node);
@@ -702,6 +669,26 @@ void cvm_sweep(CvmHeap* heap, _Atomic u32* cursor_done, u32 max_count,
     /* The coalescing pass reads these marks, so publish them first. */
     atomic_thread_fence(memory_order_release);
     atomic_store_explicit(cursor_done, limit_index, memory_order_release);
+
+    if (last_free_block_start != NULL) {
+        /*
+         * The run is marked and the bound is published. Now wake a thread to
+         * do the coalescing, because nobody else is going to: the mutators
+         * that would sweep on their next allocation may not allocate for a
+         * while, and a run that sits unclosed is what the consistency check
+         * reports as a coalesce_me block surviving the sweep.
+         *
+         * Posted rather than run here because the call site is the bottom of
+         * a sweep, which is already holding no other lock — and coalescing
+         * takes one.
+         */
+        if (heap->pool != NULL) {
+            cvm_pool_wake(heap->pool, CVM_GC_COALESCE, 1);
+        } else if (cvm_thread_node() != NULL) {
+            /* No pool: this thread coalesces its own run before moving on. */
+            cvm_sweep_lazy_coalesce(heap);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -755,7 +742,7 @@ u32 cvm_sweeper_min_cursor(CvmHeap* heap) {
 
     if (heap->pool != NULL) {
         for (u32 i = 0; i < heap->pool->count; i++) {
-            if (!atomic_load_explicit(&heap->pool->threads[i].active,
+            if (!atomic_load_explicit(&heap->pool->threads[i].sweeping,
                                       memory_order_acquire)) {
                 continue;
             }
@@ -902,7 +889,7 @@ bool cvm_sweep_is_done(CvmHeap* heap) {
  * be handed to two threads. A multi-threaded stress test caught exactly
  * that, as two threads writing into overlapping object memory.
  */
-static bool any_other_sweeper_is_in_flight(void) {
+bool cvm_sweep_any_in_flight(CvmHeap* heap) {
     bool busy = false;
 
     cvm_threads_lock_read();
@@ -914,7 +901,61 @@ static bool any_other_sweeper_is_in_flight(void) {
     }
     cvm_threads_unlock_read();
 
-    return busy;
+    if (busy) {
+        return true;
+    }
+
+    /*
+     * Workers are not registered threads, so the loop above cannot see them,
+     * and they sweep: the collector hands them the sweep after resuming the
+     * world. Asking only the registry would let the last mutator declare the
+     * sweep finished while a worker is halfway through a batch — and then the
+     * next collection's cvm_sweep_begin would reset the cursor under that
+     * batch, which is how a block gets handed to a mutator and described
+     * again in the same round.
+     *
+     * Workers carry a flag of their own rather than reusing `active`, which
+     * says "doing some phase" and would answer yes for a worker tracing a
+     * grey packet. Getting this wrong is not subtle: the first version used
+     * `active`, and cvm_sweep_begin's assertion below fired within a handful
+     * of runs of test_pool.
+     */
+    if (heap->pool != NULL) {
+        for (u32 i = 0; i < heap->pool->count; i++) {
+            if (atomic_load_explicit(&heap->pool->threads[i].sweeping,
+                                     memory_order_acquire)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool cvm_sweep_handoff_pending(CvmHeap* heap) {
+    /*
+     * A sweep handoff posted and not yet consumed. Separate from
+     * cvm_sweep_any_in_flight because the two questions have different
+     * answers, and using one predicate for both was wrong in both directions:
+     *
+     *   - Beginning a new sweep does not have to wait for an arrival. A worker
+     *     that gets here late looks at the cursor, finds the sweep already
+     *     over, and does nothing — that is the correct response to arriving
+     *     late, and making it wait would stall every collection on a handoff
+     *     that is about to turn into nothing.
+     *
+     *   - Declaring a sweep finished does have to wait for one, and the
+     *     failure is not subtle. Without this test the collector finished a
+     *     sweep with a run still held back for coalescing, the next collection
+     *     began, and the consistency check reported the leftover as a
+     *     coalesce_me block surviving a sweep.
+     *
+     * Unqualified by phase: every post is retired by whoever consumes it,
+     * whatever it then does, so this always falls to zero and cannot wedge the
+     * question at "never".
+     */
+    return heap->pool != NULL &&
+           atomic_load_explicit(&heap->pool->wake_pends, memory_order_acquire) > 0;
 }
 
 bool cvm_sweep_try_finish(CvmHeap* heap) {
@@ -927,7 +968,7 @@ bool cvm_sweep_try_finish(CvmHeap* heap) {
      * Not while somebody is still filing a batch's results. The caller has
      * already cleared its own flag, so this asks about everyone else.
      */
-    if (any_other_sweeper_is_in_flight()) {
+    if (cvm_sweep_any_in_flight(heap) || cvm_sweep_handoff_pending(heap)) {
         return false;
     }
 
