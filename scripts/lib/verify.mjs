@@ -408,6 +408,7 @@ const PROBE_HEADERS = [
     "safepoint.h",
     "cvm/gc.h",
     "cvm/array.h",
+    "cvm/builder.h",
     "cvm/hash.h",
     "cvm/intern.h",
     "cvm/str.h",
