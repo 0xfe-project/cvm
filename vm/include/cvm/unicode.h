@@ -148,6 +148,57 @@ CVM_INLINE bool cvm_unicode_is_ident_continue(rune c) {
 }
 
 /* ------------------------------------------------------------------ */
+/* normalization                                                       */
+/* ------------------------------------------------------------------ */
+
+/* The four forms. The enum's order is the ported code's: the compat forms are
+ * the two at or above NFKC, and the two NFD forms are the ones that stop after
+ * decomposing. */
+typedef enum CvmUnicodeNormalization {
+    CVM_UNICODE_NFC = 0,
+    CVM_UNICODE_NFD = 1,
+    CVM_UNICODE_NFKC = 2,
+    CVM_UNICODE_NFKD = 3,
+} CvmUnicodeNormalization;
+
+/*
+ * Where normalization's scratch comes from.
+ *
+ * The ported code wants to grow a buffer and hand it to the caller, which in the
+ * original is a libc realloc callback. Our platform layer offers alloc and free
+ * and no realloc, so the contract is those two and the buffer keeps track of its
+ * own size — see the note in vm/str/unicode.c.
+ */
+typedef struct CvmUnicodeAlloc {
+    opaque_mut ctx;
+    opaque_mut (*alloc)(opaque_mut ctx, usize bytes);
+    void (*free)(opaque_mut ctx, opaque_mut p);
+} CvmUnicodeAlloc;
+
+/* The runtime's own: rt_mem_alloc and rt_mem_free. */
+CvmUnicodeAlloc cvm_unicode_system_alloc(void);
+
+/*
+ * Normalize `src` (a run of code points) and hand back a newly allocated run in
+ * `*dst`, which the caller releases with `alloc.free`. Returns how many code
+ * points the result has, or -1 if the scratch could not be allocated.
+ *
+ * A zero-length input gives a NULL result and a length of zero, which is the one
+ * case where "no buffer" is the answer rather than an error.
+ */
+i32 cvm_unicode_normalize(rune** dst, rune const* src, usize length,
+                          CvmUnicodeNormalization kind, CvmUnicodeAlloc alloc);
+
+/*
+ * The same thing over a string: the useful form of it, since the caller has a
+ * string and wants a string.
+ *
+ * NULL only if the scratch could not be allocated.
+ */
+CvmString* cvm_unicode_normalize_string(CvmString const* s,
+                                        CvmUnicodeNormalization kind);
+
+/* ------------------------------------------------------------------ */
 /* over strings                                                        */
 /* ------------------------------------------------------------------ */
 

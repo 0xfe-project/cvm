@@ -277,6 +277,109 @@ TEST a_mapped_string_survives_a_collection(void) {
     PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* normalization                                                       */
+/* ------------------------------------------------------------------ */
+
+/* Normalize a run of code points, and compare the result to what is wanted.
+ * The buffer belongs to the allocator, so it is released here. */
+static bool normalizes(rune const* src, usize n, CvmUnicodeNormalization kind,
+                       rune const* want, usize want_n) {
+    CvmUnicodeAlloc alloc = cvm_unicode_system_alloc();
+    rune* out = NULL;
+    i32 len = cvm_unicode_normalize(&out, src, n, kind, alloc);
+    if (len < 0) {
+        return false;
+    }
+    bool ok = (usize)len == want_n;
+    for (usize i = 0; ok && i < want_n; i++) {
+        ok = out[i] == want[i];
+    }
+    if (out != NULL) {
+        alloc.free(alloc.ctx, out);
+    }
+    return ok;
+}
+
+TEST composition_and_decomposition(void) {
+    /* "e" followed by a combining acute, and the one code point they compose
+     * into */
+    static rune const decomposed[] = {'e', 0x0301u};
+    static rune const composed[] = {0x00E9u};
+
+    ASSERT(normalizes(decomposed, 2, CVM_UNICODE_NFC, composed, 1));
+    ASSERT(normalizes(composed, 1, CVM_UNICODE_NFD, decomposed, 2));
+    /* already in the target form: unchanged */
+    ASSERT(normalizes(composed, 1, CVM_UNICODE_NFC, composed, 1));
+    ASSERT(normalizes(decomposed, 2, CVM_UNICODE_NFD, decomposed, 2));
+    /* ASCII is unaffected, which is the fast path the ported code keeps */
+    static rune const ascii[] = {'a', 'b', 'c'};
+    ASSERT(normalizes(ascii, 3, CVM_UNICODE_NFC, ascii, 3));
+    ASSERT(normalizes(ascii, 3, CVM_UNICODE_NFKC, ascii, 3));
+    PASS();
+}
+
+TEST compatibility_forms_are_the_kind_with_no_composition(void) {
+    /* U+FB01 LATIN SMALL LIGATURE FI decomposes under compatibility */
+    static rune const ligature[] = {0xFB01u};
+    static rune const fi[] = {'f', 'i'};
+    ASSERT(normalizes(ligature, 1, CVM_UNICODE_NFKD, fi, 2));
+    ASSERT(normalizes(ligature, 1, CVM_UNICODE_NFKC, fi, 2));
+    /* and the canonical forms leave it alone */
+    ASSERT(normalizes(ligature, 1, CVM_UNICODE_NFC, ligature, 1));
+    ASSERT(normalizes(ligature, 1, CVM_UNICODE_NFD, ligature, 1));
+
+    /* U+00BD VULGAR FRACTION ONE HALF expands to three code points, one of which
+     * comes from the short-code table rather than from a decomposition */
+    static rune const half[] = {0x00BDu};
+    static rune const one_third[] = {'1', 0x2044u, '2'};
+    ASSERT(normalizes(half, 1, CVM_UNICODE_NFKC, one_third, 3));
+    PASS();
+}
+
+TEST hangul_composes_and_decomposes(void) {
+    /* U+AC00 HANGUL SYLLABLE GA is U+1100 + U+1161, and composes back */
+    static rune const syllable[] = {0xAC00u};
+    static rune const jamo[] = {0x1100u, 0x1161u};
+    ASSERT(normalizes(syllable, 1, CVM_UNICODE_NFD, jamo, 2));
+    ASSERT(normalizes(jamo, 2, CVM_UNICODE_NFC, syllable, 1));
+
+    /* with a trailing consonant, which is the third jamo */
+    static rune const syllable_with_tail[] = {0xAC01u};
+    static rune const jamo_with_tail[] = {0x1100u, 0x1161u, 0x11A8u};
+    ASSERT(normalizes(syllable_with_tail, 1, CVM_UNICODE_NFD, jamo_with_tail, 3));
+    ASSERT(normalizes(jamo_with_tail, 3, CVM_UNICODE_NFC, syllable_with_tail, 1));
+    PASS();
+}
+
+TEST normalizing_a_string(void) {
+    fixture_enter();
+
+    FRAME(1);
+    /* "cafe" + U+0301, which composes to "café" */
+    CvmString* source = cvm_string_from_utf8(STR_LITERAL("cafe\xCC\x81"));
+    ASSERT(source != NULL);
+    f_roots[0] = source;
+
+    CvmString* nfc = cvm_unicode_normalize_string(source, CVM_UNICODE_NFC);
+    f_roots[0] = nfc;
+    ASSERT(nfc != NULL);
+    ASSERT_EQ_FMT((usize)4, cvm_string_length(nfc), "%zu");
+    ASSERT_EQ_FMT(0x00E9u, cvm_string_unit(nfc, 3), "%u");
+
+    /* and back apart */
+    CvmString* nfd = cvm_unicode_normalize_string(nfc, CVM_UNICODE_NFD);
+    f_roots[0] = nfd;
+    ASSERT(nfd != NULL);
+    ASSERT_EQ_FMT((usize)5, cvm_string_length(nfd), "%zu");
+    ASSERT_EQ_FMT((u32)'e', cvm_string_unit(nfd, 3), "%u");
+    ASSERT_EQ_FMT(0x0301u, cvm_string_unit(nfd, 4), "%u");
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
 SUITE(unicode_suite) {
     RUN_TEST(ascii_case_mapping);
     RUN_TEST(case_mapping_beyond_ascii);
@@ -285,6 +388,10 @@ SUITE(unicode_suite) {
     RUN_TEST(the_predicates_answer_for_ascii_and_beyond);
     RUN_TEST(case_mapping_over_a_string);
     RUN_TEST(a_mapped_string_survives_a_collection);
+    RUN_TEST(composition_and_decomposition);
+    RUN_TEST(compatibility_forms_are_the_kind_with_no_composition);
+    RUN_TEST(hangul_composes_and_decomposes);
+    RUN_TEST(normalizing_a_string);
 }
 
 GREATEST_MAIN_DEFS();
