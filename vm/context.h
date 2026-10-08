@@ -59,6 +59,14 @@ typedef struct CvmThreadNode {
     u64 id;
 
     /*
+     * CvmThreadRole. Written once by whoever attaches or by the runtime thread
+     * that knows better, and read by the stuck-thread report; not atomic,
+     * because a report that races a thread's own setup reads a word and nothing
+     * else depends on it.
+     */
+    u32 role;
+
+    /*
      * CvmThreadState. Atomic because a collection reads it while the
      * thread it describes is still running.
      */
@@ -157,6 +165,32 @@ typedef enum CvmThreadActivity {
     CVM_ACT_JOINING,
     CVM_ACT_TYPE_COUNT,
 } CvmThreadActivity;
+
+/*
+ * What a registered thread is for.
+ *
+ * Not a property the collector acts on — nothing behaves differently by role —
+ * but the thing a stuck-thread report needs in order to name its subject. A
+ * collection that cannot stop the world has to say *which* thread it is waiting
+ * for, and "idle, managed, not sweeping" describes every one of them.
+ *
+ * Only two exist, and the enum says so rather than reserving values for the
+ * kinds that might: a mutator is any thread the program attached, and the
+ * runtime has exactly one other, which runs finalizers. GC workers do not
+ * attach and so are never in the registry.
+ */
+typedef enum CvmThreadRole {
+    CVM_THREAD_ROLE_MUTATOR = 0,
+    CVM_THREAD_ROLE_FINALIZER,
+    CVM_THREAD_ROLE_COUNT,
+} CvmThreadRole;
+
+/* Record the current thread's role. Called by whoever knows; everything that
+ * attaches without saying is a mutator. */
+void cvm_thread_set_role(CvmThreadRole role);
+
+/* The role's name, for the stuck-thread report. Never NULL. */
+str cvm_thread_role_name(u32 role);
 
 str cvm_thread_activity_name(CvmThreadActivity activity);
 

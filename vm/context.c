@@ -107,6 +107,7 @@ bool cvm_thread_attach(void) {
 
     node->handle = rt_thread_self();
     node->id = rt_thread_id();
+    node->role = (u32)CVM_THREAD_ROLE_MUTATOR;
     atomic_store(&node->state, (u32)CVM_THREAD_MANAGED);
     atomic_store(&node->parked, false);
     cvm_list_unlink(&node->link);
@@ -354,6 +355,26 @@ CvmThreadNode* cvm_threads_next(CvmThreadNode* node) {
 /* ------------------------------------------------------------------ */
 /* the activity breadcrumb                                             */
 /* ------------------------------------------------------------------ */
+
+static str const role_names[CVM_THREAD_ROLE_COUNT] = {
+    [CVM_THREAD_ROLE_MUTATOR] = {.ptr = (u8 const*)"mutator", .len = 7},
+    [CVM_THREAD_ROLE_FINALIZER] = {.ptr = (u8 const*)"finalizer", .len = 9},
+};
+
+str cvm_thread_role_name(u32 role) {
+    if (role >= (u32)CVM_THREAD_ROLE_COUNT) {
+        return (str){.ptr = (u8 const*)"?", .len = 1};
+    }
+    return role_names[role];
+}
+
+void cvm_thread_set_role(CvmThreadRole role) {
+    CvmThreadNode* node = cvm_thread_node();
+    if (node == NULL) {
+        return;
+    }
+    node->role = (u32)role;
+}
 
 static str const activity_names[CVM_ACT_TYPE_COUNT] = {
     [CVM_ACT_IDLE] = {.ptr = (u8 const*)"idle", .len = 4},

@@ -210,6 +210,18 @@ static opaque_mut finalizer_main(opaque_mut arg) {
         return NULL;
     }
 
+    /*
+     * Two things for the stuck-thread report, both of them because this thread
+     * is the one a collection is most likely to be waiting for while it is not
+     * obviously doing anything: it runs user code that may not allocate, and so
+     * may not reach a safepoint poll.
+     *
+     * The role names it. The activity says what it is doing — without it this
+     * thread reports as "idle" throughout, which describes every thread in the
+     * process equally well.
+     */
+    cvm_thread_set_role(CVM_THREAD_ROLE_FINALIZER);
+
     for (;;) {
         /*
          * Waiting here must not look like a thread that is running: an
@@ -228,7 +240,9 @@ static opaque_mut finalizer_main(opaque_mut arg) {
 
         FinalizerNode* node = pop_atomic(&pending_head);
         if (node != NULL) {
+            cvm_thread_set_activity(CVM_ACT_FINALIZING);
             run_one(node);
+            cvm_thread_set_activity(CVM_ACT_IDLE);
         }
     }
 

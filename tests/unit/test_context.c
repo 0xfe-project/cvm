@@ -299,6 +299,54 @@ TEST registry_survives_concurrent_registration(void) {
     PASS();
 }
 
+/*
+ * The role is what the stuck-thread report names a thread by, and the report is
+ * the only thing that can say which thread a collection was waiting for. So the
+ * properties worth pinning are the two the report relies on: every attached
+ * thread has a role, and the runtime's own thread can change its own.
+ */
+TEST a_thread_attaches_as_a_mutator(void) {
+    ASSERT(cvm_thread_attach());
+
+    CvmThreadNode* self = cvm_thread_node();
+    ASSERT(self != NULL);
+    ASSERT_EQ_FMT((u32)CVM_THREAD_ROLE_MUTATOR, self->role, "%u");
+
+    str name = cvm_thread_role_name(self->role);
+    ASSERT_EQ_FMT((usize)7, name.len, "%zu");
+    ASSERT(memcmp(name.ptr, "mutator", 7) == 0);
+
+    cvm_thread_detach();
+    PASS();
+}
+
+TEST a_thread_can_declare_that_it_is_not_a_mutator(void) {
+    ASSERT(cvm_thread_attach());
+
+    cvm_thread_set_role(CVM_THREAD_ROLE_FINALIZER);
+    CvmThreadNode* self = cvm_thread_node();
+    ASSERT_EQ_FMT((u32)CVM_THREAD_ROLE_FINALIZER, self->role, "%u");
+
+    str name = cvm_thread_role_name(self->role);
+    ASSERT_EQ_FMT((usize)9, name.len, "%zu");
+    ASSERT(memcmp(name.ptr, "finalizer", 9) == 0);
+
+    /* A role from outside the enum still has to produce something printable:
+     * the report must never be the thing that crashes. */
+    str unknown = cvm_thread_role_name((u32)CVM_THREAD_ROLE_COUNT);
+    ASSERT_EQ_FMT((usize)1, unknown.len, "%zu");
+
+    cvm_thread_detach();
+    PASS();
+}
+
+TEST role_changes_of_an_unregistered_thread_do_nothing(void) {
+    /* Nothing to attach to, so nothing happens — and nothing crashes, which
+     * matters because this runs on the teardown paths. */
+    cvm_thread_set_role(CVM_THREAD_ROLE_FINALIZER);
+    PASS();
+}
+
 SUITE(context_suite) {
     RUN_TEST(attach_installs_a_usable_context);
     RUN_TEST(attach_is_idempotent);
@@ -312,6 +360,9 @@ SUITE(context_suite) {
     RUN_TEST(a_running_thread_is_alive);
     RUN_TEST(many_threads_register_and_unregister);
     RUN_TEST(registry_survives_concurrent_registration);
+    RUN_TEST(a_thread_attaches_as_a_mutator);
+    RUN_TEST(a_thread_can_declare_that_it_is_not_a_mutator);
+    RUN_TEST(role_changes_of_an_unregistered_thread_do_nothing);
 }
 
 GREATEST_MAIN_DEFS();

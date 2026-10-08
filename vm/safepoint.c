@@ -163,6 +163,8 @@ static void report_stuck(CvmThreadNode* self) {
         CVM_LOG_WARN(m) {
             fmt_lit(&m.fmt, "  thread ");
             fmt_u64(&m.fmt, node->id);
+            fmt_lit(&m.fmt, " role=");
+            fmt_str(&m.fmt, cvm_thread_role_name(node->role));
             fmt_lit(&m.fmt, " state=");
             fmt_lit(&m.fmt, state == (u32)CVM_THREAD_MANAGED ? "managed" : "unmanaged");
             fmt_lit(&m.fmt, " alive=");
