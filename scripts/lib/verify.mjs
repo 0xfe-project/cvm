@@ -413,6 +413,7 @@ const PROBE_HEADERS = [
     "cvm/intern.h",
     "cvm/json.h",
     "cvm/str.h",
+    "cvm/unicode.h",
     "cvm/vm.h",
     "gc/layout.h",
     "gc/meta.h",
