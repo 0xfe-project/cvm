@@ -194,6 +194,19 @@ static u32 cvm_sweep_simple_block(CvmHeap* heap, CvmThreadNode* target,
         block_meta_clear(block_meta);
         block_meta_set_debug_state(block_meta, CVM_DBG_FREE);
 
+        /*
+         * The whole block is dead, so the whole block is cleared, once.
+         * This is the clearing that used to happen per object on the
+         * allocation path; here it is one call per 32 KiB block, and the
+         * mutator that later adopts the block finds it already zero.
+         *
+         * After the finalizers, because extracting one reads the object it
+         * belongs to, and before the metadata is dropped, so that a reader
+         * of the bytemap cannot observe a block that is free but still
+         * full of a dead program's data.
+         */
+        rt_mem_zero((opaque_mut)block_start, CVM_BLOCK_SIZE);
+
         object_meta_clear_block(bytemap_get(bytemap, block_start));
         return 1;
     }
@@ -260,6 +273,17 @@ static u32 cvm_sweep_simple_block(CvmHeap* heap, CvmThreadNode* target,
                 line_start += CVM_LINE_SIZE;
                 bytemap_cursor = bytemap_next_line(bytemap_cursor);
             }
+
+            /*
+             * Clear the run, then write its node back on top.
+             *
+             * One call for the whole run rather than one per line, and it
+             * has to be here rather than at first-touch: `last_recyclable`
+             * is the run's first line, the node lives in that line, and a
+             * node written before the clear would be cleared away.
+             */
+            rt_mem_zero((opaque_mut)last_recyclable, (usize)size * CVM_LINE_SIZE);
+
             last_recyclable->size = size;
         }
     }
@@ -352,6 +376,15 @@ static u32 cvm_sweep_superblock(CvmHeap* heap, CvmLargeAllocator* large,
         for (u32 i = 0; i < free_count; i++) {
             block_meta_set_debug_state(block_meta + i, CVM_DBG_FREE);
         }
+
+        /*
+         * Those blocks are the body of a dead large object, and they are
+         * cleared the way a wholly dead simple block is: once for the run,
+         * because they are contiguous and none of them is live. The last
+         * block of the superblock is a different matter -- something may
+         * have survived in it -- and is not touched here.
+         */
+        rt_mem_zero((opaque_mut)block_start, (usize)free_count * CVM_BLOCK_SIZE);
     } else {
         /* Still in use: the object at the start survived, so the body
          * blocks it spans are not free. */
@@ -385,8 +418,9 @@ static u32 cvm_sweep_superblock(CvmHeap* heap, CvmLargeAllocator* large,
             }
         } else if (object_meta_is_marked(current_meta)) {
             /* A survivor begins here, so the run ends just before it. */
-            cvm_large_add_chunk(large, (CvmChunk*)chunk_start,
-                                (usize)(current - chunk_start));
+            usize dead = (usize)(current - chunk_start);
+            rt_mem_zero((opaque_mut)chunk_start, dead);
+            cvm_large_add_chunk(large, (CvmChunk*)chunk_start, dead);
             chunk_start = NULL;
         }
         object_meta_sweep(current_meta);
@@ -396,8 +430,18 @@ static u32 cvm_sweep_superblock(CvmHeap* heap, CvmLargeAllocator* large,
     }
 
     if (chunk_start == last_block_start) {
-        /* The whole last block is one dead chunk, so it is a free block. */
+        /*
+         * The whole last block is one dead chunk, so it is a free block.
+         *
+         * This is the common case for a superblock that is one block long,
+         * which is what a single large object gets, and it is a reclaim
+         * site like any other: the block goes on the free list, so its
+         * payload has to be zero before it does. The front blocks above are
+         * cleared only when the object spanned more than one, so this
+         * branch is not covered by that one.
+         */
         free_count += 1;
+        rt_mem_zero((opaque_mut)last_block_start, CVM_BLOCK_SIZE);
         block_meta_set_debug_state(last_block, CVM_DBG_FREE);
     } else {
         block_meta_set_debug_state(last_block, CVM_DBG_NOT_FREE);
@@ -428,8 +472,11 @@ static u32 cvm_sweep_superblock(CvmHeap* heap, CvmLargeAllocator* large,
         }
 
         if (chunk_start != NULL) {
-            cvm_large_add_chunk(large, (CvmChunk*)chunk_start,
-                                (usize)(current - chunk_start));
+            /* Cleared before it is filed: the free-list link is written
+             * into the chunk itself, so a clear afterwards would erase it. */
+            usize dead = (usize)(current - chunk_start);
+            rt_mem_zero((opaque_mut)chunk_start, dead);
+            cvm_large_add_chunk(large, (CvmChunk*)chunk_start, dead);
         }
     }
 

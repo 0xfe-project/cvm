@@ -17,9 +17,11 @@
 #include "gc/block_alloc.h"
 #include "context.h"
 #include "gc/bytemap.h"
+#include "gc/collect.h"
 #include "gc/heap.h"
 #include "gc/layout.h"
 #include "gc/meta.h"
+#include "gc/sweeper.h"
 #include "log.h"
 #include "rt.h"
 
@@ -241,17 +243,35 @@ static u8* try_large_alloc(CvmLargeAllocator* large, usize size) {
         }
     }
 
-    /* The chunk is the object's start; the payload follows the header. */
+    /*
+     * The chunk is the object's start; the payload follows the header.
+     *
+     * No clearing here, and this is the loop that cost the most: a large
+     * object is up to 8 KiB, so this was the one place in the runtime that
+     * cleared thousands of bytes per call, and it cleared them a byte at a
+     * time -- freestanding, the compiler will not turn that into a memset.
+     * The medium-object workload measured 6x slower in a freestanding build
+     * than in the hosted one because of this loop and the one publish used
+     * to have. Both are gone; a chunk is zero when it is handed out because
+     * the sweeper cleared it when it was reclaimed (gc/sweeper.c).
+     */
     u8* start = (u8*)chunk;
-
-    for (usize i = 0; i < size; i++) {
-        start[i] = 0;
-    }
 
     ObjectMeta* meta = bytemap_get(large->bytemap, start);
     object_meta_set_allocated(meta);
 
     return (opaque_mut)((CvmGcHeader*)start + 1);
+}
+
+/*
+ * Write the header of a chunk that has just been taken, and hand back the
+ * payload. Every successful attempt above ends here.
+ */
+static opaque_mut adopt_large_chunk(u8* payload, CvmTypeDescriptor const* type) {
+    CvmGcHeader* header = cvm_header_of_mut(payload);
+    header->type = type;
+    header->flags = 0;
+    return payload;
 }
 
 opaque_mut cvm_alloc_large(CvmTypeDescriptor const* type, usize size) {
@@ -268,13 +288,47 @@ opaque_mut cvm_alloc_large(CvmTypeDescriptor const* type, usize size) {
     for (;;) {
         u8* payload = try_large_alloc(large, chunk_size);
         if (payload != NULL) {
-            CvmGcHeader* header = cvm_header_of_mut(payload);
-            header->type = type;
-            header->flags = 0;
-            return payload;
+            return adopt_large_chunk(payload, type);
         }
 
-        /* Collection goes here, before growing; see the note in gc/alloc.c. */
+        /*
+         * Reclaim before growing, the sequence gc/alloc.c runs and for the
+         * same reason.
+         *
+         * This loop used to go straight to the growth step, with a note
+         * saying where the collection should go. The consequence was not a
+         * slow path but a fatal one: a large allocation that could not be
+         * satisfied grew the heap, and when the heap was at its maximum it
+         * called rt_fatal, with every byte of the garbage it had been asked
+         * to allocate still sitting unreclaimed. A 9 KiB object against a
+         * 32 MiB heap, all of it garbage, was enough to kill the process.
+         */
+        if (!cvm_sweep_is_done(heap)) {
+            cvm_sweep_finish(heap, STR_LITERAL("large allocation failed"));
+            payload = try_large_alloc(large, chunk_size);
+            if (payload != NULL) {
+                return adopt_large_chunk(payload, type);
+            }
+        }
+
+        /* A false return means another thread collected instead, in which
+         * case the heap has just been collected and retrying is right. */
+        if (!cvm_gc_collect(heap)) {
+            continue;
+        }
+
+        payload = try_large_alloc(large, chunk_size);
+        if (payload != NULL) {
+            return adopt_large_chunk(payload, type);
+        }
+
+        if (!cvm_sweep_is_done(heap)) {
+            cvm_sweep_finish(heap, STR_LITERAL("large allocation failed"));
+            payload = try_large_alloc(large, chunk_size);
+            if (payload != NULL) {
+                return adopt_large_chunk(payload, type);
+            }
+        }
 
         /*
          * Grow by enough whole blocks to hold the object, rounded up to a

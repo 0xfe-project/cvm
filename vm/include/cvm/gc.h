@@ -617,14 +617,27 @@ opaque_mut cvm_alloc_large(CvmTypeDescriptor const* type, usize size);
 
 /*
  * Fast path: bump within the current region. The limit check and
- * slow-path call are the only branches. Payload is zero-initialized
- * by the runtime contract.
+ * slow-path call are the only branches.
  */
 /*
  * The inlined allocation path, with an explicit payload size.
  *
  * cvm_alloc passes the descriptor's own size; an array passes the fixed
  * part plus its tail, which is only known at run time.
+ *
+ * A fresh object's payload is zeroed, and generated code depends on that:
+ * a type with pointer fields has to start out valid rather than full of
+ * rubbish for the marker to follow. But that is now a property of where the
+ * memory came from rather than work done here. Every byte this function
+ * hands out already reads as zero, because the collector clears a range
+ * when it reclaims it and the platform hands the heap back zeroed -- see
+ * the note on rt_mem_zero and the clearing sites in gc/sweeper.c. What is
+ * left to write here is the header, which is the collector's own state.
+ *
+ * Clearing here instead was measured at 40-58% of three of the benchmark's
+ * scenarios, and it was mostly wasted: memory the heap has never used is
+ * already zero, and memory it has reclaimed is cleared once per run rather
+ * than once per object.
  */
 CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
                                       usize payload_size) {
@@ -636,25 +649,6 @@ CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
         return cvm_alloc_slow(type, size);
     }
     ctx->bump_ptr = p + size;
-
-    /*
-     * Zero before publishing. Generated code assumes a fresh object has
-     * zeroed fields, which is what lets a type with pointer fields start
-     * out valid rather than full of rubbish the marker would follow.
-     *
-     * Unrolled to 8-byte stores: the byte loop costs 20% of churn's time
-     * in callgrind, and rt_memset compiles to a bzero call that is slower
-     * than an inline loop for the small sizes (16–48 bytes) cvm_alloc sees.
-     */
-    u64* wp = (u64*)p;
-    usize words = size / 8;
-    for (usize i = 0; i < words; i++) {
-        wp[i] = 0;
-    }
-    /* tail bytes if size not 8-aligned (shouldn't happen: CVM_ALLOC_ALIGNMENT=16) */
-    for (usize i = words * 8; i < size; i++) {
-        p[i] = 0;
-    }
 
     CvmGcHeader* hdr = (CvmGcHeader*)p;
     hdr->type = type;

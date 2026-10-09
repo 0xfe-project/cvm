@@ -83,7 +83,7 @@ void cvm_allocator_clear(CvmAllocator* alloc, CvmVMContext* ctx) {
 /* ------------------------------------------------------------------ */
 
 /*
- * Publish an object: zero it, write its header, mark its metadata.
+ * Publish an object: write its header, mark its metadata.
  *
  * `start` is the object's start, which is where the header goes — not the
  * payload. See the address convention note in cvm/gc.h. Treating the two
@@ -91,18 +91,15 @@ void cvm_allocator_clear(CvmAllocator* alloc, CvmVMContext* ctx) {
  * object, and how the bytemap came to describe a slot one header away
  * from the real one.
  *
- * Zeroing is part of the contract: generated code assumes a fresh object
- * has zeroed fields, which is what lets a type with pointer fields start
- * out valid rather than full of rubbish that the marker would follow.
+ * No zeroing here, for the same reason the inlined path has none: the
+ * payload of a fresh object is zero because of where the memory came from.
+ * See the note in cvm/gc.h and the clearing sites in gc/sweeper.c. The
+ * contract is unchanged; only the end that pays for it moved.
  */
 static opaque_mut publish(CvmAllocator* alloc, u8* start, usize size,
                           CvmTypeDescriptor const* type) {
     cvm_assert(cvm_heap_contains(alloc->heap, start));
     cvm_assert(cvm_is_aligned((usize)start, CVM_ALLOC_ALIGNMENT));
-
-    for (usize i = 0; i < size; i++) {
-        start[i] = 0;
-    }
 
 #if defined(CVM_DEBUG)
     /*
@@ -162,6 +159,31 @@ static opaque_mut publish(CvmAllocator* alloc, u8* start, usize size,
  * new_block never calls back into here.
  */
 static bool allocator_next_line(CvmAllocator* alloc);
+
+/*
+ * Point the bump region at a run of free lines, and clear the run's own
+ * metadata out of it.
+ *
+ * The collector reclaims a run by clearing it and then writing a free-line
+ * node into the run's first line -- the node has to live in the line it
+ * describes, or the free-line list would need a table of its own. So the
+ * first two bytes of a free run are the collector's link, not a zero, and
+ * that is the one place the "every byte handed out is zero" invariant does
+ * not hold on its own. Clearing them here, on the way in, restores it at the
+ * last moment it can be restored: the object that lands there starts with
+ * its header, and its payload is the zeroes the collector left.
+ *
+ * The write is two stores rather than a call, because this is on the path
+ * that adopts a block and the alternative is a call to clear 16 bytes.
+ */
+static void adopt_line_run(CvmVMContext* ctx, u8* line, usize lines) {
+    u64* node = (u64*)line;
+    node[0] = 0;
+    node[1] = 0;
+
+    ctx->bump_ptr = line;
+    ctx->bump_end = line + lines * CVM_LINE_SIZE;
+}
 
 static bool allocator_new_block(CvmAllocator* alloc) {
     BlockMeta* block;
@@ -239,8 +261,7 @@ static bool allocator_new_block(CvmAllocator* alloc) {
         cvm_assert(meta->size > 0);
 
         block_meta_set_first_free_line(block, meta->next);
-        ctx->bump_ptr = line;
-        ctx->bump_end = line + (usize)meta->size * CVM_LINE_SIZE;
+        adopt_line_run(ctx, line, (usize)meta->size);
         cvm_assert(ctx->bump_end <= block_end(block_start));
     } else {
         block = cvm_block_alloc_get_block(alloc->block_alloc);
@@ -251,8 +272,13 @@ static bool allocator_new_block(CvmAllocator* alloc) {
         block_start = block_meta_block_start(alloc->heap->block_meta_start,
                                              alloc->heap->heap_start, block);
 
-        /* A fresh block is entirely free: the whole thing becomes the
-         * bump region, and the free-line list is empty. */
+        /*
+         * A fresh block is entirely free: the whole thing becomes the bump
+         * region, and the free-line list is empty. Nothing is cleared here
+         * because nothing needs to be -- a block reaches this path either
+         * from the reserve, which the platform handed back zeroed, or from
+         * the free list, where it was cleared when it was reclaimed.
+         */
         ctx->bump_ptr = block_start;
         ctx->bump_end = block_end(block_start);
         block_meta_set_first_free_line(block, CVM_LAST_HOLE);
@@ -284,11 +310,9 @@ static bool allocator_next_line(CvmAllocator* alloc) {
 
     block_meta_set_first_free_line(block, meta->next);
 
-    CvmVMContext* ctx = cvm_ctx();
-    ctx->bump_ptr = line;
-    ctx->bump_end = line + (usize)meta->size * CVM_LINE_SIZE;
+    adopt_line_run(cvm_ctx(), line, (usize)meta->size);
 
-    cvm_assert(ctx->bump_end <= block_end(alloc->block_start));
+    cvm_assert(cvm_ctx()->bump_end <= block_end(alloc->block_start));
     return true;
 }
 

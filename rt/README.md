@@ -25,7 +25,7 @@ it is worth keeping small:
 
 | group | examples | why the collector needs it |
 |---|---|---|
-| `mem` | `rt_mem_alloc`, `rt_mem_reserve`, `rt_mem_commit` | the heap is one large reservation, mapped rather than malloc'd: a heap whose blocks are individually allocated cannot be described by address arithmetic |
+| `mem` | `rt_mem_alloc`, `rt_mem_reserve`, `rt_mem_commit`, `rt_mem_zero` | the heap is one large reservation, mapped rather than malloc'd: a heap whose blocks are individually allocated cannot be described by address arithmetic. `rt_mem_zero` is here because freestanding code cannot call memset and the compiler will not emit one |
 | `thread` | `rt_thread_create`, `rt_thread_join`, `rt_hardware_threads` | the GC worker pool, and the finalizer thread |
 | `sync` | `rt_mutex_*`, `rt_cond_*`, `rt_rwlock_*`, `rt_sem_*` | the thread registry's lock, the sleeper the pool waits on, the coalescing lock |
 | `trap` | `rt_trap_arm`, `rt_trap_disarm`, `rt_signal_*` | one of the two safepoint mechanisms: a protected page per thread, whose fault parks it. The other, polling, needs nothing from the platform |

@@ -13,6 +13,7 @@
 #if !defined(_WIN32)
 
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -78,6 +79,13 @@ void rt_mem_release(opaque_mut base, usize bytes) {
         return;
     }
     munmap(base, bytes);
+}
+
+void rt_mem_zero(opaque_mut p, usize bytes) {
+    if (p == NULL || bytes == 0) {
+        return;
+    }
+    memset(p, 0, bytes);
 }
 
 #endif /* !_WIN32 */
