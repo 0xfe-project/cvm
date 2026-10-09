@@ -106,6 +106,7 @@ bool cvm_thread_attach(void) {
     node->ctx.frame_capacity = 0u;
     node->ctx.handlers = NULL;
     node->ctx.free_handlers = NULL;
+    node->ctx.handler_depth = 0u;
     node->ctx.bump_ptr = NULL;
     node->ctx.bump_end = NULL;
     node->ctx.owner = node;

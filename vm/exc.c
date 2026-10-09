@@ -73,6 +73,7 @@ RtJumpBuf* cvm_handler_push(void) {
     handler->unmanaged_depth = cvm_thread_unmanaged_depth();
 
     ctx->handlers = handler;
+    ctx->handler_depth++;
     return &handler->jump;
 }
 
@@ -84,6 +85,9 @@ void cvm_handler_pop(void) {
 
     CvmHandler* handler = ctx->handlers;
     ctx->handlers = handler->prev;
+    if (ctx->handler_depth > 0u) {
+        ctx->handler_depth--;
+    }
 
     /* Dropped rather than cleared: the record is unreachable from the chain
      * now, so nothing walks the exception it still holds, and push clears it
@@ -95,6 +99,21 @@ void cvm_handler_pop(void) {
 CvmHandler* cvm_handler_top(void) {
     CvmVMContext* ctx = cvm_ctx();
     return (ctx != NULL) ? ctx->handlers : NULL;
+}
+
+u32 cvm_handler_depth(void) {
+    CvmVMContext* ctx = cvm_ctx();
+    return (ctx != NULL) ? ctx->handler_depth : 0u;
+}
+
+void cvm_handler_pop_to(u32 depth) {
+    CvmVMContext* ctx = cvm_ctx();
+    if (ctx == NULL) {
+        return;
+    }
+    while (ctx->handler_depth > depth) {
+        cvm_handler_pop();
+    }
 }
 
 opaque_mut cvm_handler_begin_catch(void) {

@@ -14,7 +14,7 @@ still missing from it.
 | **1** | `pending_exception` is described as "a root", but that is a claim about code: `cvm_mark_roots` walks the frame chain and the global root table, and **neither reaches a field of the TLS context**. Nothing marks it today. | The exception in flight is collected between the throw and the catch. A5, and the loudest of the four. |
 | **2** | Nothing says **when `pending_exception` is cleared**. | If nothing clears it, the last exception a thread threw is retained for the thread's lifetime — one object per thread, and a test will not see it. Belongs at the landing pad, where `exception_slot` is filled, and should be asserted empty on the next throw. |
 | **3** | The frame array is **fixed-size per thread** (`frames`, "sized for the recursion"), and nothing says what happens at the bound. | A pointer chain was bounded by the C stack, which a guard page turns into a fault. An array has no guard page: the bound is either checked or it is a silent overwrite. Also unquantified: capacity × `sizeof(CvmGcFrame)` × threads, per thread. |
-| **4** | B2 states the fix as "zero the slots, then link", which leaves the frontend an obligation it can forget. | `cvm_frame_push` already receives `roots` and `num_slots` — **it can zero them itself**, which makes the correct order the only order. This is the same argument the comment above `cvm_frame_push` makes about obligations that "look like boilerplate": the slot zeroing is one of those, and it is currently the frontend's. |
+| **4** | B2 states the fix as "zero the slots, then link", which leaves the frontend an obligation it can forget. | `cvm_frame_push` already receives `roots` and `num_slots` — **it can zero them itself**, which makes the correct order the only order. This is the same argument the comment above `cvm_frame_push` makes about obligations that "look like boilerplate": the slot zeroing is one of those, and it is currently the frontend's. **Resolved:** `cvm_frame_push` now clears the slots itself, so the frontend has no line to get wrong. |
 
 ### Two of the four resolve by naming a mechanism, not by adding a field
 
@@ -394,6 +394,123 @@ per execution of a try: a single `RtJump` can be jumped to repeatedly, and a
 function with no handler registers none and saves nothing. That is what keeps
 the cost proportional to the number of functions that can catch, which in most
 programs is a small fraction of them.
+
+## What the frontend emits
+
+The runtime cannot generate code, so some of this contract is a list of things
+the frontend must do. The rule followed here is that an obligation only stays
+in this list when the runtime genuinely cannot carry it -- everything that
+*could* be done by the runtime is done by the runtime, because an obligation
+that looks like boilerplate is the one that gets forgotten.
+
+### One entry line, and one macro for every exit
+
+```c
+static T f(args...) {
+    CVM_ENTER(f, 2);          /* frame, slots, safepoint, handler depth */
+    ...
+    CVM_RETURN(f, value);     /* and for a void function, CVM_RETURN_VOID */
+}
+```
+
+`CVM_ENTER` (vm/include/cvm/try.h) does four things: declares the frame and
+its slots, records the handler depth, pushes, and polls. The poll is why it
+exists as one line rather than two -- `cvm_frame_push` polls, so a function
+entered is a function that can be stopped, which is what makes the frontend's
+remaining poll obligation exactly the loop back edges.
+
+The frame's slots are cleared by the push, not by the frontend. That is
+assumption B2's ordering ("zero the slots, then link") turned into something
+with no order to get wrong.
+
+### Why not `__attribute__((cleanup))`
+
+It would do the popping automatically, and it is refused for reasons that have
+nothing to do with this design: it forces a non-trivial epilogue on *every*
+function including the ones that cannot throw, it blocks tail-call
+optimisation, and MSVC has no equivalent -- and Windows is a target, not an
+aspiration.
+
+So the pop is a line, and the line is at one place per function. That is
+enforceable by reading a function rather than by auditing every `return` in
+it, which is the only kind of rule that survives a code generator.
+
+### Why the pops are idempotent
+
+`cvm_frame_pop` and `cvm_handler_pop_to` both do nothing when the state is
+already at or below what they would set. The two mistakes that remain are
+popping twice and popping after an unwind has already restored a smaller
+depth, and neither has an effect.
+
+This is a safety net and not a licence. The choke point is still the contract;
+what the idempotence buys is that the consequence of forgetting is a leak or a
+stale count rather than a chain that points into a function that has returned.
+
+### Returning out of a try body is the case the handler depth is for
+
+A `return` inside a try body cannot reach `CVM_ENDTRY`. The handler the body
+pushed would stay linked -- to a landing pad in a frame that no longer exists,
+so the next throw in that thread resumes into a function that has returned.
+That is not a leak, and it is why the chain has a depth:
+
+```c
+CVM_ENTER(f, 1);                        /* records cvm_handler_depth() */
+...
+CVM_TRY() {
+    ...
+    CVM_RETURN(f, value);               /* pops the frame *and* the handlers */
+}
+```
+
+`CVM_RETURN` restores the depth it recorded at entry, so the frontend does not
+have to know how many handlers its body pushed or whether it pushed any.
+
+### A value live across a try must be in memory
+
+This one is not a choice, and it is the cost the mechanism table names. What
+`rt_jump_set` saves is the state of the *calling* function at try entry; the
+landing pad needs the state at throw time. A value that is live after the try
+and modified inside it therefore has to be somewhere that survives the jump --
+a frame slot, or memory the frontend spilled on purpose. The C standard's rule
+that such a local is indeterminate after `longjmp` is the same fact stated as
+a rule.
+
+The mitigation is to make the spill set one the frontend chose. Compiling a
+try body as its own function means everything live across it is passed as an
+argument, and the frontend knows exactly what that is, because it knows the
+source-level liveness. Relying on the C compiler's register allocator instead
+means relying on it to spill precisely the values that matter, which is not
+something it can know.
+
+The runtime helps in one place: a catch does not receive the thrown value
+through a local set inside the try. It asks
+`cvm_handler_begin_catch()`, which reads it from the record -- and the record
+is on the chain, so the value is rooted for as long as the catch runs, without
+the site holding it anywhere.
+
+### The try skeleton is fixed, the bodies are the frontend's
+
+`CVM_TRY` / `CVM_CATCH` / `CVM_ENDTRY` are fixed. The frontend fills two
+bodies and nothing else; in particular it does not pop the handler on the way
+out, because both exits pop (see the macros).
+
+A `finally` is not in the skeleton, and that is a position rather than an
+omission -- see "What this design refuses to do". A runtime that owned
+`finally` would have to know whether the body returned, threw, or fell
+through, and it cannot.
+
+### What is left on the frontend's list
+
+1. A poll on every loop back edge. A loop with no poll can keep a collection
+   waiting indefinitely, which is what `cvm_safepoint_stuck_reports` exists to
+   diagnose.
+2. Foreign calls bracketed with `cvm_thread_enter_unmanaged` /
+   `cvm_thread_leave_unmanaged`, both counted (B4).
+3. Every exit through `CVM_RETURN` / `CVM_RETURN_VOID`.
+
+Each of those is something the runtime cannot do for the frontend: it cannot
+see the frontend's loops, it cannot see the FFI boundary, and it cannot see
+the frontend's returns.
 
 ## What this design refuses to do
 

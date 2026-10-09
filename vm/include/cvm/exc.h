@@ -81,6 +81,22 @@ void cvm_handler_pop(void);
 CvmHandler* cvm_handler_top(void);
 
 /*
+ * How many handlers are linked, and how to take the chain back to a depth.
+ *
+ * These exist for one case, and it is the case that makes a `return` inside a
+ * try body safe. `CVM_ENDTRY` is what pops a handler, and a `return` out of
+ * the body never reaches it: the record would stay linked to a function that
+ * has returned, and the next throw in that thread would resume at its
+ * landing pad -- a jump into a frame that no longer exists.
+ *
+ * So a function that can run a try saves the depth at entry and restores it
+ * on the way out, exactly as it does for frames. The count is what makes
+ * that a store rather than a walk.
+ */
+u32 cvm_handler_depth(void);
+void cvm_handler_pop_to(u32 depth);
+
+/*
  * Mark the innermost handler as catching and hand back what it holds. Called
  * where a catch body begins, and only there.
  */

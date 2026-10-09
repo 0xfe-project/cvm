@@ -314,6 +314,103 @@ TEST an_unwind_restores_the_unmanaged_depth(void) {
     PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* the contract the frontend emits                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A function that returns from inside a try body.
+ *
+ * The return cannot reach CVM_ENDTRY, so the handler the body pushed would
+ * stay linked -- to a landing pad in a frame that no longer exists. That is
+ * worse than a leak: the next throw in this thread would resume into a
+ * function that has returned.
+ *
+ * The choke point is what prevents it, and this is the case the choke point
+ * exists for. It is written as a helper rather than inline because what is
+ * being checked is a function's exit path, and a test body is not a
+ * function with a return.
+ */
+static opaque_mut returns_from_inside_a_try(opaque_mut value) {
+    CVM_ENTER(helper, 1);
+
+    CVM_TRY() {
+        /* Only this frame slot holds it, and the slot goes away with the
+         * frame -- which is why the value comes back out as the return. */
+        helper_roots[0] = value;
+        CVM_RETURN(helper, value);
+    }
+    CVM_CATCH(caught) {
+        (void)caught;
+    }
+    CVM_ENDTRY();
+
+    CVM_RETURN(helper, NULL);
+}
+
+TEST a_return_out_of_a_try_body_leaves_nothing_linked(void) {
+    fixture_enter();
+
+    u32 before = cvm_handler_depth();
+    ASSERT_EQ_FMT(0u, before, "%u");
+
+    void* value = cvm_alloc(&leaf_desc);
+    ASSERT(value != NULL);
+    ASSERT(returns_from_inside_a_try(value) == value);
+    ASSERT_EQ_FMT(before, cvm_handler_depth(), "%u");
+    ASSERT(cvm_handler_top() == NULL);
+
+    fixture_leave();
+    PASS();
+}
+
+/*
+ * The frame's slots are valid the moment the frame is linked.
+ *
+ * cvm_frame_push clears them, so "zero the slots, then link" is not an
+ * obligation the frontend can get wrong -- it is not the frontend's line at
+ * all. That matters because the slots are what the marker walks: a frame
+ * linked with whatever the stack had in those slots is a frame whose roots
+ * are whatever the stack had, and the only thing between that and a wild
+ * read is a bounds check somewhere else.
+ */
+static bool a_pushed_frame_starts_with_null_slots(void) {
+    CVM_ENTER(fresh, 4);
+
+    bool all_null = true;
+    for (u32 i = 0; i < 4; i++) {
+        if (fresh_roots[i] != NULL) {
+            all_null = false;
+        }
+    }
+
+    CVM_RETURN(fresh, all_null);
+}
+
+/*
+ * Fill a frame's slots with heap pointers and pop it, so the storage the next
+ * frame lands in holds something rather than zeroes. A `TEST` body cannot do
+ * this itself: it compiles to a function that returns a test result, not to
+ * one that returns void.
+ */
+static void dirty_the_frame_storage(void) {
+    CVM_ENTER(dirty, 4);
+    for (u32 i = 0; i < 4; i++) {
+        dirty_roots[i] = cvm_alloc(&leaf_desc);
+    }
+    CVM_RETURN_VOID(dirty);
+}
+
+TEST a_pushed_frame_has_null_slots(void) {
+    fixture_enter();
+
+    dirty_the_frame_storage();
+    ASSERT(a_pushed_frame_starts_with_null_slots());
+
+    fixture_leave();
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char** argv) {
@@ -330,6 +427,8 @@ int main(int argc, char** argv) {
     RUN_TEST(a_caught_value_survives_a_collection_during_the_catch);
     RUN_TEST(an_unwind_restores_the_frame_depth);
     RUN_TEST(an_unwind_restores_the_unmanaged_depth);
+    RUN_TEST(a_return_out_of_a_try_body_leaves_nothing_linked);
+    RUN_TEST(a_pushed_frame_has_null_slots);
     GREATEST_MAIN_END();
 
     cvm_world_destroy();

@@ -56,4 +56,54 @@
     cvm_handler_pop();                                                                 \
     }
 
+/*
+ * One line at a function entry, and one macro for every exit.
+ *
+ *     static T f(...) {
+ *         CVM_ENTER(f, 2);
+ *         ...
+ *         CVM_RETURN(f, value);
+ *     }
+ *
+ * `CVM_ENTER` declares the frame and its slots, records the handler depth,
+ * and pushes. The push is also the function's safepoint, so a function
+ * entered is a function that can be stopped -- which leaves loop back edges
+ * as the frontend's only remaining poll obligation.
+ *
+ * `CVM_RETURN` is the choke point. It is not decoration: a `return` that
+ * skipped it would leave the frame linked (a root set that reaches into a
+ * function that has returned) and any handler the body pushed linked as
+ * well (a landing pad in a frame that no longer exists -- the next throw in
+ * that thread would resume into it). Both pops are idempotent, so getting
+ * this wrong costs nothing; doing it in one place is what makes getting it
+ * right checkable by reading, rather than by auditing every return.
+ *
+ * Not `__attribute__((cleanup))`, which would do it automatically and has
+ * been rejected for reasons that have nothing to do with this header: it
+ * forces a non-trivial epilogue on every function including the ones that
+ * cannot throw, it blocks tail-call optimisation, and MSVC has no
+ * equivalent -- and Windows is a target.
+ */
+#define CVM_ENTER(name, slots)                                                         \
+    CVM_FRAME_DECL(name, slots);                                                       \
+    u32 name##_handlers = cvm_handler_depth();                                         \
+    cvm_frame_push(&name##_frame, name##_roots, (slots))
+
+#define CVM_RETURN(name, ...)                                                          \
+    do {                                                                               \
+        cvm_frame_pop(&name##_frame);                                                  \
+        cvm_handler_pop_to(name##_handlers);                                           \
+        return __VA_ARGS__;                                                            \
+    } while (0)
+
+/* The same for a function with nothing to return. A separate macro rather
+ * than an empty argument, which is not valid before C23 and is a warning
+ * everywhere else. */
+#define CVM_RETURN_VOID(name)                                                          \
+    do {                                                                               \
+        cvm_frame_pop(&name##_frame);                                                  \
+        cvm_handler_pop_to(name##_handlers);                                           \
+        return;                                                                        \
+    } while (0)
+
 #endif /* CVM_TRY_H */

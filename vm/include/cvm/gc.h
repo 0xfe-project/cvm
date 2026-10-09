@@ -434,6 +434,7 @@ typedef struct CvmVMContext {
      */
     CvmHandler* handlers;
     CvmHandler* free_handlers;
+    u32 handler_depth;
 
     /*
      * The runtime's own record for this thread (vm/context.h). A context
@@ -562,6 +563,23 @@ CVM_INLINE void cvm_frame_push(CvmFrameHandle* frame, opaque_mut* roots,
     u32 index = ctx->frame_depth;
     ctx->frames[index].roots = roots;
     ctx->frames[index].num_slots = num_slots;
+
+    /*
+     * Zeroed here rather than left to the caller.
+     *
+     * A frame whose slots hold whatever the stack had is a frame whose roots
+     * are whatever the stack had: the marker would walk them, and the only
+     * thing standing between that and a wild read is the bounds check
+     * (assumption A2). Doing it here makes "the slots are valid when the
+     * frame is linked" the only order, instead of an obligation that looks
+     * like boilerplate and is therefore the one that gets forgotten -- the
+     * same argument this file already makes about the safepoint poll being
+     * inside the push.
+     */
+    for (u32 slot = 0; slot < num_slots; slot++) {
+        roots[slot] = NULL;
+    }
+
     ctx->frame_depth = index + 1u;
     frame->index = index;
 }
