@@ -192,12 +192,20 @@ static opaque_mut system_alloc(opaque_mut ctx, usize bytes) {
     return rt_mem_alloc(bytes);
 }
 
+static opaque_mut system_realloc(opaque_mut ctx, opaque_mut p, usize bytes) {
+    (void)ctx;
+    return rt_mem_realloc(p, bytes);
+}
+
 static void system_free(opaque_mut ctx, opaque_mut p) {
     (void)ctx;
     rt_mem_free(p);
 }
 
 CvmAlloc cvm_buf_system_alloc(void) {
-    CvmAlloc a = {.ctx = NULL, .alloc = system_alloc, .free = system_free};
+    CvmAlloc a = {.ctx = NULL,
+                  .alloc = system_alloc,
+                  .realloc = system_realloc,
+                  .free = system_free};
     return a;
 }

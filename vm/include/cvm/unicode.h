@@ -34,6 +34,7 @@
 #ifndef CVM_UNICODE_H
 #define CVM_UNICODE_H
 
+#include "base/alloc.h"
 #include "base/types.h"
 #include "cvm/str.h"
 
@@ -157,11 +158,7 @@ CVM_INLINE bool cvm_unicode_is_ident_continue(rune c) {
  * character ranges take one of these, which is why it is here rather than next to
  * either of them.
  */
-typedef struct CvmUnicodeAlloc {
-    opaque_mut ctx;
-    opaque_mut (*alloc)(opaque_mut ctx, usize bytes);
-    void (*free)(opaque_mut ctx, opaque_mut p);
-} CvmUnicodeAlloc;
+typedef CvmAlloc CvmUnicodeAlloc;
 
 /* ------------------------------------------------------------------ */
 /* character ranges                                                    */

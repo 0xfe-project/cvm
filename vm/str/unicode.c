@@ -585,16 +585,11 @@ static bool unibuf_reserve(UniBuf* buf, usize bytes) {
         want *= 2u;
     }
 
-    u8* fresh = buf->alloc.alloc(buf->alloc.ctx, want);
+    /* One call: the contents and the old size are the allocator's business. */
+    u8* fresh = buf->alloc.realloc(buf->alloc.ctx, buf->data, want);
     if (fresh == NULL) {
         buf->error = true;
         return false;
-    }
-    for (usize i = 0; i < buf->size; i++) {
-        fresh[i] = buf->data[i];
-    }
-    if (buf->data != NULL) {
-        buf->alloc.free(buf->alloc.ctx, buf->data);
     }
     buf->data = fresh;
     buf->allocated = want;
@@ -2182,13 +2177,21 @@ static opaque_mut system_alloc(opaque_mut ctx, usize bytes) {
     return rt_mem_alloc(bytes);
 }
 
+static opaque_mut system_realloc(opaque_mut ctx, opaque_mut p, usize bytes) {
+    (void)ctx;
+    return rt_mem_realloc(p, bytes);
+}
+
 static void system_free(opaque_mut ctx, opaque_mut p) {
     (void)ctx;
     rt_mem_free(p);
 }
 
 CvmUnicodeAlloc cvm_unicode_system_alloc(void) {
-    CvmUnicodeAlloc a = {.ctx = NULL, .alloc = system_alloc, .free = system_free};
+    CvmUnicodeAlloc a = {.ctx = NULL,
+                         .alloc = system_alloc,
+                         .realloc = system_realloc,
+                         .free = system_free};
     return a;
 }
 

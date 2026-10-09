@@ -113,6 +113,26 @@ opaque_mut rt_mem_alloc(usize bytes);
 void rt_mem_free(opaque_mut p);
 
 /*
+ * Resize an allocation, keeping its contents.
+ *
+ * This is here because almost every caller that grows something wants it, and the
+ * shape they reach for instead — allocate, copy, free — is the same operation
+ * written out with a size they then have to have kept. Keeping it also means one
+ * implementation of it rather than one per buffer, and the platform's own
+ * implementation can extend in place, which is the common case for a buffer that
+ * grows by a little at a time.
+ *
+ * The conventions are realloc's, made explicit rather than inherited: a NULL
+ * pointer allocates, and a size of zero frees and returns NULL. (A C library is
+ * allowed to return a small block for a zero size; a caller that had to know that
+ * would be writing the same bookkeeping this call exists to avoid.)
+ *
+ * Returns NULL when the allocation fails, in which case the original block is
+ * still valid and still the caller's.
+ */
+opaque_mut rt_mem_realloc(opaque_mut p, usize bytes);
+
+/*
  * Reserve a range of address space, and commit it.
  *
  * This is what the GC heap is built on, and the distinction from

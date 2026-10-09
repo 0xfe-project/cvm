@@ -29,6 +29,17 @@ void rt_mem_free(opaque_mut p) {
     free(p);
 }
 
+opaque_mut rt_mem_realloc(opaque_mut p, usize bytes) {
+    if (bytes == 0) {
+        /* The C library's behaviour for a zero size is either a small block or
+         * NULL, and a caller should not have to know which. Ours is the second,
+         * with the old block released. */
+        free(p);
+        return NULL;
+    }
+    return realloc(p, bytes);
+}
+
 /* ------------------------------------------------------------------ */
 /* address space                                                       */
 /* ------------------------------------------------------------------ */

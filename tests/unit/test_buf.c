@@ -18,10 +18,27 @@
 #include "base/types.h"
 #include "cvm/buf.h"
 
-/* An allocator that refuses, for the error path. */
+/*
+ * An allocator that refuses, and counts what it was asked for.
+ *
+ * The count is the point: a buffer that reports an error without having tried to
+ * grow would pass the assertions below for the wrong reason, and the difference
+ * between "it refused" and "it never asked" is exactly what this test is for.
+ */
+static usize refused_calls;
+
 static opaque_mut refusing_alloc(opaque_mut ctx, usize bytes) {
     (void)ctx;
     (void)bytes;
+    refused_calls++;
+    return NULL;
+}
+
+static opaque_mut refusing_realloc(opaque_mut ctx, opaque_mut p, usize bytes) {
+    (void)ctx;
+    (void)p;
+    (void)bytes;
+    refused_calls++;
     return NULL;
 }
 
@@ -141,13 +158,20 @@ TEST growing_keeps_what_was_there(void) {
 
 TEST a_failing_allocator_is_reported_and_keeps_what_was_there(void) {
     CvmBuf buf;
-    CvmAlloc refusing = {.ctx = NULL, .alloc = refusing_alloc, .free = refusing_free};
+    CvmAlloc refusing = {.ctx = NULL,
+                         .alloc = refusing_alloc,
+                         .realloc = refusing_realloc,
+                         .free = refusing_free};
     cvm_buf_init(&buf, refusing);
+    refused_calls = 0;
 
     /* nothing has been allocated yet, so the first append is the one that fails */
     ASSERT_FALSE(cvm_buf_putc(&buf, 'a'));
     ASSERT(cvm_buf_error(&buf));
     ASSERT_EQ_FMT((usize)0, cvm_buf_size(&buf), "%zu");
+    /* and it failed because growth was attempted and refused, not for some other
+     * reason that happens to leave the buffer empty */
+    ASSERT_EQ_FMT((usize)1, refused_calls, "%zu");
 
     /* and the failure is sticky: later appends do not retry, and do not pretend
      * they worked */
