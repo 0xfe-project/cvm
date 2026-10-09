@@ -73,6 +73,24 @@ typedef struct CvmThreadNode {
     _Atomic u32 state;
 
     /*
+     * How many `cvm_thread_enter_unmanaged` calls are outstanding. The
+     * state above is `UNMANAGED` exactly when this is non-zero, and it is
+     * this counter and not the state that `leave` decrements, so nesting
+     * composes:
+     *
+     *     enter(); enter(); leave();   leaves depth 1, still unmanaged
+     *
+     * A single flag cannot express that, and the version that used one
+     * reported the thread as managed after the first leave -- so a
+     * collection would stop waiting for a thread that was still inside a
+     * foreign call, which is the state the flag exists to avoid.
+     *
+     * Atomic for the same reason `state` is: it decides what `state`
+     * becomes, and a collector reads the result.
+     */
+    _Atomic u32 unmanaged_depth;
+
+    /*
      * Set by the thread itself when it is stopped at a safepoint, cleared
      * when it resumes. Read by the collecting thread while the parked
      * thread is blocked, so it has to be atomic.

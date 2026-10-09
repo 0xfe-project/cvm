@@ -254,6 +254,87 @@ TEST unmanaged_thread_is_not_waited_for(void) {
     PASS();
 }
 
+/*
+ * The same, with the depth nested before the collection runs.
+ *
+ * Two enters and one leave leave the thread inside a foreign call, and it
+ * is inside a foreign call that it does not park. So if that first leave
+ * had announced it managed, this collection would have waited for a thread
+ * that cannot answer -- which is the stall unmanaged state exists to
+ * avoid. The assertion is made from the collector's side because that is
+ * the side the state is for.
+ */
+static opaque_mut sits_in_nested_foreign_code(opaque_mut arg) {
+    UnmanagedArg* a = arg;
+    if (!cvm_thread_attach()) {
+        return NULL;
+    }
+
+    cvm_thread_enter_unmanaged();
+    cvm_thread_enter_unmanaged();
+    cvm_thread_leave_unmanaged(); /* depth 1: still unmanaged */
+    atomic_store(&a->ready, true);
+
+    /*
+     * Bounded, so that a regression fails this test instead of hanging it.
+     *
+     * The collector below acquires the world and will not be given it back
+     * until this thread parks. If the depth were not counted, this thread
+     * would already look managed, the collector would wait for a park that
+     * cannot come from inside foreign code, and nothing would ever set
+     * `go` -- a deadlock with no output. With a bound, the wait ends, the
+     * thread leaves and parks, the collection finishes, and the assertion
+     * on the diagnostic counter is what fails.
+     */
+    u64 deadline = rt_time_nanos() + 2000000000ull;
+    while (!atomic_load(&a->go) && rt_time_nanos() < deadline) {
+        rt_thread_yield();
+    }
+
+    cvm_thread_leave_unmanaged();
+    atomic_store(&a->done, true);
+    cvm_thread_detach();
+    return NULL;
+}
+
+TEST a_nested_unmanaged_thread_is_not_waited_for(void) {
+    ensure_world_running();
+
+    ASSERT(cvm_thread_attach());
+
+    UnmanagedArg arg = {.ready = false, .go = false, .done = false};
+    RtThread foreign;
+    ASSERT(rt_thread_create(&foreign, sits_in_nested_foreign_code, &arg));
+
+    u64 deadline = rt_time_nanos() + 2000000000ull;
+    while (!atomic_load(&arg.ready) && rt_time_nanos() < deadline) {
+        rt_thread_yield();
+    }
+    ASSERT(atomic_load(&arg.ready));
+
+    cvm_threads_lock_read();
+    bool saw_unmanaged = false;
+    CVM_THREADS_FOREACH(node) {
+        if ((u32)atomic_load(&node->state) == (u32)CVM_THREAD_UNMANAGED) {
+            saw_unmanaged = true;
+            ASSERT_FALSE(atomic_load(&node->parked));
+        }
+    }
+    cvm_threads_unlock_read();
+    ASSERT(saw_unmanaged);
+
+    u32 reports_before = cvm_safepoint_stuck_reports();
+    ASSERT(cvm_safepoint_acquire());
+    ASSERT_EQ_FMT(reports_before, cvm_safepoint_stuck_reports(), "%u");
+    cvm_safepoint_release();
+
+    atomic_store(&arg.go, true);
+    ASSERT(rt_thread_join(foreign));
+
+    cvm_thread_detach();
+    PASS();
+}
+
 /* ------------------------------------------------------------------ */
 /* a thread that never polls is reported                               */
 /* ------------------------------------------------------------------ */
@@ -411,6 +492,7 @@ SUITE(safepoint_suite) {
     RUN_TEST(release_without_acquire_is_harmless);
     RUN_TEST(acquire_waits_for_a_polling_thread);
     RUN_TEST(unmanaged_thread_is_not_waited_for);
+    RUN_TEST(a_nested_unmanaged_thread_is_not_waited_for);
     RUN_TEST(stuck_thread_is_reported);
     RUN_TEST(second_acquire_reports_false_while_held);
 }

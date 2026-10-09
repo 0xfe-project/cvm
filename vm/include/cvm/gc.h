@@ -206,6 +206,14 @@ typedef struct CvmGcHeader {
  *     cvm_thread_enter_unmanaged();
  *     ... foreign call ...
  *     cvm_thread_leave_unmanaged();
+ *
+ * The two are counted, so nesting composes. That is the ordinary case
+ * rather than an exotic one: a foreign call that calls back into managed
+ * code, which makes a foreign call of its own, nests. Only the outermost
+ * leave makes the thread managed again.
+ *
+ * Leaving polls before returning to generated code, which is what makes
+ * the return safe when a collection started while the thread was away.
  */
 typedef enum CvmThreadState {
     CVM_THREAD_MANAGED = 0,

@@ -109,6 +109,7 @@ bool cvm_thread_attach(void) {
     node->id = rt_thread_id();
     node->role = (u32)CVM_THREAD_ROLE_MUTATOR;
     atomic_store(&node->state, (u32)CVM_THREAD_MANAGED);
+    atomic_store(&node->unmanaged_depth, 0u);
     atomic_store(&node->parked, false);
     cvm_list_unlink(&node->link);
 
@@ -313,20 +314,72 @@ bool cvm_thread_node_is_alive(CvmThreadNode const* node) {
  * collector that observes the state also observes everything the thread
  * did before it.
  *
- * Leaving is where the synchroniser will hook in: if a collection started
- * while this thread was inside the foreign call, the thread must wait for
- * it to finish before touching the heap again. That is not implemented
- * yet, so leaving is currently just the state change.
+ * Leaving is where the synchroniser hooks in: if a collection started while
+ * this thread was inside the foreign call, the thread must wait for it to
+ * finish before touching the heap again, and it does that by polling after
+ * it has announced itself managed again.
+ *
+ * Both are counted rather than flagged. Nesting is the ordinary case -- a
+ * foreign call that itself calls back into managed code that makes another
+ * foreign call -- and a flag cannot express it: `enter(); enter(); leave();`
+ * would report the thread managed while it is still inside the outer call.
+ * Only the transition to depth zero changes the state a collector reads.
  */
 void cvm_thread_enter_unmanaged(void) {
-    cvm_thread_set_state(CVM_THREAD_UNMANAGED);
+    CvmThreadNode* node = cvm_thread_node();
+    if (node == NULL) {
+        /* Nothing registered: there is no state to be unmanaged relative
+         * to, and a collector is not waiting for this thread. */
+        return;
+    }
+
+    u32 depth =
+        atomic_fetch_add_explicit(&node->unmanaged_depth, 1u, memory_order_acq_rel) +
+        1u;
+    if (depth == 1u) {
+        /* First entry: publish the state a collector reads, and wake one
+         * that is waiting out its diagnostic interval for this thread. A
+         * collector no longer has to wait for an unmanaged thread, and it
+         * should not have to wait to notice. */
+        atomic_store_explicit(&node->state, (u32)CVM_THREAD_UNMANAGED,
+                              memory_order_release);
+        if (cvm_safepoint_in_progress()) {
+            cvm_safepoint_notify_thread_changed();
+        }
+    }
 }
 
 void cvm_thread_leave_unmanaged(void) {
-    cvm_thread_set_state(CVM_THREAD_MANAGED);
+    CvmThreadNode* node = cvm_thread_node();
+    if (node == NULL) {
+        return;
+    }
+
+    u32 depth = atomic_load_explicit(&node->unmanaged_depth, memory_order_relaxed);
+    for (;;) {
+        if (depth == 0) {
+            /* Leaving without a matching enter. Restore the invariant
+             * rather than leaving a running thread looking unmanaged, but
+             * do not skip the poll: a foreign call ended either way. */
+            cvm_thread_set_state(CVM_THREAD_MANAGED);
+            cvm_safepoint_poll();
+            return;
+        }
+        if (atomic_compare_exchange_weak_explicit(&node->unmanaged_depth, &depth,
+                                                  depth - 1, memory_order_acq_rel,
+                                                  memory_order_relaxed)) {
+            break;
+        }
+    }
+
+    if (depth != 1u) {
+        /* Still nested. This thread remains unmanaged and a collection is
+         * still entitled to skip it. */
+        return;
+    }
 
     /*
-     * Now managed, so a collection must be able to stop this thread — and
+     * Now managed, so a collection must be able to stop this thread -- and
      * one may have started while it was inside the foreign call. Polling
      * here is what makes returning from foreign code safe.
      *
@@ -336,6 +389,7 @@ void cvm_thread_leave_unmanaged(void) {
      * a window where the thread looks unmanaged and is skipped, but is
      * about to touch the heap.
      */
+    cvm_thread_set_state(CVM_THREAD_MANAGED);
     cvm_safepoint_poll();
 }
 

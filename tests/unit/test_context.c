@@ -155,12 +155,58 @@ TEST entering_and_leaving_unmanaged_flips_the_state(void) {
     cvm_thread_leave_unmanaged();
     ASSERT_EQ_FMT((int)CVM_THREAD_MANAGED, (int)cvm_thread_get_state(), "%d");
 
-    /* unbalanced calls are not an error at this layer; the synchroniser
-     * is what will care */
+    cvm_thread_detach();
+    PASS();
+}
+
+/*
+ * Nesting is the ordinary case, not an exotic one: a foreign call that
+ * calls back into managed code, which makes a foreign call of its own.
+ *
+ * The state a collector reads is `unmanaged` exactly while the depth is
+ * non-zero, so the first leave must not announce the thread as managed.
+ * The version that used a flag did exactly that -- `enter(); enter();
+ * leave();` left the thread managed while it was still inside the outer
+ * call, and that is the state a collection is entitled to stop. Stopping a
+ * thread inside foreign code is the stall this state exists to avoid.
+ */
+TEST unmanaged_state_nests(void) {
+    ASSERT(cvm_thread_attach());
+
     cvm_thread_enter_unmanaged();
     cvm_thread_enter_unmanaged();
+    ASSERT_EQ_FMT((int)CVM_THREAD_UNMANAGED, (int)cvm_thread_get_state(), "%d");
+
     cvm_thread_leave_unmanaged();
+    ASSERT_EQ_FMT((int)CVM_THREAD_UNMANAGED, (int)cvm_thread_get_state(), "%d");
+
     cvm_thread_leave_unmanaged();
+    ASSERT_EQ_FMT((int)CVM_THREAD_MANAGED, (int)cvm_thread_get_state(), "%d");
+
+    cvm_thread_detach();
+    PASS();
+}
+
+/*
+ * A leave with no matching enter restores the invariant instead of driving
+ * the depth below zero.
+ *
+ * The depth is what the next enter compares against, so a counter that went
+ * negative would make the *first* enter of the next foreign call look like
+ * a nested one -- and the thread would then never announce itself managed
+ * again, which is a collection waiting for a thread that has come back.
+ */
+TEST a_leave_without_an_enter_leaves_the_thread_managed(void) {
+    ASSERT(cvm_thread_attach());
+
+    cvm_thread_leave_unmanaged();
+    ASSERT_EQ_FMT((int)CVM_THREAD_MANAGED, (int)cvm_thread_get_state(), "%d");
+
+    /* The next enter is the first, not a nested one. */
+    cvm_thread_enter_unmanaged();
+    ASSERT_EQ_FMT((int)CVM_THREAD_UNMANAGED, (int)cvm_thread_get_state(), "%d");
+    cvm_thread_leave_unmanaged();
+    ASSERT_EQ_FMT((int)CVM_THREAD_MANAGED, (int)cvm_thread_get_state(), "%d");
 
     cvm_thread_detach();
     PASS();
@@ -356,6 +402,8 @@ SUITE(context_suite) {
     RUN_TEST(registered_thread_is_visible_in_the_registry);
     RUN_TEST(state_defaults_to_managed);
     RUN_TEST(entering_and_leaving_unmanaged_flips_the_state);
+    RUN_TEST(unmanaged_state_nests);
+    RUN_TEST(a_leave_without_an_enter_leaves_the_thread_managed);
     RUN_TEST(state_of_an_unregistered_thread_reads_as_managed);
     RUN_TEST(a_running_thread_is_alive);
     RUN_TEST(many_threads_register_and_unregister);
