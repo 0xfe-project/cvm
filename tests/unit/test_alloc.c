@@ -382,17 +382,20 @@ TEST a_returned_chunk_is_reused(void) {
     fixture_enter();
     ASSERT(cvm_thread_ctx() != NULL);
 
-    CvmLargeAllocator* large = &cvm_thread_node()->large_allocator;
-
-    u32 free_before = cvm_large_free_chunk_count(large);
+    /*
+     * The lists are the heap's, so the count is too -- which is the property
+     * that matters: a chunk filed by one thread is visible to the next, and
+     * to a GC worker that sweeps.
+     */
+    u32 free_before = cvm_large_free_chunk_count(the_heap());
 
     /* Build a chunk from a fresh block and hand it back. */
     CvmChunk* chunk = (CvmChunk*)cvm_heap_block_address(the_heap(), 0);
     ASSERT(chunk != NULL);
-    cvm_large_add_chunk(large, chunk, CVM_LARGE_OBJECT_MIN_SIZE);
+    cvm_large_add_chunk(the_heap(), chunk, CVM_LARGE_OBJECT_MIN_SIZE);
 
-    ASSERT_EQ_FMT(free_before + 1, cvm_large_free_chunk_count(large), "%u");
-    ASSERT(cvm_large_free_bytes(large) >= CVM_LARGE_OBJECT_MIN_SIZE);
+    ASSERT_EQ_FMT(free_before + 1, cvm_large_free_chunk_count(the_heap()), "%u");
+    ASSERT(cvm_large_free_bytes(the_heap()) >= CVM_LARGE_OBJECT_MIN_SIZE);
 
     fixture_leave();
     PASS();
@@ -425,7 +428,23 @@ TEST a_fresh_thread_has_a_clear_allocator(void) {
     ASSERT(node->allocator.bytemap == the_bytemap());
     ASSERT(node->allocator.block_alloc == &cvm_world()->block_alloc);
     ASSERT_EQ_FMT(0u, cvm_allocator_recycled_count(&node->allocator), "%u");
-    ASSERT_EQ_FMT(0u, cvm_large_free_chunk_count(&node->large_allocator), "%u");
+
+    /*
+     * The chunk free lists are not part of this. They are the heap's, so a
+     * thread attaching neither inherits them nor clears them -- and the
+     * check that used to be here, that a fresh thread sees them empty, only
+     * passed because an earlier test in this binary had not filed anything
+     * yet. An invariant that holds by accident of test order is not one.
+     *
+     * What is asserted instead is the property that matters: attaching does
+     * not disturb them. A GC worker sweeping files chunks into these lists
+     * without attaching at all, so anything that cleared them per attach
+     * would throw that work away.
+     */
+    u32 chunks_before = cvm_large_free_chunk_count(the_heap());
+    fixture_leave();
+    fixture_enter();
+    ASSERT_EQ_FMT(chunks_before, cvm_large_free_chunk_count(the_heap()), "%u");
 
     fixture_leave();
     PASS();

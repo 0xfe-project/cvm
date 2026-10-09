@@ -95,8 +95,26 @@ TEST a_throw_reaches_the_innermost_handler(void) {
     ASSERT(outer_value != NULL);
     ASSERT(inner_value != NULL);
 
-    bool outer_ran = false;
-    bool inner_ran = false;
+    /*
+     * volatile, and that is not decoration.
+     *
+     * This is a local modified between a jump and the jump back to it --
+     * set in the catch, read after the try -- which is the shape the C
+     * standard makes indeterminate. A compiler is entitled to keep it in a
+     * callee-saved register across the jump, and the longjmp restores that
+     * register to its value before the jump, so the assignment disappears.
+     * That is exactly what happened at -O2: this test passed at -O0 and
+     * failed in the release configuration, and the release configuration
+     * had been red for long enough that nobody read it as a test bug.
+     *
+     * volatile is the standard's own remedy: the rule exempts objects of
+     * volatile-qualified type. The alternative, and the one the rest of this
+     * file uses for values that matter, is to keep the state in the frame's
+     * slots, which the runtime owns -- but what is being asserted here is
+     * that control arrived, and a flag is what that is.
+     */
+    volatile bool outer_ran = false;
+    volatile bool inner_ran = false;
 
     CVM_TRY() {
         CVM_TRY() {
@@ -181,7 +199,8 @@ TEST a_caught_value_survives_a_collection_during_the_catch(void) {
     stamp(thrown);
     u64 stamped = thrown->canary;
 
-    bool checked = false;
+    /* See the note in a_throw_reaches_the_innermost_handler. */
+    volatile bool checked = false;
 
     CVM_TRY() {
         /*
@@ -563,7 +582,8 @@ static bool slots_modified_inside_a_try_survive_it(void) {
     f_roots[0] = NULL;
     f_roots[1] = NULL;
 
-    bool ok = false;
+    /* See the note in a_throw_reaches_the_innermost_handler. */
+    volatile bool ok = false;
 
     CVM_TRY() {
         /*

@@ -85,6 +85,26 @@ void cvm_region_release(CvmRegion* region);
  * concurrent workers, which is the single-threaded case. */
 struct CvmGcPool;
 
+/*
+ * A chunk is the unit the large-object allocator hands out: whole multiples
+ * of the large-object granularity, smaller than a block. While it is free it
+ * carries its own header, so the free lists cost no memory of their own.
+ *
+ * Declared here because the heap owns the lists -- see large_free_lists
+ * below -- and because both gc/large.h and this header need the type without
+ * one including the other.
+ */
+typedef struct CvmChunk {
+    usize size;            /* total bytes in this chunk */
+    struct CvmChunk* next; /* next free chunk of the same size class */
+} CvmChunk;
+
+/* One size class of free chunks. A compare-exchange stack, because the
+ * threads that push are not the threads that pop. */
+typedef struct CvmFreeList {
+    _Atomic(usize) head; /* CvmChunk*, as an integer so zero means empty */
+} CvmFreeList;
+
 typedef struct CvmHeap {
     /* --- the block-aligned heap window --- */
     CvmRegion blocks;
@@ -242,6 +262,21 @@ typedef struct CvmHeap {
      * reservation holding the heap's own payload.
      */
     CvmBlockAllocator* block_alloc;
+
+    /*
+     * Free chunks, by size class.
+     *
+     * The heap's, not a mutator's, and that is the point: a chunk is returned
+     * by whichever thread sweeps the block it lived in, and a GC worker
+     * sweeping has no mutator to return it to. The lists are compare-exchange
+     * stacks, so any thread can push or pop one, which is what the comment on
+     * cvm_large_add_chunk has claimed since it was written.
+     *
+     * They are dropped at the start of every collection and rebuilt by the
+     * sweep, so nothing here outlives a cycle and there is no ownership to
+     * track.
+     */
+    CvmFreeList large_free_lists[CVM_LARGE_FREE_LIST_COUNT];
 
 } CvmHeap;
 

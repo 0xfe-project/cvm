@@ -91,24 +91,29 @@ static CvmChunk* free_list_pop(CvmFreeList* list) {
 /* setup                                                               */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Point an allocator at the heap it serves.
+ *
+ * Nothing to initialize but the three pointers: the free lists belong to the
+ * heap and are set up with it, because a mutator that is attaching is not
+ * the only thing that touches them -- a GC worker sweeping a block files a
+ * chunk without ever attaching. Initializing them here would make a thread's
+ * attach wipe whatever another thread had already filed.
+ */
 void cvm_large_init(CvmLargeAllocator* large, CvmBlockAllocator* blocks,
                     Bytemap* bytemap, CvmHeap* heap) {
     large->bytemap = bytemap;
     large->block_alloc = blocks;
     large->heap = heap;
+}
 
+void cvm_large_clear(CvmHeap* heap) {
     for (u32 i = 0; i < CVM_LARGE_FREE_LIST_COUNT; i++) {
-        atomic_store(&large->free_lists[i].head, 0);
+        atomic_store(&heap->large_free_lists[i].head, 0);
     }
 }
 
-void cvm_large_clear(CvmLargeAllocator* large) {
-    for (u32 i = 0; i < CVM_LARGE_FREE_LIST_COUNT; i++) {
-        atomic_store(&large->free_lists[i].head, 0);
-    }
-}
-
-void cvm_large_add_chunk(CvmLargeAllocator* large, CvmChunk* chunk, usize total_size) {
+void cvm_large_add_chunk(CvmHeap* heap, CvmChunk* chunk, usize total_size) {
     cvm_assert(total_size >= CVM_LARGE_OBJECT_MIN_SIZE);
     cvm_assert(total_size < CVM_BLOCK_SIZE);
     cvm_assert(cvm_is_aligned(total_size, CVM_LARGE_OBJECT_MIN_SIZE));
@@ -121,18 +126,18 @@ void cvm_large_add_chunk(CvmLargeAllocator* large, CvmChunk* chunk, usize total_
      * treating a free chunk as an object, and what makes the chunk's
      * interior invisible rather than looking like a crowd of objects.
      */
-    object_meta_set_placeholder(bytemap_get(large->bytemap, (u8 const*)chunk));
+    object_meta_set_placeholder(bytemap_get(heap->bytemap, (u8 const*)chunk));
 
-    free_list_push(&large->free_lists[size_to_list_index(total_size)], chunk);
+    free_list_push(&heap->large_free_lists[size_to_list_index(total_size)], chunk);
 }
 
-usize cvm_large_free_bytes(CvmLargeAllocator const* large) {
+usize cvm_large_free_bytes(CvmHeap const* heap) {
     usize total = 0;
     for (u32 i = 0; i < CVM_LARGE_FREE_LIST_COUNT; i++) {
         /* Walking without popping: the list is only ever appended to by
          * sweepers between collections, so a snapshot is safe to read. */
         CvmChunk* chunk = (CvmChunk*)atomic_load_explicit(
-            &((CvmLargeAllocator*)large)->free_lists[i].head, memory_order_acquire);
+            &((CvmHeap*)heap)->large_free_lists[i].head, memory_order_acquire);
         while (chunk != NULL) {
             total += chunk->size;
             chunk = chunk->next;
@@ -141,11 +146,11 @@ usize cvm_large_free_bytes(CvmLargeAllocator const* large) {
     return total;
 }
 
-u32 cvm_large_free_chunk_count(CvmLargeAllocator const* large) {
+u32 cvm_large_free_chunk_count(CvmHeap const* heap) {
     u32 count = 0;
     for (u32 i = 0; i < CVM_LARGE_FREE_LIST_COUNT; i++) {
         CvmChunk* chunk = (CvmChunk*)atomic_load_explicit(
-            &((CvmLargeAllocator*)large)->free_lists[i].head, memory_order_acquire);
+            &((CvmHeap*)heap)->large_free_lists[i].head, memory_order_acquire);
         while (chunk != NULL) {
             count++;
             chunk = chunk->next;
@@ -175,7 +180,7 @@ static CvmChunk* take_chunk(CvmLargeAllocator* large, usize size) {
      * and hand the same chunk out twice.
      */
     for (u32 i = start; i < CVM_LARGE_FREE_LIST_COUNT; i++) {
-        CvmChunk* chunk = free_list_pop(&large->free_lists[i]);
+        CvmChunk* chunk = free_list_pop(&large->heap->large_free_lists[i]);
         if (chunk == NULL) {
             continue;
         }
@@ -187,7 +192,7 @@ static CvmChunk* take_chunk(CvmLargeAllocator* large, usize size) {
 
         if (chunk_size > size) {
             CvmChunk* leftover = (CvmChunk*)((u8*)chunk + size);
-            cvm_large_add_chunk(large, leftover, chunk_size - size);
+            cvm_large_add_chunk(large->heap, leftover, chunk_size - size);
         }
 
         return chunk;
@@ -197,60 +202,26 @@ static CvmChunk* take_chunk(CvmLargeAllocator* large, usize size) {
 }
 
 /*
- * Cut a chunk out of a fresh block.
+ * Cut a chunk out of a freshly grown superblock.
  *
- * The block is one contiguous run; the front becomes the requested chunk
- * and everything after it goes back on the free lists in large-object
- * multiples. Anything left over that is too small to be a chunk is
- * wasted, which is bounded by one granularity unit per block.
+ * Every large object comes from one of these, a single block long for
+ * anything that fits in a block -- and that is the point rather than an
+ * implementation detail. A block obtained this way is marked as a superblock
+ * by the block allocator, and both the marker and the sweeper read that mark:
+ * the marker knows not to look for line marks in it, and the sweeper walks it
+ * as chunks rather than as lines. Obtaining it as an ordinary block instead
+ * -- which is what this did, and the reference does not -- leaves the sweeper
+ * line-walking a block full of large objects, and leaves the chunk path in
+ * cvm_sweep_superblock with no workload that reaches it.
+ *
+ * Whatever is left of the superblock after the object is cut off goes back on
+ * the free lists, which is how one block comes to hold several large objects.
+ * The remainder is always smaller than a block: the count was rounded up to
+ * hold the object, so the object is more than blocks - 1 blocks long.
  */
-static CvmChunk* take_chunk_from_new_block(CvmLargeAllocator* large, usize size) {
-    BlockMeta* block = cvm_block_alloc_get_block(large->block_alloc);
-    if (block == NULL) {
-        return NULL;
-    }
+static CvmChunk* take_chunk_from_superblock(CvmLargeAllocator* large, usize size) {
+    u32 blocks = (u32)cvm_div_round_up(size, CVM_BLOCK_SIZE);
 
-    u8* block_start = block_meta_block_start(large->heap->block_meta_start,
-                                             large->heap->heap_start, block);
-    CvmChunk* chunk = (CvmChunk*)block_start;
-
-    usize remaining = CVM_BLOCK_SIZE - size;
-    if (remaining >= CVM_LARGE_OBJECT_MIN_SIZE) {
-        usize usable =
-            (remaining / CVM_LARGE_OBJECT_MIN_SIZE) * CVM_LARGE_OBJECT_MIN_SIZE;
-        CvmChunk* rest = (CvmChunk*)(block_start + size);
-        cvm_large_add_chunk(large, rest, usable);
-    }
-
-    chunk->size = size;
-    return chunk;
-}
-
-/*
- * One attempt at a large object, without collecting.
- *
- * Two shapes, and the boundary between them is a block. Up to one block the
- * object is a chunk carved out of a block, which is what the segregated free
- * lists and take_chunk_from_new_block are for. Above one block it is a run of
- * whole blocks, which is a superblock -- and everything else in the collector
- * already understands one: the block allocator hands out a run with the head
- * marked superblock_start and the rest marked tail, the marker skips line
- * marking for any block that is one of those, and cvm_sweep_superblock walks
- * exactly the shape an object has when it bodies the front blocks and ends in
- * the last one.
- *
- * What was missing was this branch. Nothing ever asked for a superblock, so a
- * request above a block went to take_chunk_from_new_block, where
- * `remaining = CVM_BLOCK_SIZE - size` underflowed and a chunk of enormous size
- * was pushed onto a free list.
- *
- * The interior of a large object is left as free metadata, as it is for a
- * chunk: a precise collector never produces an interior pointer, so a slot
- * that reads free is not a claim that the memory is available. The object is
- * tracked by the superblock's head slot instead.
- */
-static u8* try_spanning_alloc(CvmLargeAllocator* large, usize chunk_size) {
-    u32 blocks = (u32)cvm_div_round_up(chunk_size, CVM_BLOCK_SIZE);
     BlockMeta* run = cvm_block_alloc_get_superblock(large->block_alloc, blocks);
     if (run == NULL) {
         return NULL;
@@ -258,29 +229,33 @@ static u8* try_spanning_alloc(CvmLargeAllocator* large, usize chunk_size) {
 
     u8* start = block_meta_block_start(large->heap->block_meta_start,
                                        large->heap->heap_start, run);
-    object_meta_set_allocated(bytemap_get(large->bytemap, start));
+    CvmChunk* chunk = (CvmChunk*)start;
 
-    return (u8*)((CvmGcHeader*)start + 1);
+    usize total = (usize)blocks * CVM_BLOCK_SIZE;
+    cvm_assert(total >= size);
+    if (total - size >= CVM_LARGE_OBJECT_MIN_SIZE) {
+        cvm_large_add_chunk(large->heap, (CvmChunk*)(start + size), total - size);
+    }
+
+    chunk->size = size;
+    return chunk;
 }
 
 /* One attempt at a large object, without collecting. */
 static u8* try_large_alloc(CvmLargeAllocator* large, usize size) {
-    CvmChunk* chunk;
+    CvmChunk* chunk = NULL;
 
-    if (size > CVM_BLOCK_SIZE) {
-        return try_spanning_alloc(large, size);
+    /*
+     * The free lists only hold chunks smaller than a block, because that is
+     * what a chunk is; a block or more comes from a superblock. Trying the
+     * lists for a bigger request would return a chunk that cannot hold it.
+     */
+    if (size < CVM_BLOCK_SIZE) {
+        chunk = take_chunk(large, size);
     }
 
-    chunk = take_chunk(large, size);
-
     if (chunk == NULL) {
-        /*
-         * A chunk of the requested size always fits in one block: the
-         * request is at most the block size, and rounding up to the
-         * granularity keeps it there. So a fresh block can always serve
-         * it.
-         */
-        chunk = take_chunk_from_new_block(large, size);
+        chunk = take_chunk_from_superblock(large, size);
         if (chunk == NULL) {
             return NULL;
         }

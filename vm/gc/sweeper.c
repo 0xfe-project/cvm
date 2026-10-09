@@ -345,8 +345,7 @@ static u32 cvm_sweep_simple_block(CvmHeap* heap, CvmThreadNode* target,
  * sweeper handling the next batch may extend it; it is marked
  * superblock_start_me and left for the coalescing pass.
  */
-static u32 cvm_sweep_superblock(CvmHeap* heap, CvmLargeAllocator* large,
-                                BlockMeta* block_meta, u8* block_start,
+static u32 cvm_sweep_superblock(CvmHeap* heap, BlockMeta* block_meta, u8* block_start,
                                 BlockMeta* batch_limit) {
     u32 superblock_size = block_meta_superblock_size(block_meta);
     u8* block_end = block_start + (usize)superblock_size * CVM_BLOCK_SIZE;
@@ -420,7 +419,7 @@ static u32 cvm_sweep_superblock(CvmHeap* heap, CvmLargeAllocator* large,
             /* A survivor begins here, so the run ends just before it. */
             usize dead = (usize)(current - chunk_start);
             rt_mem_zero((opaque_mut)chunk_start, dead);
-            cvm_large_add_chunk(large, (CvmChunk*)chunk_start, dead);
+            cvm_large_add_chunk(heap, (CvmChunk*)chunk_start, dead);
             chunk_start = NULL;
         }
         object_meta_sweep(current_meta);
@@ -476,7 +475,7 @@ static u32 cvm_sweep_superblock(CvmHeap* heap, CvmLargeAllocator* large,
              * into the chunk itself, so a clear afterwards would erase it. */
             usize dead = (usize)(current - chunk_start);
             rt_mem_zero((opaque_mut)chunk_start, dead);
-            cvm_large_add_chunk(large, (CvmChunk*)chunk_start, dead);
+            cvm_large_add_chunk(heap, (CvmChunk*)chunk_start, dead);
         }
     }
 
@@ -669,9 +668,8 @@ void cvm_sweep(CvmHeap* heap, _Atomic u32* cursor_done, u32 max_count,
             size = block_meta_superblock_size(current);
             cvm_assert(size > 0);
 
-            free_count = cvm_sweep_superblock(
-                heap, (node != NULL) ? &node->large_allocator : NULL, current,
-                current_block_start, limit);
+            free_count =
+                cvm_sweep_superblock(heap, current, current_block_start, limit);
         } else {
             /* Already free from an earlier phase. */
             cvm_assert(block_meta_is_free(current));

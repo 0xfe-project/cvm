@@ -92,6 +92,17 @@ for (const name of bins) {
     if (timedOut) {
         console.error(`       TIMEOUT after ${TIMEOUT_MS}ms — the binary hung`);
         failed.push({ name, reason: "timeout" });
+    } else if (r.status === null) {
+        /*
+         * Killed by a signal. Node reports no status at all for a process
+         * that did not exit, and the runner used to print "exit null" —
+         * which reads as a flake rather than as a crash. It was not a flake:
+         * a stress test that segfaulted under a GC worker reported "exit
+         * null" in one configuration and passed on the next run, and got
+         * waved through as load. A killed binary is a crash and says so.
+         */
+        console.error(`       KILLED by ${r.signal ?? "a signal"} — no exit status`);
+        failed.push({ name, reason: `killed by ${r.signal ?? "signal"}` });
     } else if (r.status !== 0) {
         failed.push({ name, reason: `exit ${r.status}` });
     }

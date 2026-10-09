@@ -77,18 +77,13 @@
  *
  * `size` must be read before the chunk is allocated, because allocation
  * overwrites this header with the object header.
+ *
+ * CvmChunk and CvmFreeList are declared in gc/heap.h, because the free lists
+ * belong to the heap rather than to a mutator: a chunk comes back from
+ * whichever thread swept the block it lived in, and a GC worker sweeping has
+ * no mutator to hand it to.
  */
-typedef struct CvmChunk {
-    usize size;            /* total bytes in this chunk */
-    struct CvmChunk* next; /* next free chunk of the same size class */
-} CvmChunk;
-
-typedef struct CvmFreeList {
-    _Atomic(usize) head; /* CvmChunk*, as an integer so zero means empty */
-} CvmFreeList;
-
 typedef struct CvmLargeAllocator {
-    CvmFreeList free_lists[CVM_LARGE_FREE_LIST_COUNT];
     Bytemap* bytemap;
     CvmBlockAllocator* block_alloc;
     CvmHeap* heap;
@@ -97,23 +92,28 @@ typedef struct CvmLargeAllocator {
 void cvm_large_init(CvmLargeAllocator* large, CvmBlockAllocator* blocks,
                     Bytemap* bytemap, CvmHeap* heap);
 
-/* Drop every free list. Called when a collection starts. */
-void cvm_large_clear(CvmLargeAllocator* large);
+/* Drop every free list on the heap. Called when a collection starts. */
+void cvm_large_clear(CvmHeap* heap);
 
 /*
- * Return a chunk to the free lists.
+ * Return a chunk to the heap's free lists.
  *
  * `total_size` is the chunk's size in bytes, which the caller knows from
- * the block metadata. It must be a multiple of the large-object
- * granularity and smaller than a block; a whole block goes back to the
- * block allocator instead.
+ * the block metadata. It must be a multiple of the large-object granularity
+ * and smaller than a block; a whole block goes back to the block allocator
+ * instead.
+ *
+ * Takes the heap rather than an allocator because the caller may be a GC
+ * worker, which has no allocator of its own. Passing one anyway -- or passing
+ * NULL, which is what the sweep used to do -- is how a worker sweeping a
+ * block with a dead chunk in it came to dereference a null allocator.
  */
-void cvm_large_add_chunk(CvmLargeAllocator* large, CvmChunk* chunk, usize total_size);
+void cvm_large_add_chunk(CvmHeap* heap, CvmChunk* chunk, usize total_size);
 
 /* Bytes currently available across the free lists. */
-usize cvm_large_free_bytes(CvmLargeAllocator const* large);
+usize cvm_large_free_bytes(CvmHeap const* heap);
 
 /* Chunks currently on the free lists. */
-u32 cvm_large_free_chunk_count(CvmLargeAllocator const* large);
+u32 cvm_large_free_chunk_count(CvmHeap const* heap);
 
 #endif /* CVM_GC_LARGE_H */

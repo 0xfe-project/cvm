@@ -168,6 +168,15 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     heap->pool = NULL;
     heap->block_alloc = NULL;
 
+    /*
+     * The chunk free lists are the heap's, and they start empty. Set up here
+     * rather than by a thread's attach, because the threads that file chunks
+     * are the sweepers -- and a GC worker sweeping has no attach of its own.
+     */
+    for (u32 i = 0; i < CVM_LARGE_FREE_LIST_COUNT; i++) {
+        atomic_store(&heap->large_free_lists[i].head, 0);
+    }
+
     if (min_size < CVM_MIN_HEAP_SIZE) {
         min_size = CVM_MIN_HEAP_SIZE;
     }
