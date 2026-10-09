@@ -233,17 +233,51 @@ TEST a_storm_across_many_sequential_threads_stays_clean(void) {
 typedef struct {
     u32 churn_rounds;
 
+    /*
+     * All four counters are four bytes wide, and `stop` is one of them
+     * rather than a `bool`, on purpose.
+     *
+     * A `bool` here leaves three bytes of padding before `corrupt`, and the
+     * compiler is entitled to load a whole word for an atomic `bool`. That
+     * reads the padding, which nothing ever wrote, and valgrind reports the
+     * resulting branch as depending on an uninitialised value — correctly,
+     * under its rules, and about nothing that matters. Making the field four
+     * bytes wide means the store covers what the load reads.
+     */
     _Atomic u32 ready;
-    _Atomic bool stop;
+    _Atomic u32 stop;
     _Atomic u32 corrupt;
     _Atomic u32 churned;
+
+    /*
+     * Where the worker announces `ready`. The main thread waits on this
+     * rather than on a stopwatch: a wall-clock bound tight enough to fail
+     * fast under normal scheduling is too tight under valgrind, which
+     * serialises threads. The timeout on the wait is a backstop against a
+     * worker that never runs at all, not the mechanism.
+     */
+    RtCond* ready_cond;
+    RtMutex* ready_mutex;
 } WorkerArg;
+
+/* Signals that this worker's set is built. Safe before the main thread
+ * starts waiting: the condvar is held behind the mutex with `ready`. */
+static void worker_announce_ready(WorkerArg* arg) {
+    rt_mutex_lock(arg->ready_mutex);
+    atomic_store(&arg->ready, 1);
+    rt_cond_broadcast(arg->ready_cond);
+    rt_mutex_unlock(arg->ready_mutex);
+}
 
 static opaque_mut keeping_worker(opaque_mut raw) {
     WorkerArg* arg = raw;
 
     if (!cvm_thread_attach()) {
         atomic_fetch_add(&arg->corrupt, 1);
+        /* Announce anyway: the assertion on `corrupt` says what went wrong,
+         * and a caller left waiting on a worker that has already given up
+         * says only that it waited. */
+        worker_announce_ready(arg);
         return NULL;
     }
 
@@ -276,10 +310,10 @@ static opaque_mut keeping_worker(opaque_mut raw) {
         }
     }
 
-    atomic_store(&arg->ready, 1);
+    worker_announce_ready(arg);
 
     /* Churn garbage while the main thread collects. */
-    while (!atomic_load(&arg->stop)) {
+    while (atomic_load(&arg->stop) == 0) {
         CVM_FRAME_DECL(g, 2);
         cvm_frame_push(&g_frame, g_roots, 2);
         g_roots[0] = NULL;
@@ -329,23 +363,74 @@ TEST kept_objects_survive_collections_taken_under_load(void) {
     WorkerArg args[WORKERS];
     RtThread threads[WORKERS];
 
+    /*
+     * From here to the joins below there is deliberately no ASSERT.
+     *
+     * An ASSERT returns from the test, and these workers hold a pointer
+     * into `args`, which lives in this frame. Returning early leaves them
+     * running against a stack that no longer exists. Valgrind reported
+     * that as an uninitialised value "created by a stack allocation" in
+     * the *next* test -- which is the symptom, and the reason to look for
+     * the cause rather than at the report. Every failure is recorded here
+     * and asserted after the workers have been stopped and joined.
+     */
+    u32 created = 0;
+    bool all_ready = true;
+
+    RtMutex ready_mutex;
+    RtCond ready_cond;
+    ASSERT(rt_mutex_init(&ready_mutex));
+    ASSERT(rt_cond_init(&ready_cond));
+
     for (u32 i = 0; i < WORKERS; i++) {
-        args[i] = (WorkerArg){.churn_rounds = 0};
+        args[i] = (WorkerArg){
+            .churn_rounds = 0, .ready_cond = &ready_cond, .ready_mutex = &ready_mutex};
         atomic_store(&args[i].ready, 0);
-        atomic_store(&args[i].stop, false);
+        atomic_store(&args[i].stop, 0);
         atomic_store(&args[i].corrupt, 0);
         atomic_store(&args[i].churned, 0);
 
-        ASSERT(rt_thread_create(&threads[i], keeping_worker, &args[i]));
+        if (!rt_thread_create(&threads[i], keeping_worker, &args[i])) {
+            break;
+        }
+        created++;
     }
 
-    /* Wait until every worker has built its set, bounded. */
-    for (u32 i = 0; i < WORKERS; i++) {
-        u64 deadline = rt_time_nanos() + 5000000000ull;
-        while (!atomic_load(&args[i].ready) && rt_time_nanos() < deadline) {
-            rt_thread_yield();
+    /*
+     * Wait until every worker has built its set.
+     *
+     * The wait is event-driven -- the worker broadcasts on `ready_cond` --
+     * with the wall clock as a backstop and not as the mechanism. One long
+     * timed wait was the first shape of this and it failed under valgrind,
+     * where the test still finished in under two seconds, so the wait had
+     * returned early rather than after its 120s. A short wait re-checked
+     * against a deadline is immune to that and still costs nothing when the
+     * event arrives.
+     */
+    const u64 wait_start = rt_time_nanos();
+    const u64 ready_deadline = wait_start + 120ull * 1000 * 1000 * 1000;
+    const u64 ready_slice_ns = 50ull * 1000 * 1000;
+
+    u32 not_ready = 0;
+    for (u32 i = 0; i < created; i++) {
+        rt_mutex_lock(&ready_mutex);
+        while (atomic_load(&args[i].ready) == 0 && rt_time_nanos() < ready_deadline) {
+            (void)rt_cond_wait_timeout(&ready_cond, &ready_mutex, ready_slice_ns);
         }
-        ASSERT(atomic_load(&args[i].ready));
+        bool ready = atomic_load(&args[i].ready) != 0;
+        rt_mutex_unlock(&ready_mutex);
+
+        if (!ready) {
+            not_ready++;
+            all_ready = false;
+        }
+    }
+
+    if (!all_ready) {
+        fprintf(stderr,
+                "threads: %u of %u worker(s) never reported ready after %llu ms\n",
+                not_ready, created,
+                (unsigned long long)((rt_time_nanos() - wait_start) / 1000000ull));
     }
 
     /*
@@ -354,16 +439,26 @@ TEST kept_objects_survive_collections_taken_under_load(void) {
      * their churn loops with a frame pushed, and the collector walks their
      * chains.
      */
-    for (u32 i = 0; i < 30; i++) {
-        oracle_collect();
+    if (all_ready) {
+        for (u32 i = 0; i < 30; i++) {
+            oracle_collect();
+        }
     }
 
-    for (u32 i = 0; i < WORKERS; i++) {
-        atomic_store(&args[i].stop, true);
+    for (u32 i = 0; i < created; i++) {
+        atomic_store(&args[i].stop, 1);
     }
-    for (u32 i = 0; i < WORKERS; i++) {
-        ASSERT(cvm_thread_join(threads[i]));
+
+    bool joined = true;
+    for (u32 i = 0; i < created; i++) {
+        if (!cvm_thread_join(threads[i])) {
+            joined = false;
+        }
     }
+
+    ASSERT_EQ_FMT(WORKERS, created, "%u");
+    ASSERT(all_ready);
+    ASSERT(joined);
 
     for (u32 i = 0; i < WORKERS; i++) {
         if (atomic_load(&args[i].corrupt) != 0) {
