@@ -185,6 +185,99 @@ the existing rule that a thread leaves the registry before its node is freed.
 Worth stating so that the handler arrays are freed in the same place the node
 is.
 
+## How control reaches a landing pad
+
+The contract above does not depend on the mechanism. A handler holds a
+`landing_pad` address and an opaque `jump` area; how the first is reached and
+what the second is for are the frontend's business. That is deliberate, and it
+is what makes the table below a choice rather than an architecture.
+
+| mechanism | cost when nothing throws | cost at a handler | registers correct? |
+|---|---|---|---|
+| `setjmp` / `longjmp` | none | ~20 registers saved, once per function that has a handler | **no — see below** |
+| explicit return protocol | a branch per call | none | yes: unwinding is ordinary returning, so `cvm_frame_pop` runs and the chain is never inconsistent |
+| CFI-driven (C++'s model) | none | none | yes |
+
+### The register save has a time point, and setjmp's is the wrong one
+
+This is the constraint that decides the whole question, and it is easy to
+state wrongly. It is not "setjmp is slower". It is:
+
+- **`setjmp` saves the register state as of the `setjmp` call** — that is, as
+  of the entry to the try.
+- **The landing pad needs the state as of the throw** — as of the call that
+  led to it, in the frame that will catch.
+
+If the try body modifies a value that lives in a callee-saved register, the
+`longjmp` restores the value from *before* the modification. So the value the
+catch sees is not the value the program had.
+
+The C standard's rule — that a non-`volatile` local modified between `setjmp`
+and `longjmp` has an indeterminate value — is a direct statement of this, not
+a language quirk. **Every value live across a try therefore has to be in
+memory**, because memory is the only place the two time points agree.
+
+**CFI does not have the problem because it saves at the other time point:**
+"where each register was spilled when this frame called the next". That is
+exactly what the landing pad needs, so nothing has to be forced into memory.
+C++ is not cleverer here; it uses a mechanism that does not lose that window.
+
+So the honest shape of the choice is not "a table is a later optimisation".
+The table fixes a *correspondence*, and the price of not having it is paid in
+the quality of the generated code, on the path where nothing throws.
+
+### What that costs, and how to make it explicit
+
+With `setjmp`, the C compiler decides which values must go to memory: every
+value live across the try, judged conservatively per function. **A JavaScript
+try commonly spans a large region** — `try { a lot of code } catch` — so this
+is the main path, not a corner.
+
+There is a way to make the set to a set the frontend chose rather than one a
+compiler guessed:
+
+```c
+/* try { A } catch (e) { B }, where A modifies x and y */
+static void try_body_1(TryCtx *c) { /* A, touching only c->x and c->y */ }
+
+/* caller */
+struct { T x, y; } crossing = {x, y};
+if (rt_jump_set(&h.jump)) goto landing;
+try_body_1(&crossing);
+x = crossing.x;  y = crossing.y;
+```
+
+Compiling the try body as its own function turns "which values cross the try"
+into arguments at a call, which the frontend knows exactly. Values that do not
+cross stay in registers, unaffected; values that do, go through memory because
+the frontend put them there rather than because the C compiler could not keep
+them anywhere else.
+
+It does not fix the time point — the crossing values still go through memory.
+It makes the price visible and proportional instead of blanket.
+
+### Where the mechanism lives
+
+`setjmp` is a libc function and `vm/` is freestanding, so it is reached
+through `rt/`, which is the layer allowed to use libc:
+
+```c
+typedef struct RtJump { unsigned char opaque[RT_JUMP_SIZE]; } RtJump;
+i32  rt_jump_set(RtJump* env);   /* 0 the first time, nonzero after a jump */
+void rt_jump_to(RtJump* env);
+```
+
+**Use `sigsetjmp(env, 0)`, not `setjmp`.** Whether `setjmp` saves the signal
+mask is implementation-defined, and where it does, it is a `sigprocmask`
+system call — per handler, for a mask that cannot have changed inside a try.
+`sigsetjmp(env, 0)` says not to, on every platform that has it.
+
+**One `setjmp` per function that has a handler**, not one per try and not one
+per execution of a try: a single `RtJump` can be jumped to repeatedly, and a
+function with no handler registers none and saves nothing. That is what keeps
+the cost proportional to the number of functions that can catch, which in most
+programs is a small fraction of them.
+
 ## What this design refuses to do
 
 **No fibers.** A stackful coroutine would mean a suspended frame is still on
@@ -198,6 +291,11 @@ already knows how to handle.
 managed, so a throw always has a landing pad in the frames it unwinds. A
 frontend that calls into foreign code brackets the call with a handler that
 converts an escaping exception into an error return.
+
+**No pretending the register save is free.** The spill it forces is a real
+cost on the path where nothing throws, and the mitigation above makes it
+visible rather than removing it. A design that claimed otherwise would be
+choosing the mechanism by how the table reads.
 
 **No `finally` in the runtime.** `finally` runs on every exit path — normal,
 throw, return, break, continue — and expressing that is the frontend's job. It
@@ -238,6 +336,7 @@ write:
 | throw inside an `unmanaged` region, with a handler below it | B4 — the hang |
 | a handler inside a suspended generator, with a collection during the suspension | B6 |
 | a thread that exits with handlers registered | B8 |
+| a value modified inside a try and read in the catch, with the try body large enough that the compiler must choose | the register time point — the one thing `setjmp` gets wrong on its own |
 
 The first one is the whole design in one test: it walks the unwind window
 looking for the collection point that was not accounted for.
