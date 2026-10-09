@@ -411,6 +411,203 @@ TEST a_pushed_frame_has_null_slots(void) {
     PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* the whole design, in one test                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A throw from a few activations down, each of which allocated on the way in.
+ *
+ * Every one of those allocations is a point where a collection can run --
+ * which means a point where the collector walks the frame chain and the
+ * handler chain while the chain is mid-change. What has to hold at all of
+ * them is that the exception is rooted and the depths are consistent.
+ */
+static void throw_from_depth(opaque_mut value, u32 depth) {
+    CVM_ENTER(deep, 2);
+
+    deep_roots[0] = cvm_alloc(&leaf_desc);
+    deep_roots[1] = cvm_alloc(&leaf_desc);
+    if (deep_roots[0] != NULL) {
+        stamp(deep_roots[0]);
+    }
+    if (deep_roots[1] != NULL) {
+        stamp(deep_roots[1]);
+    }
+
+    if (depth == 0u) {
+        cvm_throw(value);
+    }
+    throw_from_depth(value, depth - 1u);
+
+    CVM_RETURN_VOID(deep);
+}
+
+/*
+ * One round, reporting through the counter rather than by asserting: an
+ * ASSERT returns a test result, so it only compiles in a function that
+ * returns one, and this is a helper.
+ */
+static u32 unwind_problems = 0;
+
+static void one_throw_with_collections_on_the_path(void) {
+    CvmVMContext* ctx = cvm_ctx();
+
+    Leaf* thrown = cvm_alloc(&leaf_desc);
+    if (thrown == NULL) {
+        unwind_problems++;
+        return;
+    }
+    stamp(thrown);
+    u64 stamped = thrown->canary;
+
+    CVM_ENTER(outer, 1);
+    outer_roots[0] = thrown;
+    u32 entry_depth = ctx->frame_depth;
+
+    CVM_TRY() {
+        throw_from_depth(thrown, 3u);
+    }
+    CVM_CATCH(caught) {
+        if (caught != thrown) {
+            unwind_problems++;
+        }
+        if (thrown->canary != stamped) {
+            unwind_problems++;
+        }
+        /* The frames of everything the body called are gone. */
+        if (ctx->frame_depth != entry_depth) {
+            unwind_problems++;
+        }
+
+        /* Allocate hard enough that a collection lands here, with the
+         * exception reachable only through the handler chain. */
+        for (u32 i = 0; i < 256; i++) {
+            Leaf* junk = cvm_alloc(&leaf_desc);
+            if (junk == NULL) {
+                break;
+            }
+            stamp(junk);
+        }
+
+        /* Both sides of that: a canary mismatch is a reclaimed object that
+         * was handed out again. */
+        if (thrown->canary != stamped) {
+            unwind_problems++;
+        }
+    }
+    CVM_ENDTRY();
+
+    if (ctx->frame_depth != entry_depth) {
+        unwind_problems++;
+    }
+
+    CVM_RETURN_VOID(outer);
+}
+
+/*
+ * The concentration of the design: collections at every allocation on the
+ * path from throwing to catching.
+ *
+ * Forcing a collection at literally every point needs a hook in the runtime.
+ * What this does instead is put the collector under pressure while the path
+ * allocates: four activations on the way down, each pushing a frame with two
+ * slots and allocating into them, and a catch that allocates enough to make
+ * a collection certain.
+ *
+ * The window being looked for is the one where the exception is held by
+ * nothing but the handler chain -- between the store in cvm_throw and the
+ * read in the catch. A collection that lands there takes the value away if
+ * the chain is not a root, and the canary is what makes that visible instead
+ * of leaving a heap that is quietly wrong.
+ */
+TEST collections_along_the_unwind_path_do_not_lose_the_exception(void) {
+    fixture_enter();
+
+    unwind_problems = 0;
+    for (u32 round = 0; round < 8; round++) {
+        one_throw_with_collections_on_the_path();
+    }
+
+    ASSERT_EQ_FMT(0u, unwind_problems, "%u");
+    ASSERT(cvm_handler_top() == NULL);
+    fixture_leave();
+    PASS();
+}
+
+/* ------------------------------------------------------------------ */
+/* values that live across a try                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A value that has to survive a try goes through memory, and it reads
+ * correctly on the other side however much register pressure the body
+ * creates.
+ *
+ * The slots are in the *catching* activation's frame, not the throwing one's:
+ * an unwind drops every frame above the handler, so a slot in the body's own
+ * frame is gone by the time the catch runs. That is a property of the frame
+ * depth restore, and it is why the contract says the spill set is the
+ * frontend's to choose -- the frontend knows which values are still live and
+ * which frame outlives the try.
+ *
+ * What is deliberately not tested is the other shape: a plain local the try
+ * body modified, read in the catch. The C standard makes that value
+ * indeterminate after the jump, so a test asserting it would be asserting
+ * undefined behaviour -- able to pass for years and then be "fixed" by a
+ * compiler upgrade. The point of the contract is that the supported shape is
+ * one the frontend can always emit.
+ */
+static bool slots_modified_inside_a_try_survive_it(void) {
+    CVM_ENTER(f, 2);
+    f_roots[0] = NULL;
+    f_roots[1] = NULL;
+
+    bool ok = false;
+
+    CVM_TRY() {
+        /*
+         * Register pressure on purpose, and enough arithmetic that these
+         * cannot all stay in registers across the jump.
+         */
+        u64 accumulators[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        for (u64 round = 1; round <= 64; round++) {
+            for (u32 i = 0; i < 8; i++) {
+                accumulators[i] = accumulators[i] * 3u + round + i;
+            }
+        }
+
+        f_roots[0] = cvm_alloc(&leaf_desc);
+        f_roots[1] = cvm_alloc(&leaf_desc);
+        stamp((Leaf*)f_roots[0]);
+        stamp((Leaf*)f_roots[1]);
+
+        /* Keep the accumulators alive past the throw, so they compete for
+         * registers with everything the jump has to preserve. */
+        volatile u64 sink = accumulators[0] + accumulators[7];
+        (void)sink;
+
+        cvm_throw(NULL);
+    }
+    CVM_CATCH(caught) {
+        (void)caught;
+        Leaf* first = f_roots[0];
+        Leaf* second = f_roots[1];
+        ok = first != NULL && second != NULL && first != second &&
+             first->canary == canary_of(first) && second->canary == canary_of(second);
+    }
+    CVM_ENDTRY();
+
+    CVM_RETURN(f, ok);
+}
+
+TEST values_across_a_try_go_through_memory(void) {
+    fixture_enter();
+    ASSERT(slots_modified_inside_a_try_survive_it());
+    fixture_leave();
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char** argv) {
@@ -429,6 +626,8 @@ int main(int argc, char** argv) {
     RUN_TEST(an_unwind_restores_the_unmanaged_depth);
     RUN_TEST(a_return_out_of_a_try_body_leaves_nothing_linked);
     RUN_TEST(a_pushed_frame_has_null_slots);
+    RUN_TEST(collections_along_the_unwind_path_do_not_lose_the_exception);
+    RUN_TEST(values_across_a_try_go_through_memory);
     GREATEST_MAIN_END();
 
     cvm_world_destroy();
