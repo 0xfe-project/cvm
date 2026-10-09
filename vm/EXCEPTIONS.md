@@ -276,13 +276,42 @@ object. So a `CvmHandler` may live inside a heap object, and then
 **The collector finds it the same way it finds any other pointer field:**
 through the object's type descriptor. So the descriptor of any object that
 embeds a handler must list `exception_slot` among its pointer fields. Forget
-it and the exception the generator is holding is collected while the generator
-is suspended — a bug that only shows up under a collection during a
-suspension.
+it and the value the suspended activation is holding is collected while it is
+suspended — a bug that only shows up under a collection during a suspension.
 
 Stated as a rule: **a handler is either in a frame, in which case the frame
 chain covers it, or in a heap object, in which case that object's descriptor
 must cover it. There is no third case and no case where nothing covers it.**
+
+#### What is actually at risk, and why the runtime cannot check it
+
+Two things are worth being precise about, because the rule is easy to state in
+a way that suggests a mechanism that is not there.
+
+**There is no window in this design where a handler record holds an exception
+across a suspension.** `cvm_throw` and the catch it lands in are joined by a
+jump with nothing in between, so the exception is in a record on a live chain
+for that whole interval, and the chain is a root. A suspension cannot happen
+there. So the thing that has to survive a suspension is not a handler's
+exception field: it is whatever the frontend puts in the state machine object
+— a rejection value, an in-flight result, the operands of a half-finished
+expression. Those are ordinary pointer fields, and this section is the
+ordinary rule for pointer fields, applied to the case where nobody is looking.
+
+**And the runtime cannot check it.** It does not know the frontend's layout,
+and the object is usually reached by a path the collector already walks for
+other reasons — which is exactly the case where the omission is invisible
+until a collection lands in the suspension. There is no assertion that can be
+written from inside the collector, because "this object has a pointer the
+descriptor does not name" is not a property the collector can observe: it is
+the absence of an observation.
+
+So this one stays on the frontend's list, and it is enforced the only way a
+rule with no in-band check can be: by a test that holds the same value under
+two descriptors and shows that the answer follows the descriptor. See
+`a_parked_value_survives_only_if_the_descriptor_names_it` in
+tests/unit/test_exc.c, where the same object layout with the field listed
+keeps its value and without the field loses it.
 
 ### B7 — the finalizer thread runs user code
 

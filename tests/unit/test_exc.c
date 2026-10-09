@@ -608,6 +608,94 @@ TEST values_across_a_try_go_through_memory(void) {
     PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* a value held by a suspended activation                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A suspended activation is a heap object, and whatever it is holding in the
+ * middle of a `try` is only reachable through that object's type descriptor.
+ * The runtime cannot check this -- it does not know the frontend's layout, and
+ * the object is usually reached by a path the collector already walks for
+ * other reasons, which is exactly the case where the omission is invisible
+ * until a collection lands in the suspension.
+ *
+ * So the rule is the frontend's, and this test is how it is enforced: the
+ * same value survives when the descriptor names the field and is collected
+ * when it does not. Stated that way it is checkable rather than remembered.
+ *
+ * Note what is *not* claimed. There is no window in this design where a
+ * handler record holds an exception across a suspension: cvm_throw and the
+ * catch it lands in are joined by a jump with no suspension between them. The
+ * value that has to survive a suspension is the one the frontend puts in the
+ * object -- a rejection value, an in-flight result -- and it is covered by
+ * the ordinary rule for pointer fields, which is what this checks.
+ */
+typedef struct SuspendedActivation {
+    void* pending;
+    void* state;
+} SuspendedActivation;
+
+/* Names `pending`, so the collector can see it. */
+static CvmPtrField const listed_fields[] = {
+    {.offset = offsetof(SuspendedActivation, pending)},
+};
+
+static CvmTypeDescriptor const listed_desc = {
+    .size = sizeof(SuspendedActivation),
+    .kind = CVM_TYPE_STRUCT,
+    .num_ptr_fields = 1,
+    .ptr_fields = listed_fields,
+};
+
+/* Does not. */
+static CvmTypeDescriptor const unlisted_desc = {
+    .size = sizeof(SuspendedActivation),
+    .kind = CVM_TYPE_STRUCT,
+};
+
+TEST a_parked_value_survives_only_if_the_descriptor_names_it(void) {
+    fixture_enter();
+
+    SuspendedActivation* listed = cvm_alloc(&listed_desc);
+    SuspendedActivation* unlisted = cvm_alloc(&unlisted_desc);
+    ASSERT(listed != NULL);
+    ASSERT(unlisted != NULL);
+
+    Leaf* held_by_listed = cvm_alloc(&leaf_desc);
+    Leaf* held_by_unlisted = cvm_alloc(&leaf_desc);
+    ASSERT(held_by_listed != NULL);
+    ASSERT(held_by_unlisted != NULL);
+    stamp(held_by_listed);
+    stamp(held_by_unlisted);
+
+    /* Both activations are roots. The values inside them are reachable only
+     * through a pointer field, which is the situation a suspension creates. */
+    /* The raw API rather than CVM_ENTER/CVM_RETURN_VOID: those are the
+     * choke point generated code uses, and a TEST body is not a function that
+     * can return void. */
+    CVM_FRAME_DECL(root, 2);
+    cvm_frame_push(&root_frame, root_roots, 2);
+    root_roots[0] = listed;
+    root_roots[1] = unlisted;
+
+    listed->pending = held_by_listed;
+    unlisted->pending = held_by_unlisted;
+
+    mark_now();
+
+    ASSERT(cvm_object_is_marked(heap(), held_by_listed));
+    ASSERT(cvm_object_is_marked(heap(), unlisted));
+    ASSERT_FALSE(cvm_object_is_marked(heap(), held_by_unlisted));
+
+    /* And a collection does not damage the one that is named. */
+    ASSERT_EQ_FMT(canary_of(held_by_listed), held_by_listed->canary, "%llu");
+
+    cvm_frame_pop(&root_frame);
+    fixture_leave();
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char** argv) {
@@ -628,6 +716,7 @@ int main(int argc, char** argv) {
     RUN_TEST(a_pushed_frame_has_null_slots);
     RUN_TEST(collections_along_the_unwind_path_do_not_lose_the_exception);
     RUN_TEST(values_across_a_try_go_through_memory);
+    RUN_TEST(a_parked_value_survives_only_if_the_descriptor_names_it);
     GREATEST_MAIN_END();
 
     cvm_world_destroy();
