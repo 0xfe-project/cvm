@@ -101,6 +101,13 @@ static opaque_mut publish(CvmAllocator* alloc, u8* start, usize size,
     cvm_assert(cvm_heap_contains(alloc->heap, start));
     cvm_assert(cvm_is_aligned((usize)start, CVM_ALLOC_ALIGNMENT));
 
+    /*
+     * The size is the debug check's. It was the clearing loop's until the
+     * clearing moved to the sweep, and a release build is where that shows:
+     * -Werror flags an unused parameter and the debug build does not.
+     */
+    (void)size;
+
 #if defined(CVM_DEBUG)
     /*
      * Every slot this allocation covers must have been free. If one was
