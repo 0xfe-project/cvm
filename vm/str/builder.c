@@ -74,20 +74,15 @@ static bool reserve(CvmStrBuf* b, usize extra) {
     }
 
     usize bytes = want * unit_bytes(b);
-    u8* fresh = rt_mem_alloc(bytes);
+    /*
+     * The units are a byte prefix either way — the width of each unit is not the
+     * buffer's business — so this is one realloc, not an alloc-copy-free. A
+     * platform that can extend in place does no copy at all.
+     */
+    u8* fresh = rt_mem_realloc(b->data, bytes);
     if (fresh == NULL) {
         b->failed = true;
         return false;
-    }
-
-    if (b->data != NULL) {
-        /* The old buffer is u8-addressable whatever the units are, and the
-         * units change with `wide` only in how they are read. */
-        usize used = b->len * unit_bytes(b);
-        for (usize i = 0; i < used; i++) {
-            fresh[i] = b->data[i];
-        }
-        rt_mem_free(b->data);
     }
 
     b->data = fresh;
@@ -137,27 +132,25 @@ bool cvm_str_buf_widen(CvmStrBuf* b) {
      */
     usize want = b->cap == 0u ? 64u : b->cap;
     usize bytes = want * 2u;
-    u8* fresh = rt_mem_alloc(bytes);
+    /*
+     * Grow the buffer, then re-lay it out in place: the wide form is not the
+     * narrow form's prefix — each unit becomes two bytes — but the narrow bytes
+     * are all below the positions they end up at, so reading backwards over them
+     * is safe. It is the reason memmove exists, done by hand because the element
+     * size changes as well as the direction.
+     */
+    u8* fresh = rt_mem_realloc(b->data, bytes);
     if (fresh == NULL) {
         b->failed = true;
         return false;
     }
 
-    /*
-     * Backwards, because the destination is twice as wide as the source and the
-     * two share a start: a forward copy would overwrite source bytes it has not
-     * read yet. This is the same reason memmove exists, done here rather than
-     * called, because the element size changes as well as the direction.
-     */
-    u8* src = b->data;
+    u8* src = fresh;
     u16* dst = (u16*)fresh;
     for (usize i = b->len; i > 0; i--) {
         dst[i - 1] = src[i - 1];
     }
 
-    if (b->data != NULL) {
-        rt_mem_free(b->data);
-    }
     b->data = fresh;
     b->cap = want;
     b->wide = true;
