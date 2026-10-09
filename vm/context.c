@@ -146,6 +146,39 @@ bool cvm_thread_attach(void) {
      */
     cvm_safepoint_trap_attach(node);
 
+    /*
+     * Everything a collector reads through this node has to be valid
+     * *before* the node is in the registry, not after.
+     *
+     * The registry is what makes this node visible to a collector, and a
+     * collector reads three fields of the allocator: `heap`, and
+     * `recycled_blocks` — onto which the sweep pushes blocks it has just
+     * freed — and `recycled_block_count`, which the growth decision sums
+     * into its free-block figure. The node comes from rt_mem_alloc, so
+     * between the insert and an initialisation further down those three
+     * read as whatever the allocator last held. A garbage `recycled_blocks`
+     * head is a sweep pushing onto a list that points nowhere in
+     * particular; a garbage count is a growth decision made on a number
+     * nobody wrote. Valgrind found the second one, from a test that was
+     * already in the suite.
+     *
+     * Initialising here rather than after the poll below does not weaken
+     * the poll's job. A thread cannot allocate until attach returns, and
+     * attach does not return until the poll has stopped it if a collection
+     * is running — so the allocators are both valid and unused for the
+     * whole window.
+     */
+    CvmWorld* world = cvm_world();
+    cvm_allocator_init(&node->allocator, &world->block_alloc, world->heap.bytemap,
+                       &world->heap);
+    cvm_large_init(&node->large_allocator, &world->block_alloc, world->heap.bytemap,
+                   &world->heap);
+
+    /* The pieces the inlined allocation path needs to mark what it
+     * allocates; see CvmVMContext. */
+    node->ctx.heap_base = bytemap_base(world->heap.bytemap);
+    node->ctx.object_meta = bytemap_slots(world->heap.bytemap);
+
     cvm_threads_lock_write();
     cvm_list_add(&node->link, &registry);
     cvm_threads_unlock_write();
@@ -164,21 +197,6 @@ bool cvm_thread_attach(void) {
      */
     cvm_safepoint_arm_page_if_collecting();
     cvm_safepoint_poll();
-
-    /*
-     * Only now that the thread is registered and stopped if a collection
-     * is running may it be given allocators pointing into the heap.
-     */
-    CvmWorld* world = cvm_world();
-    cvm_allocator_init(&node->allocator, &world->block_alloc, world->heap.bytemap,
-                       &world->heap);
-    cvm_large_init(&node->large_allocator, &world->block_alloc, world->heap.bytemap,
-                   &world->heap);
-
-    /* The pieces the inlined allocation path needs to mark what it
-     * allocates; see CvmVMContext. */
-    node->ctx.heap_base = bytemap_base(world->heap.bytemap);
-    node->ctx.object_meta = bytemap_slots(world->heap.bytemap);
 
     CVM_LOG_DEBUG(m) {
         fmt_lit(&m.fmt, "thread ");
