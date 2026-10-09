@@ -1,5 +1,59 @@
 # Exceptions: the contract with the collector
 
+## Open items — to be resolved before any of this is implemented
+
+Deliberately first. These are the parts of this document that are *not*
+settled, and a reader should meet them before the design rather than after
+it. Everything below this section is the design; this section is what is
+still missing from it.
+
+### Four gaps found in review
+
+| # | the gap | what it costs if left as it is |
+|---|---|---|
+| **1** | `pending_exception` is described as "a root", but that is a claim about code: `cvm_mark_roots` walks the frame chain and the global root table, and **neither reaches a field of the TLS context**. Nothing marks it today. | The exception in flight is collected between the throw and the catch. A5, and the loudest of the four. |
+| **2** | Nothing says **when `pending_exception` is cleared**. | If nothing clears it, the last exception a thread threw is retained for the thread's lifetime — one object per thread, and a test will not see it. Belongs at the landing pad, where `exception_slot` is filled, and should be asserted empty on the next throw. |
+| **3** | The frame array is **fixed-size per thread** (`frames`, "sized for the recursion"), and nothing says what happens at the bound. | A pointer chain was bounded by the C stack, which a guard page turns into a fault. An array has no guard page: the bound is either checked or it is a silent overwrite. Also unquantified: capacity × `sizeof(CvmGcFrame)` × threads, per thread. |
+| **4** | B2 states the fix as "zero the slots, then link", which leaves the frontend an obligation it can forget. | `cvm_frame_push` already receives `roots` and `num_slots` — **it can zero them itself**, which makes the correct order the only order. This is the same argument the comment above `cvm_frame_push` makes about obligations that "look like boilerplate": the slot zeroing is one of those, and it is currently the frontend's. |
+
+### One thing the mechanism table must not be read as
+
+The three mechanisms in "How control reaches a landing pad" are not three
+equal choices with different prices. `setjmp` **loses a window**: it saves the
+registers as of the try's entry, and the landing pad needs them as of the
+throw, so every value live across a try has to be in memory. The explicit
+return protocol and CFI do not have that correspondence problem. The table
+says this, but a reader skimming the table will read "cost when nothing
+throws: none" and not the paragraph below it.
+
+### A platform pitfall, observed in the field
+
+Found while reading wabt's exception runtime (`wasm2c/wasm-rt.h`), which
+reaches the same mechanism through the same libc calls:
+
+> On macOS XNU, there is a bug where nested `sigsetjmp` and `siglongjmp`
+> across threads that have an allocated alternate signal stack (`SS_ONSTACK`)
+> will erroneously cause the kernel to preserve the `SS_ONSTACK` flag in the
+> thread state.
+>
+> — and the two reports that established it:
+> <https://github.com/WebAssembly/wabt/issues/2654>,
+> <https://github.com/golang/go/issues/44501>
+
+**The interaction matters here and it is specific to this collector.** cvm
+stops the world two ways, and one of them is a signal: the trap page faults
+and the handler parks the thread. A thread whose `SS_ONSTACK` flag is stuck
+set will be handled wrongly on its next fault — the kernel believes it is
+already on the alternate stack.
+
+**It does not apply today**, because `rt/pal/posix/trap.c` registers its
+handler with `SA_SIGINFO | SA_RESTART` and installs no alternate stack. That
+is an avoidance by absence rather than a decision, which is why it is written
+down: adding `sigaltstack` or `SA_ONSTACK` is a normal thing to do for signal
+robustness, and it would silently arm this. Anyone who does it should read
+those two issues first and decide deliberately.
+
+
 This is not a document about how to implement try/catch. It is about the
 places where an unwinding mechanism and a precise collector touch, what each
 one assumes about the other, and how to keep either from corrupting the other.
