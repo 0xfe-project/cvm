@@ -16,6 +16,69 @@ still missing from it.
 | **3** | The frame array is **fixed-size per thread** (`frames`, "sized for the recursion"), and nothing says what happens at the bound. | A pointer chain was bounded by the C stack, which a guard page turns into a fault. An array has no guard page: the bound is either checked or it is a silent overwrite. Also unquantified: capacity × `sizeof(CvmGcFrame)` × threads, per thread. |
 | **4** | B2 states the fix as "zero the slots, then link", which leaves the frontend an obligation it can forget. | `cvm_frame_push` already receives `roots` and `num_slots` — **it can zero them itself**, which makes the correct order the only order. This is the same argument the comment above `cvm_frame_push` makes about obligations that "look like boilerplate": the slot zeroing is one of those, and it is currently the frontend's. |
 
+### Two of the four resolve by naming a mechanism, not by adding a field
+
+Gaps 1 and 2 are about `pending_exception`: nothing marks it, and nothing says
+who clears it. Both dissolve once the mechanism is chosen, because **the field
+only exists for one of the three.**
+
+- **With `setjmp`, the throw writes straight into `handler->exception_slot`,
+  which points into the catcher's frame.** That frame is at or below the depth
+  being restored to, so it survives the unwind, and the frame chain already
+  covers it — it is a root the day it is written. No TLS field is needed, and
+  gap 2 goes with it: the slot is an ordinary frame slot that dies with its
+  frame, so there is nothing to clear.
+
+  It also makes B1's ordering rule trivially satisfied. The rule exists because
+  of the window between "the throwing frames stop being roots" and "something
+  else holds the exception"; writing into a surviving frame closes that window
+  at the write, rather than requiring that no poll happen after it.
+
+- **With the explicit return protocol there is no immediate dispatch.** The
+  error propagates through ordinary returns and each level checks a flag, so
+  the exception needs a home that outlives every frame it passes through — the
+  TLS slot — and then gaps 1 and 2 are real and both matter.
+
+So the design has two ways to hold an exception and the document should not
+carry both without saying why. `pending_exception` is the explicit protocol's;
+`exception_slot` is `setjmp`'s; the setjmp path needs no TLS field and no
+clearing rule.
+
+### The frame array must hand out indices, not pointers
+
+Gap 3 asks what happens at the bound. The bound now has an answer that did not
+exist when this was written — `rt_mem_realloc` (see the two commits before
+this section's) means the array can grow — and growing introduces a constraint
+worth stating before anyone implements it.
+
+**Generated code must never hold a pointer into the frame array across a
+push.** `frame = &ctx->frames[ctx->frame_depth++]` hands out a pointer, and a
+`realloc` during a deeper push moves the array and invalidates every pointer
+the outer frames are holding. Holding the index is safe under growth, because
+the index is what the array is addressed by.
+
+That is already the shape of the design — the chain is an index, the handler
+stores depths — but the obvious spelling of the push works against it, which is
+why it is written down rather than implied.
+
+The capacity question still wants a number: `40 bytes × depth × threads`. At a
+4210-frame depth and a hundred threads it is 16 MiB, which is not nothing. A
+checked bound as a backstop plus growth as the normal path is the shape that
+survives a frontend that recurses deeply, and the check is the part that turns
+"silent overwrite" into a fault.
+
+### Why anyone would add the thing that arms the pitfall below
+
+The `SS_ONSTACK` pitfall is an avoidance by absence, and absences do not hold
+on their own. The reason to expect someone to add `sigaltstack` is concrete:
+the trap mechanism parks a thread by faulting on a protected page, and a thread
+whose C stack is nearly exhausted faults *again* inside the handler, on that
+same exhausted stack. An alternate signal stack is the standard remedy for
+exactly that, and it is the thing that would arm the bug.
+
+Which is to say: the warning is not about a hypothetical. It is about the first
+person to see a double fault in a trap handler.
+
 ### One thing the mechanism table must not be read as
 
 The three mechanisms in "How control reaches a landing pad" are not three
