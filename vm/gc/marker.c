@@ -21,6 +21,7 @@
 #include "base/math.h"
 #include "base/types.h"
 #include "context.h"
+#include "cvm/exc.h"
 #include "cvm/gc.h"
 #include "gc/bytemap.h"
 #include "gc/grey_packet.h"
@@ -415,6 +416,26 @@ static void mark_frame_chain(CvmHeap* heap, CvmVMContext const* ctx,
     }
 }
 
+/*
+ * The exception a pending handler is holding.
+ *
+ * This is what makes "the value is rooted before the state moves" a property
+ * of the runtime rather than a rule a caller has to keep: a thrown value sits
+ * in a record that is on this chain from the moment it is stored until the
+ * catch reads it, and this walk is what finds it.
+ *
+ * Only the live chain. A record on the thread's free list still holds the
+ * exception it was popped with, and marking that would retain an object
+ * nothing can reach.
+ */
+static void mark_handler_chain(CvmHeap* heap, CvmVMContext const* ctx,
+                               CvmGreyPacket** out, CvmGreyPacket** out_weak) {
+    for (CvmHandler const* handler = ctx->handlers; handler != NULL;
+         handler = handler->prev) {
+        cvm_mark_field(heap, handler->exception, out, out_weak);
+    }
+}
+
 void cvm_mark_roots(CvmHeap* heap) {
     CvmGreyPacket* out = take_empty_packet(heap);
     CvmGreyPacket* out_weak = take_empty_packet(heap);
@@ -427,6 +448,7 @@ void cvm_mark_roots(CvmHeap* heap) {
     cvm_threads_lock_read();
     CVM_THREADS_FOREACH(node) {
         mark_frame_chain(heap, &node->ctx, &out, &out_weak);
+        mark_handler_chain(heap, &node->ctx, &out, &out_weak);
     }
     cvm_threads_unlock_read();
 

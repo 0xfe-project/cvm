@@ -463,4 +463,37 @@ CVM_NORETURN void rt_abort(void);
  * before any channel exists. */
 CVM_NORETURN void rt_fatal(str message);
 
+/* ------------------------------------------------------------------ */
+/* non-local exit                                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Storage for one jump target.
+ *
+ * Opaque, for the same reason the synchronisation primitives are opaque:
+ * `jmp_buf` is a platform type, and this header is the boundary that keeps
+ * platform types out of everything above it.
+ *
+ * 256 bytes is generous -- the buffer is 200 bytes on the variants we build
+ * for -- and rt_jump_storage_is_sufficient() is what makes "generous"
+ * checkable rather than hopeful. It is asserted at startup, because the
+ * alternative is a stack smash inside setjmp that reads as anything but a
+ * wrong size constant.
+ */
+#define RT_JUMP_STORAGE 256
+#define RT_JUMP_ALIGN 16
+
+typedef struct RtJumpBuf {
+    _Alignas(RT_JUMP_ALIGN) u8 storage[RT_JUMP_STORAGE];
+} RtJumpBuf;
+
+/*
+ * Resume at the rt_jump_set that filled `env`, with that call returning
+ * non-zero. Never returns.
+ */
+CVM_NORETURN void rt_jump_to(RtJumpBuf* env);
+
+/* Whether the platform's jmp_buf fits, with its alignment, in RtJumpBuf. */
+bool rt_jump_storage_is_sufficient(void);
+
 #endif /* RT_RT_H */

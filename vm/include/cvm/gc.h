@@ -223,6 +223,21 @@ typedef enum CvmThreadState {
 void cvm_thread_enter_unmanaged(void);
 void cvm_thread_leave_unmanaged(void);
 
+/*
+ * How deep the unmanaged nesting is, and how to put it back.
+ *
+ * Public because a frontend that suspends an activation has to save it: the
+ * depth is per-thread state, and a coroutine that suspends inside a foreign
+ * call and later resumes has to restore its own. The same pair is what an
+ * unwind uses -- see cvm_throw in vm/exc.c.
+ *
+ * Restoring also restores the state a collector reads, which is why this is
+ * the only correct way to put the depth back: assigning the depth alone
+ * would leave a thread that looks managed while it is inside a foreign call.
+ */
+u32 cvm_thread_unmanaged_depth(void);
+void cvm_thread_restore_unmanaged_depth(u32 depth);
+
 /* ------------------------------------------------------------------ */
 /* Safepoints                                                          */
 /* ------------------------------------------------------------------ */
@@ -360,6 +375,16 @@ typedef struct CvmFrameHandle {
  * grouped at the front so the hot ones share a cache line. Everything
  * after them is runtime bookkeeping that generated code never reads.
  */
+/*
+ * The runtime's record for one `try` (vm/exc.h). Named here because the
+ * thread context holds the chain, and the context is what a collector reads.
+ * The definition is not here: what a handler holds is the runtime's
+ * business, and a header that describes the root set only needs to say that
+ * the chain exists.
+ */
+struct CvmHandler;
+typedef struct CvmHandler CvmHandler;
+
 typedef struct CvmVMContext {
     u8* bump_ptr; /* fast-path allocation cursor */
     u8* bump_end; /* end of the current bump region */
@@ -394,6 +419,21 @@ typedef struct CvmVMContext {
     CvmGcFrame* frames;
     u32 frame_depth;
     u32 frame_capacity;
+
+    /*
+     * The handler chain, innermost first, and a free list of records that
+     * are not on it. Both per-thread, and both made of records the runtime
+     * allocated -- which keeps them out of the class of problem the frame
+     * array was built to leave behind: no chain here points into a C stack,
+     * so an abandoned activation cannot leave one for the collector to
+     * follow.
+     *
+     * Only `handlers` is walked by cvm_mark_roots. A record on the free list
+     * is not a live handler, and it still holds the exception it was popped
+     * with; marking that would retain an object nothing can reach.
+     */
+    CvmHandler* handlers;
+    CvmHandler* free_handlers;
 
     /*
      * The runtime's own record for this thread (vm/context.h). A context

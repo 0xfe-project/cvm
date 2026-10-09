@@ -16,6 +16,7 @@
  */
 
 #include "context.h"
+#include "cvm/exc.h"
 
 #include <stdatomic.h>
 
@@ -103,6 +104,8 @@ bool cvm_thread_attach(void) {
     node->ctx.frames = NULL;
     node->ctx.frame_depth = 0u;
     node->ctx.frame_capacity = 0u;
+    node->ctx.handlers = NULL;
+    node->ctx.free_handlers = NULL;
     node->ctx.bump_ptr = NULL;
     node->ctx.bump_end = NULL;
     node->ctx.owner = node;
@@ -245,6 +248,25 @@ void cvm_thread_detach(void) {
      * this thread's context and would read frames that had just been freed.
      */
     rt_mem_free(node->ctx.frames);
+
+    /*
+     * Handlers too. A live one holds an exception and a jump target, and both
+     * belong to activations on this thread's stack: leaving them on the chain
+     * after the thread is gone is a chain the collector would walk into
+     * freed memory, and leaving the free list would leak the records.
+     */
+    for (CvmHandler* handler = node->ctx.handlers; handler != NULL;) {
+        CvmHandler* next = handler->prev;
+        rt_mem_free(handler);
+        handler = next;
+    }
+    for (CvmHandler* handler = node->ctx.free_handlers; handler != NULL;) {
+        CvmHandler* next = handler->prev;
+        rt_mem_free(handler);
+        handler = next;
+    }
+    node->ctx.handlers = NULL;
+    node->ctx.free_handlers = NULL;
     node->ctx.frames = NULL;
     node->ctx.frame_depth = 0u;
     node->ctx.frame_capacity = 0u;
@@ -432,6 +454,22 @@ void cvm_thread_leave_unmanaged(void) {
      */
     cvm_thread_set_state(CVM_THREAD_MANAGED);
     cvm_safepoint_poll();
+}
+
+u32 cvm_thread_unmanaged_depth(void) {
+    CvmThreadNode* node = cvm_thread_node();
+    return (node != NULL)
+               ? atomic_load_explicit(&node->unmanaged_depth, memory_order_acquire)
+               : 0u;
+}
+
+void cvm_thread_restore_unmanaged_depth(u32 depth) {
+    CvmThreadNode* node = cvm_thread_node();
+    if (node == NULL) {
+        return;
+    }
+    atomic_store_explicit(&node->unmanaged_depth, depth, memory_order_release);
+    cvm_thread_set_state((depth > 0u) ? CVM_THREAD_UNMANAGED : CVM_THREAD_MANAGED);
 }
 
 /* ------------------------------------------------------------------ */
