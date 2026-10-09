@@ -4,9 +4,26 @@
  * The large-object allocator, ported from refs/commix/LargeAllocator.{h,c}.
  *
  * Objects at least CVM_LARGE_OBJECT_MIN_SIZE (8 KiB) are not line-managed.
- * They are cut from whole free blocks in 8 KiB multiples, and the pieces
- * are reused through segregated free lists rather than being returned to
- * the block allocator and re-cut every time.
+ * Up to one block they are cut from whole free blocks in 8 KiB multiples,
+ * and the pieces are reused through segregated free lists rather than being
+ * returned to the block allocator and re-cut every time. Above one block
+ * they are a run of whole blocks -- a superblock, asked for as one from the
+ * block allocator -- because a chunk is defined by fitting inside a block.
+ *
+ * ---------------------------------------------------------------------
+ * Objects larger than a block
+ * ---------------------------------------------------------------------
+ *
+ * The superblock is the shape the rest of the collector already reads for a
+ * large object: the marker skips line marking for a block marked as a
+ * superblock head or tail, and cvm_sweep_superblock walks the head slot and
+ * the last block, which is where an object that bodies the front blocks and
+ * ends in the last one is described. A spanning object is one object per
+ * superblock: the tail of its last block is not cut into chunks for other
+ * objects, so up to a block per spanning object is left inside the run and
+ * reclaimed with it. Filling that tail is what the chunk path in
+ * cvm_sweep_superblock is written for and is not implemented, which is why
+ * the sweep's clears there have no workload that reaches them.
  *
  * ---------------------------------------------------------------------
  * Why chunks rather than blocks

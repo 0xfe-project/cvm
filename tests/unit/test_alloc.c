@@ -55,6 +55,18 @@ static CvmTypeDescriptor const large9000 = {
     .kind = CVM_TYPE_SCALAR,
 };
 
+/*
+ * Larger than one block, which is the other kind of large object: a chunk is
+ * carved out of a block and cannot span one, so an object this size is a run
+ * of whole blocks -- a superblock. 70000 bytes plus a header rounds to 73728,
+ * which is three blocks, and three is deliberately not a power of two: that is
+ * the case where the heap grows by four to hold three.
+ */
+static CvmTypeDescriptor const spanning70000 = {
+    .size = 70000,
+    .kind = CVM_TYPE_SCALAR,
+};
+
 /* ------------------------------------------------------------------ */
 /* fixture                                                             */
 /* ------------------------------------------------------------------ */
@@ -259,6 +271,81 @@ TEST a_large_object_is_chunk_allocated(void) {
     PASS();
 }
 
+TEST an_object_larger_than_a_block_takes_a_superblock(void) {
+    fixture_enter();
+    ASSERT(cvm_thread_ctx() != NULL);
+
+    u8* p = cvm_alloc(&spanning70000);
+    ASSERT(p != NULL);
+    ASSERT(in_heap(p));
+
+    CvmGcHeader const* header = cvm_header_of(p);
+    ASSERT(header->type == &spanning70000);
+    ASSERT(
+        object_meta_is_allocated(bytemap_get_const(the_bytemap(), (u8 const*)header)));
+
+    /*
+     * The object's blocks are described as one superblock, and its size is
+     * the number of blocks it reaches. That is what the sweeper reads to
+     * decide which blocks are its body: it frees every block but the last
+     * when the object at the start is dead.
+     */
+    usize needed =
+        cvm_align_up(sizeof(CvmGcHeader) + spanning70000.size, CVM_BLOCK_SIZE);
+    u32 blocks = (u32)(needed / CVM_BLOCK_SIZE);
+    ASSERT(blocks > 1);
+
+    CvmHeap* h = the_heap();
+    BlockMeta* head =
+        cvm_heap_block_meta(h, block_index_of(h->heap_start, (u8*)header));
+    ASSERT(block_meta_is_superblock_start(head));
+    ASSERT_EQ_FMT(blocks, block_meta_superblock_size(head), "%u");
+
+    /* Every other block of the run says it is a tail, which is what tells
+     * the marker not to look for line marks in it. */
+    for (u32 i = 1; i < blocks; i++) {
+        ASSERT(block_meta_is_superblock_tail(head + i));
+    }
+
+    /* The object's whole payload is the object's: write it end to end and
+     * read it back, which a superblock handed out twice would not survive. */
+    for (usize i = 0; i < spanning70000.size; i++) {
+        p[i] = (u8)(0x5au ^ (u8)i);
+    }
+    for (usize i = 0; i < spanning70000.size; i++) {
+        ASSERT_EQ_FMT((u8)(0x5au ^ (u8)i), p[i], "%u");
+    }
+
+    fixture_leave();
+    PASS();
+}
+
+TEST spanning_objects_do_not_overlap(void) {
+    fixture_enter();
+    ASSERT(cvm_thread_ctx() != NULL);
+
+    enum { N = 4 };
+    u8* p[N];
+    for (int i = 0; i < N; i++) {
+        p[i] = cvm_alloc(&spanning70000);
+        ASSERT(p[i] != NULL);
+    }
+
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            if (i == j) {
+                continue;
+            }
+            usize a = (usize)p[i];
+            usize b = (usize)p[j];
+            ASSERT(a >= b + spanning70000.size || b >= a + spanning70000.size);
+        }
+    }
+
+    fixture_leave();
+    PASS();
+}
+
 TEST large_objects_do_not_overlap(void) {
     fixture_enter();
     ASSERT(cvm_thread_ctx() != NULL);
@@ -375,6 +462,8 @@ SUITE(alloc_suite) {
     RUN_TEST(many_allocations_stay_inside_the_heap);
     RUN_TEST(an_object_larger_than_a_line_takes_the_overflow_path);
     RUN_TEST(a_large_object_is_chunk_allocated);
+    RUN_TEST(an_object_larger_than_a_block_takes_a_superblock);
+    RUN_TEST(spanning_objects_do_not_overlap);
     RUN_TEST(large_objects_do_not_overlap);
     RUN_TEST(a_returned_chunk_is_reused);
     RUN_TEST(large_allocation_reports_the_granularity);

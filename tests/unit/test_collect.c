@@ -544,6 +544,61 @@ TEST a_partly_free_block_is_zeroed_where_it_is_free(void) {
     PASS();
 }
 
+TEST a_spanning_object_survives_and_is_reclaimed(void) {
+    /*
+     * A large object bigger than a block is a superblock: a run of whole
+     * blocks with the object at the front of it. Nothing used to allocate
+     * one, so cvm_sweep_superblock had no workload that reached it, and the
+     * clearing it does when it reclaims one -- the front blocks, the last
+     * block, the dead chunks in a block that still has a survivor -- was
+     * unreachable code with a test that could not fail.
+     *
+     * This is the workload. A spanning object is allocated, held across a
+     * collection, checked byte for byte, dropped, and its memory allocated
+     * again and checked for zeroes, which is the same claim the two tests
+     * above make about a block and about a free run.
+     */
+    enum { SIZE = 70000 };
+    CvmTypeDescriptor desc = {.size = SIZE, .kind = CVM_TYPE_SCALAR};
+
+    fixture_enter();
+    FRAME(1);
+
+    u8* first = cvm_alloc(&desc);
+    ASSERT(first != NULL);
+    for (usize i = 0; i < SIZE; i++) {
+        first[i] = (u8)(0x3cu ^ (u8)i);
+    }
+    f_roots[0] = first;
+
+    collect();
+
+    /* Live, so nothing was cleared under it and nothing moved it. */
+    ASSERT(is_live(f_roots[0]));
+    for (usize i = 0; i < SIZE; i++) {
+        if (first[i] != (u8)(0x3cu ^ (u8)i)) {
+            FAILm("a spanning object's contents did not survive the collection");
+        }
+    }
+
+    f_roots[0] = NULL;
+    collect();
+
+    ASSERT_EQ_FMT(0u, released_bytes_that_are_not_zero(), "%u");
+
+    u8* again = cvm_alloc(&desc);
+    ASSERT(again != NULL);
+    for (usize i = 0; i < SIZE; i++) {
+        if (again[i] != 0) {
+            FAILm("a reclaimed superblock was handed out without being cleared");
+        }
+    }
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
 TEST allocation_still_works_after_a_collection(void) {
     /* The allocator's caches were cleared by the collection, so this is
      * what checks that it can rebuild them. */
@@ -691,6 +746,7 @@ SUITE(collect_suite) {
     RUN_TEST(collection_reclaims_space);
     RUN_TEST(reclaimed_memory_is_zeroed_before_it_is_reused);
     RUN_TEST(a_partly_free_block_is_zeroed_where_it_is_free);
+    RUN_TEST(a_spanning_object_survives_and_is_reclaimed);
     RUN_TEST(allocation_still_works_after_a_collection);
     RUN_TEST(surviving_objects_keep_their_identity_across_collections);
     RUN_TEST(a_large_object_is_reclaimed_when_it_dies);

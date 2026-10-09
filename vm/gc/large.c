@@ -226,14 +226,57 @@ static CvmChunk* take_chunk_from_new_block(CvmLargeAllocator* large, usize size)
     return chunk;
 }
 
-/* One attempt, without collecting. Returns NULL if there is no room. */
+/*
+ * One attempt at a large object, without collecting.
+ *
+ * Two shapes, and the boundary between them is a block. Up to one block the
+ * object is a chunk carved out of a block, which is what the segregated free
+ * lists and take_chunk_from_new_block are for. Above one block it is a run of
+ * whole blocks, which is a superblock -- and everything else in the collector
+ * already understands one: the block allocator hands out a run with the head
+ * marked superblock_start and the rest marked tail, the marker skips line
+ * marking for any block that is one of those, and cvm_sweep_superblock walks
+ * exactly the shape an object has when it bodies the front blocks and ends in
+ * the last one.
+ *
+ * What was missing was this branch. Nothing ever asked for a superblock, so a
+ * request above a block went to take_chunk_from_new_block, where
+ * `remaining = CVM_BLOCK_SIZE - size` underflowed and a chunk of enormous size
+ * was pushed onto a free list.
+ *
+ * The interior of a large object is left as free metadata, as it is for a
+ * chunk: a precise collector never produces an interior pointer, so a slot
+ * that reads free is not a claim that the memory is available. The object is
+ * tracked by the superblock's head slot instead.
+ */
+static u8* try_spanning_alloc(CvmLargeAllocator* large, usize chunk_size) {
+    u32 blocks = (u32)cvm_div_round_up(chunk_size, CVM_BLOCK_SIZE);
+    BlockMeta* run = cvm_block_alloc_get_superblock(large->block_alloc, blocks);
+    if (run == NULL) {
+        return NULL;
+    }
+
+    u8* start = block_meta_block_start(large->heap->block_meta_start,
+                                       large->heap->heap_start, run);
+    object_meta_set_allocated(bytemap_get(large->bytemap, start));
+
+    return (u8*)((CvmGcHeader*)start + 1);
+}
+
+/* One attempt at a large object, without collecting. */
 static u8* try_large_alloc(CvmLargeAllocator* large, usize size) {
-    CvmChunk* chunk = take_chunk(large, size);
+    CvmChunk* chunk;
+
+    if (size > CVM_BLOCK_SIZE) {
+        return try_spanning_alloc(large, size);
+    }
+
+    chunk = take_chunk(large, size);
 
     if (chunk == NULL) {
         /*
          * A chunk of the requested size always fits in one block: the
-         * request is below the block size, and rounding up to the
+         * request is at most the block size, and rounding up to the
          * granularity keeps it there. So a fresh block can always serve
          * it.
          */
@@ -246,14 +289,10 @@ static u8* try_large_alloc(CvmLargeAllocator* large, usize size) {
     /*
      * The chunk is the object's start; the payload follows the header.
      *
-     * No clearing here, and this is the loop that cost the most: a large
-     * object is up to 8 KiB, so this was the one place in the runtime that
-     * cleared thousands of bytes per call, and it cleared them a byte at a
-     * time -- freestanding, the compiler will not turn that into a memset.
-     * The medium-object workload measured 6x slower in a freestanding build
-     * than in the hosted one because of this loop and the one publish used
-     * to have. Both are gone; a chunk is zero when it is handed out because
-     * the sweeper cleared it when it was reclaimed (gc/sweeper.c).
+     * No clearing here. A chunk is zero when it is handed out because the
+     * sweeper cleared it when it was reclaimed (gc/sweeper.c), which is
+     * what lets a large object's payload be promised zeroed without
+     * clearing up to 8 KiB a byte at a time on the allocation path.
      */
     u8* start = (u8*)chunk;
 
@@ -339,17 +378,29 @@ opaque_mut cvm_alloc_large(CvmTypeDescriptor const* type, usize size) {
         u32 blocks = (u32)cvm_div_round_up(chunk_size, CVM_BLOCK_SIZE);
         u32 pow2 = 1u << cvm_log2_ceil(blocks);
 
+        /*
+         * How many blocks the heap actually takes, which is not always the
+         * power of two that was asked for: the first call fails on a
+         * reservation with less than pow2 left and blocks is what lands.
+         * Filing fewer than were extended leaves the rest inside the heap
+         * and on no free list, where the next sweep finds a block that is
+         * neither free nor in use -- so the count filed has to be the count
+         * added.
+         */
+        u32 grown = pow2;
         u32 first = 0;
-        if (!cvm_heap_extend(heap, pow2, &first) &&
-            !cvm_heap_extend(heap, blocks, &first)) {
-            rt_fatal(STR_LITERAL("out of heap space for a large object"));
+        if (!cvm_heap_extend(heap, pow2, &first)) {
+            grown = blocks;
+            if (!cvm_heap_extend(heap, blocks, &first)) {
+                rt_fatal(STR_LITERAL("out of heap space for a large object"));
+            }
         }
 
-        for (u32 i = 0; i < blocks; i++) {
+        for (u32 i = 0; i < grown; i++) {
             BlockMeta* meta = cvm_heap_block_meta(heap, first + i);
             block_meta_set_debug_state(meta, CVM_DBG_FREE);
         }
         cvm_block_alloc_add_free_superblock(large->block_alloc,
-                                            cvm_heap_block_meta(heap, first), blocks);
+                                            cvm_heap_block_meta(heap, first), grown);
     }
 }
