@@ -408,6 +408,7 @@ static str const activity_names[CVM_ACT_TYPE_COUNT] = {
     [CVM_ACT_DETACHING] = {.ptr = (u8 const*)"detaching", .len = 9},
     [CVM_ACT_FINALIZING] = {.ptr = (u8 const*)"finalizing", .len = 10},
     [CVM_ACT_JOINING] = {.ptr = (u8 const*)"joining", .len = 7},
+    [CVM_ACT_PARKING] = {.ptr = (u8 const*)"parking", .len = 7},
 };
 
 str cvm_thread_activity_name(CvmThreadActivity activity) {

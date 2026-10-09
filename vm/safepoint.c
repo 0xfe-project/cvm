@@ -360,12 +360,15 @@ void cvm_safepoint_park(void) {
         return;
     }
 
+    cvm_thread_set_activity(CVM_ACT_PARKING);
+
     rt_mutex_lock(&stw_mutex);
 
     /* Re-check under the lock: the collection may have ended between the
      * poll's load and getting here, and parking then would mean waiting
      * for a release that already happened. */
     if (!atomic_load_explicit(&cvm_safepoint_requested, memory_order_acquire)) {
+        cvm_thread_set_activity(CVM_ACT_IDLE);
         rt_mutex_unlock(&stw_mutex);
         return;
     }
@@ -378,6 +381,7 @@ void cvm_safepoint_park(void) {
     }
 
     atomic_store_explicit(&node->parked, false, memory_order_release);
+    cvm_thread_set_activity(CVM_ACT_IDLE);
     rt_mutex_unlock(&stw_mutex);
 }
 

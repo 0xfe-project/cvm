@@ -163,6 +163,17 @@ typedef enum CvmThreadActivity {
     CVM_ACT_DETACHING,
     CVM_ACT_FINALIZING,
     CVM_ACT_JOINING,
+    /*
+     * On the way to a safepoint: the poll or the trap handler has decided
+     * this thread must stop, and it is waiting for the collector's lock.
+     *
+     * Distinct from IDLE because that is exactly the state that makes a
+     * stuck thread unreadable. A thread blocked on `stw_mutex` still reads
+     * as IDLE -- it has not recorded anything yet -- so the one diagnostic
+     * that exists for "why is the world not stopping" cannot tell it apart
+     * from a thread that is simply minding its own business.
+     */
+    CVM_ACT_PARKING,
     CVM_ACT_TYPE_COUNT,
 } CvmThreadActivity;
 
