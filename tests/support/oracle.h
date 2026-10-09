@@ -202,23 +202,25 @@ static ORACLE_UNUSED void oracle_collect(void) {
 /* ------------------------------------------------------------------ */
 
 /*
- * Abandon whatever frame chain the calling thread has.
+ * Abandon whatever frames the calling thread has.
  *
  * Every test in this suite pushes a frame that lives for the whole test
  * body, and an assertion that fires returns from the test function without
- * popping it — leaving the thread's `top_frame` pointing at storage that no
- * longer exists. The next test's collection then walks a dangling chain and
- * the process dies for a reason that has nothing to do with what it was
- * testing. Calling this at the top of each test makes one failure stay one
- * failure.
+ * popping it. What is left behind is a depth that counts frames belonging to
+ * an activation that has ended, so the next test's collection walks slots
+ * whose storage is gone.
  *
- * It is also honest about the protocol: a frame chain is the thread's own
- * state, and a test that abandons one has to say so.
+ * Note that this is now a count rather than a pointer, which is why the
+ * comment is shorter than it used to be. Abandoning frames cannot leave a
+ * dangling pointer to follow -- the frames above the depth are simply not
+ * reached -- so the failure this guards against is a stale depth, not a wild
+ * read. Calling it at the top of each test still keeps one failure from
+ * becoming two.
  */
 static ORACLE_UNUSED void oracle_reset_frames(void) {
     CvmVMContext* ctx = cvm_thread_ctx();
     if (ctx != NULL) {
-        ctx->top_frame = NULL;
+        ctx->frame_depth = 0u;
     }
 }
 

@@ -100,7 +100,9 @@ bool cvm_thread_attach(void) {
         return false;
     }
 
-    node->ctx.top_frame = NULL;
+    node->ctx.frames = NULL;
+    node->ctx.frame_depth = 0u;
+    node->ctx.frame_capacity = 0u;
     node->ctx.bump_ptr = NULL;
     node->ctx.bump_end = NULL;
     node->ctx.owner = node;
@@ -237,6 +239,16 @@ void cvm_thread_detach(void) {
      * whole timeout before re-checking the registry. */
     cvm_safepoint_notify_thread_changed();
 
+    /*
+     * The frame array goes with the node, and only after the node is out of
+     * the registry: while it is still visible, a collection walks through
+     * this thread's context and would read frames that had just been freed.
+     */
+    rt_mem_free(node->ctx.frames);
+    node->ctx.frames = NULL;
+    node->ctx.frame_depth = 0u;
+    node->ctx.frame_capacity = 0u;
+
     /* Clear TLS before freeing: leaving a dangling context installed
      * would make any later use of the thread look registered. */
     cvm_tls_ctx = NULL;
@@ -299,6 +311,35 @@ void cvm_thread_set_state(CvmThreadState state) {
     if (state == CVM_THREAD_UNMANAGED && cvm_safepoint_in_progress()) {
         cvm_safepoint_notify_thread_changed();
     }
+}
+
+/*
+ * Grow the thread's frame array so that one more frame fits.
+ *
+ * Out of line because it is the cold half of push: the array doubles, so a
+ * thread that reaches depth N pays for log2(N) reallocations in total.
+ *
+ * Fatal on failure rather than returning. A thread that cannot record its
+ * frames stops being a root set, and a collection that runs after that
+ * reclaims objects the thread still holds -- a wrong answer delivered
+ * quietly. There is no recovery to offer the caller either: generated code
+ * cannot do anything useful about it and has no way to report it.
+ */
+void cvm_frame_grow(CvmVMContext* ctx) {
+    u32 capacity = (ctx->frame_capacity == 0u) ? 8u : (ctx->frame_capacity * 2u);
+
+    CvmGcFrame* grown = rt_mem_alloc((usize)capacity * sizeof(CvmGcFrame));
+    if (grown == NULL) {
+        rt_fatal(STR_LITERAL("out of memory growing the frame stack"));
+    }
+
+    for (u32 i = 0; i < ctx->frame_depth; i++) {
+        grown[i] = ctx->frames[i];
+    }
+
+    rt_mem_free(ctx->frames);
+    ctx->frames = grown;
+    ctx->frame_capacity = capacity;
 }
 
 bool cvm_thread_node_is_alive(CvmThreadNode const* node) {

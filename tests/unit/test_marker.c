@@ -255,6 +255,77 @@ TEST every_frame_in_the_chain_is_walked(void) {
     PASS();
 }
 
+/*
+ * Unwinding is restoring a number, and an abandoned frame's pop cannot undo
+ * it.
+ *
+ * This is the property the exception work needs. A handler record holds the
+ * depth to restore, which is a u32 rather than a pointer into the handling
+ * activation's stack -- so a handler inside a suspended coroutine, whose
+ * activation is a heap object, is describable at all. With a chain of
+ * frames, the natural thing for a record to hold is a `CvmGcFrame*`, and
+ * that points into a stack that may have been reused by the time the
+ * handler runs.
+ *
+ * The object this checks on is allocated *after* the unwind, so the mark
+ * cycle below is the first one that has ever seen it and its bit is its
+ * own. That matters here: this suite does not clear mark bits between
+ * cycles, because every other test allocates its own objects and a leftover
+ * bit describes a different address. An object marked by an earlier cycle
+ * cannot be used to assert that something was *not* reached.
+ *
+ * The stale pop is deliberate. An activation reached by an unwind does not
+ * run its epilogue, so the pop below would not happen -- but the pop is
+ * documented as idempotent precisely so that a mistake in that reasoning
+ * costs nothing, and this is what says so.
+ */
+TEST a_restored_depth_hides_the_frames_above_it(void) {
+    fixture_enter();
+    reset_marking();
+
+    CvmVMContext* ctx = cvm_ctx();
+
+    FRAME(1);
+    void* kept = cvm_alloc(&leaf_desc);
+    ASSERT(kept != NULL);
+    f_roots[0] = kept;
+
+    /* What a handler record would save. */
+    u32 handler_depth = ctx->frame_depth;
+
+    /* The outer frame is a root while it is live, so the assertion after the
+     * unwind is about the unwind and not about the object being unreachable
+     * from the start. */
+    mark_all();
+    ASSERT(cvm_object_is_marked(heap(), kept));
+    reset_marking();
+
+    {
+        CVM_FRAME_DECL(inner, 1);
+        cvm_frame_push(&inner_frame, inner_roots, 1);
+
+        void* abandoned = cvm_alloc(&leaf_desc);
+        ASSERT(abandoned != NULL);
+        inner_roots[0] = abandoned;
+
+        /* The unwind, which is this one store and nothing else. */
+        ctx->frame_depth = handler_depth;
+
+        cvm_frame_pop(&inner_frame);
+        ASSERT_EQ_FMT(handler_depth, ctx->frame_depth, "%u");
+
+        mark_all();
+        ASSERT(cvm_object_is_marked(heap(), kept));
+        ASSERT_FALSE(cvm_object_is_marked(heap(), abandoned));
+        reset_marking();
+    }
+
+    FRAME_END();
+    ASSERT_EQ_FMT(handler_depth - 1u, ctx->frame_depth, "%u");
+    fixture_leave();
+    PASS();
+}
+
 /* ------------------------------------------------------------------ */
 /* following pointers                                                  */
 /* ------------------------------------------------------------------ */
@@ -642,6 +713,7 @@ SUITE(marker_suite) {
     RUN_TEST(a_root_keeps_its_object);
     RUN_TEST(a_null_root_is_harmless);
     RUN_TEST(every_frame_in_the_chain_is_walked);
+    RUN_TEST(a_restored_depth_hides_the_frames_above_it);
     RUN_TEST(a_pointer_chain_is_followed);
     RUN_TEST(a_cycle_terminates);
     RUN_TEST(an_unreachable_tail_is_left_alone);

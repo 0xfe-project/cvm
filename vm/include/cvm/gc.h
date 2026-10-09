@@ -296,13 +296,17 @@ CVM_INLINE void cvm_safepoint_poll(void) {
 /* ------------------------------------------------------------------ */
 
 /*
- * One per managed activation record. Frames live in the thread's
- * bump arena, form a singly-linked list via prev, and hold every
- * GC pointer that is live in that activation. Generated code is
- * responsible for keeping slots in sync with source-level variables.
+ * One per managed activation record. Frames live in an array owned by the
+ * thread, and one of them holds every GC pointer that is live in its
+ * activation. Generated code is responsible for keeping slots in sync with
+ * source-level variables.
+ *
+ * A frame does not know its own position. The position *is* the frame's
+ * identity: the thread's context counts how many are live, and only the
+ * prefix below that count is reached by anything. That is what makes
+ * abandoning frames safe -- see the note above cvm_frame_push.
  */
 typedef struct CvmGcFrame {
-    struct CvmGcFrame* prev;
     u32 num_slots;
 
     /*
@@ -316,6 +320,19 @@ typedef struct CvmGcFrame {
      */
     opaque_mut* roots; /* num_slots entries */
 } CvmGcFrame;
+
+/*
+ * What generated code holds for the duration of an activation.
+ *
+ * An index rather than a `CvmGcFrame*`, and that is a requirement rather
+ * than a preference: the array grows by reallocation, so a pointer taken at
+ * push time would dangle the first time the array moved. An index survives
+ * the move, and it can be saved and restored by a value -- which is the
+ * whole point of the design.
+ */
+typedef struct CvmFrameHandle {
+    u32 index;
+} CvmFrameHandle;
 
 /*
  * No frame flags.
@@ -344,9 +361,8 @@ typedef struct CvmGcFrame {
  * after them is runtime bookkeeping that generated code never reads.
  */
 typedef struct CvmVMContext {
-    CvmGcFrame* top_frame; /* head of the precise root stack */
-    u8* bump_ptr;          /* fast-path allocation cursor */
-    u8* bump_end;          /* end of the current bump region */
+    u8* bump_ptr; /* fast-path allocation cursor */
+    u8* bump_end; /* end of the current bump region */
 
     /*
      * Heap base and the object metadata table, so the inlined path can
@@ -360,6 +376,24 @@ typedef struct CvmVMContext {
      */
     u8* heap_base;
     u8* object_meta;
+
+    /*
+     * The thread's live frames, as a prefix of an array the runtime owns:
+     * `frames[0..frame_depth)` are the frames, and everything at or above
+     * `frame_depth` is storage whose lifetime has ended and which nothing
+     * reads. `frames` is reallocated as the depth grows, which is why the
+     * handle generated code holds is an index.
+     *
+     * A count and a prefix, rather than a chain through the callers'
+     * stacks. Unwinding then means restoring an integer, and the frames on
+     * abandoned call paths are unreachable by construction rather than by
+     * discipline -- where a chain would leave their `prev` links pointing
+     * into C stack that has been reused, which is a crash in the collector
+     * rather than a leak.
+     */
+    CvmGcFrame* frames;
+    u32 frame_depth;
+    u32 frame_capacity;
 
     /*
      * The runtime's own record for this thread (vm/context.h). A context
@@ -385,10 +419,9 @@ extern __thread CvmVMContext* cvm_tls_ctx __attribute__((tls_model("initial-exec
 /* ------------------------------------------------------------------ */
 
 /*
- * Frame storage belongs to the caller.
+ * Frame storage belongs to the runtime, and generated code holds an index.
  *
- * Generated code declares the frame as a local, so its lifetime is
- * exactly the activation and nothing has to be allocated:
+ * Generated code declares the slots as a local and a handle beside them:
  *
  *     CVM_FRAME_DECL(f, 2);
  *     cvm_frame_push(&f_frame, f_roots, 2);
@@ -396,33 +429,78 @@ extern __thread CvmVMContext* cvm_tls_ctx __attribute__((tls_model("initial-exec
  *     ...
  *     cvm_frame_pop(&f_frame);
  *
- * The alternative — carving frames out of the same bump region as
- * objects and rewinding the bump pointer on pop — does not work, and the
- * reason is worth recording because the shape is tempting. Rewinding
- * reclaims everything allocated since the frame was pushed, and that
- * includes any object the function is about to return:
+ * The slots stay on the machine stack -- they would have been stack locals
+ * anyway -- and the frame that describes them goes into an array the
+ * runtime owns, one per thread. What the activation holds is `f_frame`,
+ * which is an index.
+ *
+ * ---------------------------------------------------------------------
+ * Why an array and not a chain through the callers' stacks
+ * ---------------------------------------------------------------------
+ *
+ * The obvious shape is for the frame to be a local too, linked to its
+ * caller's frame by a `prev` pointer, and that is what this was. It is
+ * correct as long as the chain is unwound by popping. It is wrong the
+ * moment anything unwinds by other means -- and unwinding by other means is
+ * exactly what exceptions need:
+ *
+ *     frame A is pushed, allocates, calls B;
+ *     B throws; the handler is in A; A's and B's frames are abandoned
+ *       without either pop running;
+ *     A's chain still points at B's frame, which lives in C stack that has
+ *       been reused;
+ *     the next collection walks A's chain into that storage.
+ *
+ * The failure is not a leak. The collector dereferences a `num_slots` and a
+ * `roots` pointer read out of whatever the stack now holds, so it is a wild
+ * read from the marker -- a crash, or a silent retention of a number the
+ * collector invented.
+ *
+ * Counting instead of linking removes the failure rather than guarding it.
+ * The live frames are the first `frame_depth` entries, so a frame that was
+ * abandoned is not *skipped*: it is not reachable by construction, and there
+ * is no pointer from a live frame into a dead one for anything to follow.
+ * Unwinding is then one store of an integer, which is also the thing a
+ * frontend can save and restore.
+ *
+ * The cost is an indirection on the root walk, which is cold, and a bounds
+ * check that cannot be skipped.
+ *
+ * ---------------------------------------------------------------------
+ * Why not carve frames out of the bump region
+ * ---------------------------------------------------------------------
+ *
+ * Storing frames in the same arena as objects, and rewinding the bump
+ * pointer on pop, is tempting and does not work. Rewinding reclaims
+ * everything allocated since the frame was pushed, including any object the
+ * function is about to return:
  *
  *     frame->roots[0] = cvm_alloc(&t);
  *     cvm_frame_pop(frame);        // bump pointer rewinds past it
  *     return frame->roots[0];      // dangling
  *
- * Nothing short of escape analysis could tell the two cases apart, and
- * the collector is not the place for that. Putting the frame on the
- * machine stack costs nothing extra: its slots would otherwise have been
- * stack locals anyway.
+ * Nothing short of escape analysis could tell the two cases apart, and the
+ * collector is not the place for that.
  *
- * The collector still never scans the machine stack. Roots come from
- * this chain, which holds exactly the live pointers, and walking it is
- * what root finding is.
+ * The collector still never scans the machine stack. Roots come from these
+ * frames, which hold exactly the live pointers, and walking them is what
+ * root finding is.
  */
 #define CVM_FRAME_DECL(name, slots)                                                    \
     opaque_mut name##_roots[(slots)];                                                  \
-    CvmGcFrame name##_frame
+    CvmFrameHandle name##_frame
 
-CVM_INLINE void cvm_frame_push(CvmGcFrame* frame, opaque_mut* roots, u32 num_slots) {
+/* Out of line, in vm/context.c. Fatal if the array cannot grow: a thread
+ * with nowhere to put its frames cannot be allowed to keep running, because
+ * the roots it would stop recording are the difference between a collection
+ * that is correct and one that reclaims live objects. */
+void cvm_frame_grow(CvmVMContext* ctx);
+
+CVM_INLINE void cvm_frame_push(CvmFrameHandle* frame, opaque_mut* roots,
+                               u32 num_slots) {
     /*
      * A function entry is a safepoint, and this is where generated code
-     * enters a function — so the poll lives here rather than being left to
+     * enters a function -- so the poll lives here rather than being left to
      * the frontend to remember.
      *
      * That narrows the frontend's obligation to loop back edges, which are
@@ -437,18 +515,38 @@ CVM_INLINE void cvm_frame_push(CvmGcFrame* frame, opaque_mut* roots, u32 num_slo
     cvm_safepoint_poll();
 
     CvmVMContext* ctx = cvm_ctx();
-    frame->prev = ctx->top_frame;
-    frame->num_slots = num_slots;
-    frame->roots = roots;
-    ctx->top_frame = frame;
+    if (ctx->frame_depth == ctx->frame_capacity) {
+        cvm_frame_grow(ctx);
+    }
+
+    u32 index = ctx->frame_depth;
+    ctx->frames[index].roots = roots;
+    ctx->frames[index].num_slots = num_slots;
+    ctx->frame_depth = index + 1u;
+    frame->index = index;
 }
 
-CVM_INLINE void cvm_frame_pop(CvmGcFrame* frame) {
+/*
+ * Idempotent, and that is deliberate rather than convenient.
+ *
+ * Only the frame that is on top takes the depth down. A second pop finds the
+ * depth already at or below its own index and does nothing, and so does a
+ * pop that runs after an unwind has already restored a smaller depth. The
+ * alternative -- assert that the frame is the top, then follow it -- makes
+ * every such mistake fatal at the moment it is least convenient to debug,
+ * and buys nothing: the state after a redundant pop is exactly the state
+ * wanted.
+ *
+ * What it does not cover is a stale pop landing after a *different*
+ * activation has taken the same index. That cannot happen here: a push is
+ * paired with exactly one pop on that activation's own path, and an
+ * activation reached by an unwind never resumes to run its epilogue.
+ */
+CVM_INLINE void cvm_frame_pop(CvmFrameHandle* frame) {
     CvmVMContext* ctx = cvm_ctx();
-    /* Popping a frame that is not the top would leave the chain pointing
-     * at storage whose lifetime has ended. */
-    cvm_assert(ctx->top_frame == frame);
-    ctx->top_frame = frame->prev;
+    if (frame->index + 1u == ctx->frame_depth) {
+        ctx->frame_depth = frame->index;
+    }
 }
 
 /* ------------------------------------------------------------------ */

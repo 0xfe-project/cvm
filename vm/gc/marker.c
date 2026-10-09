@@ -399,11 +399,18 @@ void cvm_trace_object(CvmHeap* heap, u8* start, CvmGreyPacket** out,
  * no range to bound and no stack to sweep: this is the whole of root
  * finding.
  */
-static void mark_frame_chain(CvmHeap* heap, CvmGcFrame* frame, CvmGreyPacket** out,
-                             CvmGreyPacket** out_weak) {
-    for (; frame != NULL; frame = frame->prev) {
-        for (u32 i = 0; i < frame->num_slots; i++) {
-            cvm_mark_field(heap, frame->roots[i], out, out_weak);
+static void mark_frame_chain(CvmHeap* heap, CvmVMContext const* ctx,
+                             CvmGreyPacket** out, CvmGreyPacket** out_weak) {
+    /*
+     * The live frames are the prefix below the depth, and that bound is the
+     * whole of the safety argument: a frame abandoned by an unwind is above
+     * it, so nothing here can reach it, and there is no link from a live
+     * frame into a dead one for the walk to follow.
+     */
+    for (u32 i = 0; i < ctx->frame_depth; i++) {
+        CvmGcFrame const* frame = &ctx->frames[i];
+        for (u32 slot = 0; slot < frame->num_slots; slot++) {
+            cvm_mark_field(heap, frame->roots[slot], out, out_weak);
         }
     }
 }
@@ -419,7 +426,7 @@ void cvm_mark_roots(CvmHeap* heap) {
      */
     cvm_threads_lock_read();
     CVM_THREADS_FOREACH(node) {
-        mark_frame_chain(heap, node->ctx.top_frame, &out, &out_weak);
+        mark_frame_chain(heap, &node->ctx, &out, &out_weak);
     }
     cvm_threads_unlock_read();
 

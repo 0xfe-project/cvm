@@ -49,7 +49,7 @@ TEST attach_installs_a_usable_context(void) {
     ASSERT_EQ_FMT(before + 1, cvm_thread_count(), "%u");
 
     /* a fresh context has no frames and no bump region */
-    ASSERT(ctx->top_frame == NULL);
+    ASSERT(ctx->frame_depth == 0u);
     ASSERT(ctx->bump_ptr == NULL);
     ASSERT(ctx->bump_end == NULL);
 
