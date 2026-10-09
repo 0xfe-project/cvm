@@ -54,6 +54,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "cvm/roots.h"
 #include "support/oracle.h"
@@ -277,6 +278,153 @@ TEST slots_are_reused_without_resurrecting_anything(void) {
     PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* the open bug: leaving the unmanaged state during a collection        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A thread that registers and leaves the unmanaged state while another thread
+ * collects, on repeat.
+ *
+ * ---------------------------------------------------------------------
+ * This is not the reproducer for the open bug, and saying so is the point
+ * ---------------------------------------------------------------------
+ *
+ * It was written to be. The bug is a thread that leaves the unmanaged state
+ * during a collection and leaves the collector waiting forever, and the
+ * shape that reproduced it was in the working tree when it was found and was
+ * never committed -- so the exact reproduction is lost, and this is a
+ * reconstruction from the description rather than the thing itself.
+ *
+ * It does not reproduce it. What it does reproduce is a collector that stops
+ * the world tens of thousands of times a second, which makes everything else
+ * slow -- the worker makes progress, just not fast. And it prints no
+ * "thread(s) not parked" at all, where the original printed them by the
+ * thousand. Both are measurements of a different situation, which is what
+ * makes this an honest stress case and a dishonest reproducer.
+ *
+ * It stays, gated and bounded, because a thread that registers while another
+ * thread collects is worth stressing. It skips unless
+ * CVM_REPRO_UNMANAGED_LEAVE is set, so the suite is not slowed by it.
+ *
+ * The shape, which is the shape any program that calls out and back in has:
+ *
+ *     allocate something
+ *     root it in a frame slot            <- the frame can reach it
+ *     enter unmanaged                    <- a foreign call
+ *     clear the slot                     <- the frame lets go
+ *     cvm_root_add                       <- the table holds it instead
+ *     allocate, to drive the deferred sweep
+ *     check it is still alive
+ *     cvm_root_remove, leave unmanaged
+ *
+ * The check is what the sweep makes meaningful: a missed mark frees nothing
+ * by itself, because the block is only reclaimed when that collection's sweep
+ * runs, and the sweep is deferred until somebody allocates. Checking before
+ * the allocations checks nothing -- a version of this that did so passed with
+ * the write barrier deliberately removed.
+ */
+#define LEAVE_ROUNDS 200
+
+typedef struct {
+    _Atomic u32 corrupt;
+    _Atomic bool ready;
+} LeaveArg;
+
+static opaque_mut leaving_worker(opaque_mut raw) {
+    LeaveArg* arg = raw;
+    if (!cvm_thread_attach()) {
+        atomic_fetch_add(&arg->corrupt, 1);
+        return NULL;
+    }
+    CVM_FRAME_DECL(f, 1);
+    cvm_frame_push(&f_frame, f_roots, 1);
+    f_roots[0] = NULL;
+    atomic_store(&arg->ready, true);
+
+    for (u32 round = 0; round < LEAVE_ROUNDS; round++) {
+        Node* node = cvm_alloc(&node_desc);
+        if (node == NULL) {
+            atomic_fetch_add(&arg->corrupt, 1);
+            break;
+        }
+        node->next = NULL;
+        node->canary = oracle_field_canary(node);
+
+        f_roots[0] = node;
+
+        cvm_thread_enter_unmanaged();
+        f_roots[0] = NULL;
+
+        CvmRootHandle handle = cvm_root_add(node);
+        if (handle == CVM_ROOT_HANDLE_NONE) {
+            atomic_fetch_add(&arg->corrupt, 1);
+            cvm_thread_leave_unmanaged();
+            break;
+        }
+
+        /* Drive the deferred sweep, so a missed mark would have been
+         * reclaimed by the time the next line runs. */
+        for (u32 i = 0; i < 16; i++) {
+            (void)cvm_alloc(&node_desc);
+        }
+
+        if (!oracle_is_live(node) || !oracle_field_canary_ok(node, node->canary)) {
+            atomic_fetch_add(&arg->corrupt, 1);
+        }
+
+        cvm_root_remove(handle);
+        cvm_thread_leave_unmanaged();
+    }
+
+    cvm_frame_pop(&f_frame);
+    cvm_thread_detach();
+    return NULL;
+}
+
+static opaque_mut collecting_worker(opaque_mut raw) {
+    LeaveArg* arg = raw;
+    (void)arg;
+
+    /*
+     * Collected in a loop, but not back to back: a collection stops the world
+     * for its whole duration, so a collector that re-acquires immediately
+     * gives the other thread no window at all and starves it rather than
+     * racing it. The yield is what makes this a test of the state transition
+     * instead of a test of the scheduler.
+     */
+    for (;;) {
+        oracle_collect();
+        rt_thread_yield();
+    }
+    return NULL;
+}
+
+TEST leaving_unmanaged_during_a_collection_does_not_stall_the_world(void) {
+    if (getenv("CVM_REPRO_UNMANAGED_LEAVE") == NULL) {
+        SKIP();
+    }
+
+    LeaveArg arg = {.corrupt = 0, .ready = false};
+    atomic_store(&arg.corrupt, 0u);
+    atomic_store(&arg.ready, false);
+
+    RtThread leaver;
+    RtThread collector;
+    ASSERT(rt_thread_create(&collector, collecting_worker, &arg));
+    ASSERT(rt_thread_create(&leaver, leaving_worker, &arg));
+
+    u64 deadline = rt_time_nanos() + 60000000000ull;
+    while (!atomic_load(&arg.ready) && rt_time_nanos() < deadline) {
+        rt_thread_yield();
+    }
+    ASSERT(atomic_load(&arg.ready));
+
+    ASSERT(cvm_thread_join(leaver));
+    ASSERT_EQ_FMT(0u, atomic_load(&arg.corrupt), "%u");
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char** argv) {
@@ -288,6 +436,7 @@ int main(int argc, char** argv) {
     RUN_TEST(a_reference_handed_over_survives_the_gap);
     RUN_TEST(replacing_a_root_keeps_the_new_object_and_releases_the_old);
     RUN_TEST(slots_are_reused_without_resurrecting_anything);
+    RUN_TEST(leaving_unmanaged_during_a_collection_does_not_stall_the_world);
     GREATEST_MAIN_END();
 }
 
