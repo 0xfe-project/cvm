@@ -399,6 +399,7 @@ export function checkNoDeadFunctions({ root, ui }) {
 const PROBE_HEADERS = [
     "base/types.h",
     "base/math.h",
+    "base/alloc.h",
     "base/assert.h",
     "base/format.h",
     "base/sort.h",
@@ -410,6 +411,7 @@ const PROBE_HEADERS = [
     "cvm/gc.h",
     "cvm/array.h",
     "cvm/builder.h",
+    "cvm/buf.h",
     "cvm/hash.h",
     "cvm/intern.h",
     "cvm/json.h",
