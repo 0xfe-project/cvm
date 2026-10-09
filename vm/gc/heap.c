@@ -194,6 +194,23 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     if (initial_blocks == 0) {
         initial_blocks = 1;
     }
+
+    /*
+     * A heap cannot start larger than its own maximum, and the two counts
+     * round in opposite directions on purpose -- down for the maximum, so the
+     * reservation does not exceed what was asked for, and up for the initial
+     * count, so the heap does not start below the requested minimum. A block
+     * is 34956 bytes including its metadata, so a heap size that is not a
+     * multiple of that gets different answers from the two.
+     *
+     * For min_size == max_size the answers differ by one block, and asking
+     * for one block more than the maximum failed the whole init: a fixed-size
+     * heap -- a reasonable thing to ask for, and the first thing a
+     * microbenchmark asks for -- was rejected with "heap reservation failed".
+     */
+    if (initial_blocks > max_blocks) {
+        initial_blocks = max_blocks;
+    }
     if (max_blocks <= 1) {
         /* A one-block heap cannot hold a superblock, so nothing above the
          * large-object threshold could ever be allocated. */
