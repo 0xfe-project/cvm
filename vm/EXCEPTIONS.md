@@ -523,10 +523,43 @@ the site holding it anywhere.
 bodies and nothing else; in particular it does not pop the handler on the way
 out, because both exits pop (see the macros).
 
-A `finally` is not in the skeleton, and that is a position rather than an
-omission -- see "What this design refuses to do". A runtime that owned
-`finally` would have to know whether the body returned, threw, or fell
-through, and it cannot.
+A `finally` is not a macro, and that is a position rather than an omission --
+see "What this design refuses to do". What the frontend emits for it is fixed
+by where the cleanup has to run, and it is worth writing down because the
+shape is not obvious:
+
+```c
+/* try { body } finally { cleanup } */
+CVM_TRY() {
+    body;
+    cleanup;              /* the normal exit */
+}
+CVM_CATCH(escaped) {
+    cleanup;              /* the throwing exit */
+    cvm_throw(escaped);   /* and the throw is still on its way out */
+}
+CVM_ENDTRY();
+```
+
+The re-throw reaches the *enclosing* handler rather than this one, because a
+handler is flagged as catching for as long as its catch runs and `cvm_throw`
+skips those. (`try { body } catch(e) { handler } finally { cleanup }` nests
+this: a catch-and-finally inside a plain finally, so that a throw from the
+handler runs the cleanup too.)
+
+**The third exit is why this cannot be a macro of its own.** A `return`,
+`break` or `continue` out of the body has to run the cleanup as well, and
+those are jumps the frontend generates -- so the cleanup before them is a line
+in the frontend's own lowering, not something a wrapper macro can insert. A
+`CVM_FINALLY` could be written for the two exits that are control flow the
+runtime does know about, and it would be wrong for the ones that make `finally`
+worth having.
+
+Both shapes are demonstrated, not asserted, by
+`a_finally_runs_exactly_once_on_either_exit` and
+`a_finally_runs_once_when_the_catch_rethrows` in tests/unit/test_exc.c: each
+counts the cleanup's runs and checks that the value still arrives where it
+should.
 
 ### What is left on the frontend's list
 

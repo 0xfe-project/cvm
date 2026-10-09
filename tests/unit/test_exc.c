@@ -696,6 +696,182 @@ TEST a_parked_value_survives_only_if_the_descriptor_names_it(void) {
     PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* finally, expressed with what the runtime provides                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * `finally` is not a macro here, and this is what that means in practice:
+ * the frontend emits it out of the primitives, and the shape is fixed by
+ * where the cleanup has to run.
+ *
+ *     try { body } finally { cleanup }
+ *
+ * becomes
+ *
+ *     CVM_TRY() {
+ *         body;
+ *         cleanup;              // the normal exit
+ *     } CVM_CATCH(escaped) {
+ *         cleanup;              // the throwing exit
+ *         cvm_throw(escaped);   // and the throw is still on its way out
+ *     }
+ *     CVM_ENDTRY();
+ *
+ * The re-throw reaches the *enclosing* handler rather than this one, because
+ * a handler is flagged as catching for as long as its catch runs and
+ * cvm_throw skips those. That is what makes `finally` and a catch able to
+ * coexist without the runtime knowing about either.
+ *
+ * And it is load-bearing rather than tidy: with the skip removed, the
+ * re-throw lands back in the catch that is running, whose cleanup re-throws
+ * again. The negative control for this file's finally tests does exactly
+ * that, and it does not fail -- it hangs, which is the shape that mistake
+ * has.
+ *
+ * The third exit -- `return`, `break` or `continue` out of the body -- is the
+ * frontend's, and it is why this is not a macro: those are jumps the frontend
+ * generates, so the cleanup it must run before them is a line in its own
+ * lowering. A CVM_FINALLY macro could not be correct on its own, because the
+ * cases that make `finally` interesting are the ones where the exit is not a
+ * throw.
+ */
+static u32 finally_runs = 0;
+static u32 inner_handled = 0;
+
+static void throw_a_value(opaque_mut value) {
+    cvm_throw(value);
+}
+
+/*
+ * `try { body } finally { cleanup }`, with no catch.
+ *
+ * Returns nothing useful: the point is the counter and whether the throw
+ * still arrives at the caller.
+ */
+static void try_finally_without_a_catch(bool body_throws, opaque_mut value) {
+    CVM_ENTER(f, 1);
+    f_roots[0] = value;
+
+    CVM_TRY() {
+        if (body_throws) {
+            throw_a_value(value);
+        }
+        finally_runs++; /* the normal exit */
+    }
+    CVM_CATCH(escaped) {
+        finally_runs++;     /* the throwing exit */
+        cvm_throw(escaped); /* still on its way out */
+    }
+    CVM_ENDTRY();
+
+    CVM_RETURN_VOID(f);
+}
+
+/* The enclosing handler, standing in for a caller's own try. */
+static opaque_mut run_with_an_enclosing_handler(bool body_throws, opaque_mut value) {
+    CVM_ENTER(o, 1);
+    o_roots[0] = value;
+
+    opaque_mut escaped = NULL;
+    CVM_TRY() {
+        try_finally_without_a_catch(body_throws, value);
+    }
+    CVM_CATCH(caught) {
+        escaped = caught;
+    }
+    CVM_ENDTRY();
+
+    CVM_RETURN(o, escaped);
+}
+
+TEST a_finally_runs_exactly_once_on_either_exit(void) {
+    fixture_enter();
+
+    Leaf* value = cvm_alloc(&leaf_desc);
+    ASSERT(value != NULL);
+
+    /* Normal completion: the cleanup runs, and nothing is thrown. */
+    finally_runs = 0;
+    ASSERT(run_with_an_enclosing_handler(false, value) == NULL);
+    ASSERT_EQ_FMT(1u, finally_runs, "%u");
+
+    /* The body threw: the cleanup still runs once, and the throw arrives at
+     * the enclosing handler -- which is the re-throw doing its job. */
+    finally_runs = 0;
+    ASSERT(run_with_an_enclosing_handler(true, value) == value);
+    ASSERT_EQ_FMT(1u, finally_runs, "%u");
+
+    fixture_leave();
+    PASS();
+}
+
+/*
+ * `try { body } catch(e) { handler } finally { cleanup }`
+ *
+ * The frontend desugars it as a catch-and-finally inside a plain finally,
+ * because the catch's own exits -- including a throw from the handler -- have
+ * to run the cleanup too. That is the case a CVM_FINALLY macro could not
+ * cover by itself, and it is why the shape lives in the frontend.
+ *
+ * When the handler does not throw, the cleanup runs on the normal path and
+ * nothing reaches the enclosing handler. When it re-throws, the cleanup runs
+ * once and the value carries on outward.
+ */
+static opaque_mut try_catch_finally(bool handler_rethrows, opaque_mut value) {
+    CVM_ENTER(f, 1);
+    f_roots[0] = value;
+
+    opaque_mut escaped = NULL;
+
+    CVM_TRY() {
+        CVM_TRY() {
+            cvm_throw(value);
+        }
+        CVM_CATCH(inner) {
+            inner_handled++;
+            if (handler_rethrows) {
+                cvm_throw(inner); /* the cleanup has not run yet, on purpose */
+            }
+        }
+        CVM_ENDTRY();
+
+        finally_runs++; /* the catch handled it: normal path */
+    }
+    CVM_CATCH(from_the_handler) {
+        finally_runs++; /* the re-throw's path */
+        escaped = from_the_handler;
+    }
+    CVM_ENDTRY();
+
+    CVM_RETURN(f, escaped);
+}
+
+TEST a_finally_runs_once_when_the_catch_rethrows(void) {
+    fixture_enter();
+
+    Leaf* value = cvm_alloc(&leaf_desc);
+    ASSERT(value != NULL);
+
+    /* The handler handles it. */
+    finally_runs = 0;
+    inner_handled = 0;
+    ASSERT(try_catch_finally(false, value) == NULL);
+    ASSERT_EQ_FMT(1u, finally_runs, "%u");
+    ASSERT_EQ_FMT(1u, inner_handled, "%u");
+
+    /* The handler re-throws, so the value has to keep going outward -- and
+     * the cleanup still runs exactly once. */
+    finally_runs = 0;
+    inner_handled = 0;
+    ASSERT(try_catch_finally(true, value) == value);
+    ASSERT_EQ_FMT(1u, finally_runs, "%u");
+    ASSERT_EQ_FMT(1u, inner_handled, "%u");
+
+    fixture_leave();
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char** argv) {
@@ -717,6 +893,8 @@ int main(int argc, char** argv) {
     RUN_TEST(collections_along_the_unwind_path_do_not_lose_the_exception);
     RUN_TEST(values_across_a_try_go_through_memory);
     RUN_TEST(a_parked_value_survives_only_if_the_descriptor_names_it);
+    RUN_TEST(a_finally_runs_exactly_once_on_either_exit);
+    RUN_TEST(a_finally_runs_once_when_the_catch_rethrows);
     GREATEST_MAIN_END();
 
     cvm_world_destroy();
