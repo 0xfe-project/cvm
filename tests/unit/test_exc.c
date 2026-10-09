@@ -609,6 +609,124 @@ TEST values_across_a_try_go_through_memory(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* nesting in every direction                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A try inside a *catch*.
+ *
+ * This is the direction that is not covered by a try inside a try body: the
+ * new handler goes above a handler that is currently catching, so a throw
+ * inside the catch body has to reach the inner one and leave the running one
+ * alone. The shape is the same as every other LIFO chain, and the reason to
+ * test it separately is that the one below is flagged -- the flag is what a
+ * throw consults, and it must not make the *new* handler invisible.
+ */
+TEST a_try_inside_a_catch_catches_without_disturbing_the_outer_one(void) {
+    fixture_enter();
+
+    Leaf* outer_value = cvm_alloc(&leaf_desc);
+    Leaf* inner_value = cvm_alloc(&leaf_desc);
+    ASSERT(outer_value != NULL);
+    ASSERT(inner_value != NULL);
+
+    u32 outer_catch = 0;
+    u32 inner_catch = 0;
+    opaque_mut outer_seen = NULL;
+    opaque_mut inner_seen = NULL;
+
+    CVM_TRY() {
+        cvm_throw(outer_value);
+    }
+    CVM_CATCH(caught) {
+        outer_catch++;
+        outer_seen = caught;
+
+        CVM_TRY() {
+            cvm_throw(inner_value);
+        }
+        CVM_CATCH(inner) {
+            inner_catch++;
+            inner_seen = inner;
+        }
+        CVM_ENDTRY();
+    }
+    CVM_ENDTRY();
+
+    ASSERT_EQ_FMT(1u, outer_catch, "%u");
+    ASSERT_EQ_FMT(1u, inner_catch, "%u");
+    ASSERT(outer_seen == outer_value);
+    ASSERT(inner_seen == inner_value);
+    ASSERT(cvm_handler_top() == NULL);
+
+    fixture_leave();
+    PASS();
+}
+
+/*
+ * Three levels, with the value thrown from the innermost and re-thrown twice.
+ *
+ * Deep nesting is where the "skip the handlers whose catch is running, and
+ * unlink them as you pass" rule gets exercised more than once in a single
+ * throw, and where an off-by-one in the chain would show up as the value
+ * arriving at the wrong level.
+ */
+static u32 level_caught = 0;
+static opaque_mut level_seen = NULL;
+
+static opaque_mut rethrow_through_three_levels(opaque_mut value) {
+    CVM_ENTER(f, 1);
+    f_roots[0] = value;
+
+    CVM_TRY() {
+        CVM_TRY() {
+            CVM_TRY() {
+                cvm_throw(value);
+            }
+            CVM_CATCH(from_three) {
+                level_caught |= 4u;
+                cvm_throw(from_three);
+            }
+            CVM_ENDTRY();
+        }
+        CVM_CATCH(from_two) {
+            level_caught |= 2u;
+            cvm_throw(from_two);
+        }
+        CVM_ENDTRY();
+    }
+    CVM_CATCH(from_one) {
+        level_caught |= 1u;
+        level_seen = from_one;
+    }
+    CVM_ENDTRY();
+
+    CVM_RETURN(f, level_seen);
+}
+
+TEST three_levels_of_nesting_carry_the_value_to_the_outermost(void) {
+    fixture_enter();
+
+    Leaf* value = cvm_alloc(&leaf_desc);
+    ASSERT(value != NULL);
+    stamp(value);
+
+    level_caught = 0;
+    level_seen = NULL;
+    ASSERT(rethrow_through_three_levels(value) == value);
+
+    /* All three catches ran, innermost first. */
+    ASSERT_EQ_FMT(7u, level_caught, "%u");
+    /* The value is the one thrown at the innermost level, not a copy that a
+     * level in between invented. */
+    ASSERT_EQ_FMT(canary_of(value), value->canary, "%llu");
+    ASSERT(cvm_handler_top() == NULL);
+
+    fixture_leave();
+    PASS();
+}
+
+/* ------------------------------------------------------------------ */
 /* a value held by a suspended activation                               */
 /* ------------------------------------------------------------------ */
 
@@ -895,6 +1013,8 @@ int main(int argc, char** argv) {
     RUN_TEST(a_parked_value_survives_only_if_the_descriptor_names_it);
     RUN_TEST(a_finally_runs_exactly_once_on_either_exit);
     RUN_TEST(a_finally_runs_once_when_the_catch_rethrows);
+    RUN_TEST(a_try_inside_a_catch_catches_without_disturbing_the_outer_one);
+    RUN_TEST(three_levels_of_nesting_carry_the_value_to_the_outermost);
     GREATEST_MAIN_END();
 
     cvm_world_destroy();
