@@ -375,7 +375,6 @@ TEST kept_objects_survive_collections_taken_under_load(void) {
      * and asserted after the workers have been stopped and joined.
      */
     u32 created = 0;
-    bool all_ready = true;
 
     RtMutex ready_mutex;
     RtCond ready_cond;
@@ -397,40 +396,28 @@ TEST kept_objects_survive_collections_taken_under_load(void) {
     }
 
     /*
-     * Wait until every worker has built its set.
+     * Wait until every worker has built its set, and do it without a clock.
      *
-     * The wait is event-driven -- the worker broadcasts on `ready_cond` --
-     * with the wall clock as a backstop and not as the mechanism. One long
-     * timed wait was the first shape of this and it failed under valgrind,
-     * where the test still finished in under two seconds, so the wait had
-     * returned early rather than after its 120s. A short wait re-checked
-     * against a deadline is immune to that and still costs nothing when the
-     * event arrives.
+     * Two timed shapes were tried and both were wrong under valgrind, for
+     * the same reason: valgrind does not let a thread's sense of elapsed
+     * time mean what it means natively. Here the process clock advanced 120
+     * seconds while the wall clock advanced 1.8 -- so a deadline placed the
+     * wait at about 1.8 seconds of real time, and the workers, which need
+     * real time and not virtual time, were simply not finished. A short
+     * wait re-checked in a loop was worse: virtual time makes the slice
+     * elapse immediately, so the loop became a spin that starved the
+     * threads it was waiting for.
+     *
+     * So the wait is on the event, with no timeout at all. What bounds it
+     * is the test runner's own timeout, which is the only clock in this
+     * situation that measures what a person would call time passing.
      */
-    const u64 wait_start = rt_time_nanos();
-    const u64 ready_deadline = wait_start + 120ull * 1000 * 1000 * 1000;
-    const u64 ready_slice_ns = 50ull * 1000 * 1000;
-
-    u32 not_ready = 0;
     for (u32 i = 0; i < created; i++) {
         rt_mutex_lock(&ready_mutex);
-        while (atomic_load(&args[i].ready) == 0 && rt_time_nanos() < ready_deadline) {
-            (void)rt_cond_wait_timeout(&ready_cond, &ready_mutex, ready_slice_ns);
+        while (atomic_load(&args[i].ready) == 0) {
+            rt_cond_wait(&ready_cond, &ready_mutex);
         }
-        bool ready = atomic_load(&args[i].ready) != 0;
         rt_mutex_unlock(&ready_mutex);
-
-        if (!ready) {
-            not_ready++;
-            all_ready = false;
-        }
-    }
-
-    if (!all_ready) {
-        fprintf(stderr,
-                "threads: %u of %u worker(s) never reported ready after %llu ms\n",
-                not_ready, created,
-                (unsigned long long)((rt_time_nanos() - wait_start) / 1000000ull));
     }
 
     /*
@@ -439,10 +426,8 @@ TEST kept_objects_survive_collections_taken_under_load(void) {
      * their churn loops with a frame pushed, and the collector walks their
      * chains.
      */
-    if (all_ready) {
-        for (u32 i = 0; i < 30; i++) {
-            oracle_collect();
-        }
+    for (u32 i = 0; i < 30; i++) {
+        oracle_collect();
     }
 
     for (u32 i = 0; i < created; i++) {
@@ -457,7 +442,6 @@ TEST kept_objects_survive_collections_taken_under_load(void) {
     }
 
     ASSERT_EQ_FMT(WORKERS, created, "%u");
-    ASSERT(all_ready);
     ASSERT(joined);
 
     for (u32 i = 0; i < WORKERS; i++) {
