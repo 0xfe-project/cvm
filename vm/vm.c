@@ -201,6 +201,11 @@ CvmVmStats cvm_vm_stats(void) {
      * have to be updated on the allocation fast path, which is the one
      * place that has to stay a few instructions, so it is derived when
      * asked instead.
+     *
+     * The cost is the reservation, not the live set: one byte per sixteen
+     * bytes of the heap's maximum size, in one pass, here. Everything else
+     * in this function is a handful of loads, which is why this loop is the
+     * whole cost of asking. See the note on the field in cvm/vm.h.
      */
     u32 live = 0;
     for (u32 i = 0; i < heap->block_count; i++) {
