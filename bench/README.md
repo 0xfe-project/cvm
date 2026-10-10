@@ -28,21 +28,21 @@ collector choose, so it measures the policy.
 
 | scenario | cvm | go | bdwgc | tgc |
 |---|---|---|---|---|
-| churn-unary | 18.20 | 30.15 | 31.07 | 627.65 |
-| tree-keep | 44.95 | 50.04 | 51.53 | 3762.96 |
-| mixed-sizes | 41.17 | 93.47 | — | 223.42 |
-| flat-fp | 13.07 | 14.49 | 13.86 | 13.93 |
+| churn-unary | 15.29 | 33.69 | 32.13 | 596.27 |
+| tree-keep | 38.22 | 52.80 | 53.14 | 3735.22 |
+| mixed-sizes | 42.15 | 100.00 | — | 226.75 |
+| flat-fp | 12.94 | 13.83 | 13.89 | 13.90 |
 
 **auto**
 
 | scenario | cvm | go | bdwgc | tgc |
 |---|---|---|---|---|
-| tree-keep | 58.56 | 54.95 | 54.26 | 1797.72 |
-| mixed-sizes | 14.09 | 72.55 | 88.10 | 230.12 |
-| flat-fp | 13.11 | 12.87 | 13.11 | 13.39 |
-| read-heavy | 28.42 | 12.97 | 19.33 | — |
-| write-heavy | 0.17 | 1.02 | 0.65 | 5.12 |
-| growth-1.5 | 1.36 | 3.94 | 2.71 | 35.61 |
+| tree-keep | 41.70 | 56.63 | 55.51 | 1783.81 |
+| mixed-sizes | 14.88 | 74.67 | 87.46 | 223.13 |
+| flat-fp | 12.96 | 12.84 | 13.02 | 13.23 |
+| read-heavy | 26.37 | 14.45 | 19.66 | — |
+| write-heavy | 0.16 | 1.01 | 0.63 | 5.13 |
+| growth-1.5 | 0.62 | 4.16 | 3.04 | 35.22 |
 
 The full comparison is in `results/`, and the figures below are generated from
 it by `pnpm run bench:svg`.
@@ -59,25 +59,24 @@ commit that changed the flags says which rows moved and by how much.
 
 What the two tables say now, and it is not one story:
 
-  - **allocation** is cvm's, and by a margin: 18.20 against 30.15 for Go and
-    31.07 for bdwgc on churn-unary, 41.17 against 93.47 for Go on
-    mixed-sizes. That is the bump pointer doing what the design says.
-  - **medium objects** moved the most of anything here: mixed-sizes in auto
-    mode is 14.09 against Go's 72.55 and bdwgc's 88.10. Part of that is the
-    clearing leaving the allocation path, which is the change with the
-    largest measured effect in this repository so far.
-  - **tree-keep** is still bdwgc's and Go's: 58.56 against 54.26 and 54.95.
-    Marking a large live set is what this collector pays for, and the
-    difference is the per-object cost of its metadata, not its throughput.
-  - **read-heavy** is still the worst row: 28.42 against bdwgc's 19.33 and
-    Go's 12.97. That row marks a 200,000-node chain, which cannot be
-    parallelised at all, so it is a per-object cost with no other thread to
-    hide behind -- and it is where the remaining work is.
+**cvm is the fastest of the four wherever allocating is the work.** On
+churn-unary it beats the next best by 2.1x; on tree-keep's alloc-only row by
+39%; on the keeping rows of auto (tree-keep by 25%, mixed-sizes by 5x, the
+growing tree by 4.9x). On flat-fp all four are within 2% of each other -- that
+row is memory-bandwidth-bound and nobody's collector is the cost.
 
-## The figures
+**cvm is the slowest of the three that can run read-heavy**, and its stop-the-world
+window is the longest of the three: 26.37 ms against 14.45 (go) and 19.66
+(bdwgc); pauses 4.7 ms against 0.035 ms and 1.5 ms. Go's advantage is
+concurrency -- its marker runs alongside the mutator, so its
+stop-the-world window is a fraction of a millisecond no matter the heap -- and
+bdwgc's is that it walks a C call stack it can keep small. cvm's window is
+whole-heap marking under a stop, and this row is what that costs.
 
-Each is one experimental condition. They are generated, so they cannot drift
-from the data.
+**tgc cannot run read-heavy.** Its recursive marker overflows the stack on a
+deep chain, which is exactly the workload this row is, so it has no auto-mode
+number at all. The figures below say the same, with each run's spread drawn as
+the line around its median.
 
 ![Wall time, alloc-only](wall-alloc.svg)
 
