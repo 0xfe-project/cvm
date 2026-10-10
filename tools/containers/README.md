@@ -11,9 +11,27 @@ Each answers a different question:
 
 | container | question | speed |
 |---|---|---|
-| **debian**, arm64 | does the glibc path compile and pass its tests? | native — the iteration loop |
-| **debian**, `--platform linux/amd64` | the x86_64 half of the assembly, and the architecture CI uses | qemu — the confirming run |
-| **alpine**, arm64 | is the port real, or is it glibc's headers? | native |
+| **debian** | does the glibc path compile and pass its tests? | the base's architecture |
+| **debian**, `--platform linux/amd64` | the x86_64 half of the assembly, and the architecture CI uses | qemu, if the host is arm64 |
+| **alpine** | is the port real, or is it glibc's headers? | the base's architecture |
+
+**Check which architecture you are running.** A plain `podman build` uses
+whatever `debian:13-slim` is already in the local store, so the image follows
+the last `--platform` that pulled a base rather than the host:
+
+```sh
+podman image inspect cvm-linux --format '{{.Architecture}}'
+```
+
+On this project's development machine that has meant amd64 under qemu, which
+is the architecture CI uses and therefore the more useful of the two. For a
+native arm64 image, pull the base first and build against it:
+
+```sh
+podman pull --platform linux/arm64 debian:13-slim
+podman build -t cvm-linux-arm64 --platform linux/arm64 \
+    -f tools/containers/Containerfile.debian tools/containers
+```
 
 ## Build
 
@@ -43,6 +61,22 @@ podman run --rm -v "$PWD:/src:Z" -w /src \
     -v ~/.cache/cvm-linux-ccache:/ccache \
     cvm-linux node scripts/build.mjs --test
 ```
+
+## What the containers have already answered
+
+`--asan` and `--tsan` fail in a container for two reasons that are not the
+project's, and both are worth knowing before reading a red run:
+
+- **asan** CHECK-fails inside its own allocator:
+  `sanitizer_allocator_primary32.h:292 ((res)) < ((kNumPossibleRegions))`.
+  That is asan on Linux meeting a large address-space reservation; macOS's
+  sanitizer layout does not hit it. The runtime's reservation is the thing to
+  look at, not the collector.
+- **tsan** CHECK-fails on `personality(ADDR_NO_RANDOMIZE)` -- it disables ASLR
+  to get a stable shadow layout, and qemu-user does not implement that
+  syscall. This one is the container's fault entirely; on a real x86_64
+  runner it should not appear, which is exactly the kind of thing a container
+  cannot settle and the runner has to.
 
 ## What they do not replace
 

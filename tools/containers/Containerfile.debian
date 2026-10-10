@@ -18,8 +18,13 @@ FROM debian:13-slim
 
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         clang lld ccache curl xz-utils ca-certificates git make \
+        libclang-rt-19-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# The sanitizer runtimes are a separate package from the compiler. Without
+# it, `--asan` fails at link time with "cannot find libclang_rt.asan.a",
+# which reads like a project problem and is not one.
+#
 # The node major the workflow uses. Fetched rather than taken from Debian's
 # archive, which lags by several majors.
 ARG NODE_VER=v24.9.0
