@@ -45,25 +45,25 @@ jobs:
         continue-on-error: true
         run: node scripts/build.mjs
 
-      - name: tests: debug
+      - name: "tests: debug"
         continue-on-error: true
         run: |
           node scripts/build.mjs --test
           node scripts/run-tests.mjs
 
-      - name: tests: release
+      - name: "tests: release"
         continue-on-error: true
         run: |
           node scripts/build.mjs --test --release
           node scripts/run-tests.mjs
 
-      - name: tests: asan
+      - name: "tests: asan"
         continue-on-error: true
         run: |
           node scripts/build.mjs --test --asan
           node scripts/run-tests.mjs
 
-      - name: tests: tsan
+      - name: "tests: tsan"
         continue-on-error: true
         run: |
           node scripts/build.mjs --test --tsan
