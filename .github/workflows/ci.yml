@@ -1,0 +1,42 @@
+name: ci
+
+# The local gate, run by GitHub: format, the freestanding audit, and the test
+# suite in all four build configurations (debug, release, asan, tsan).
+#
+# One platform to start. The OS matrix (Linux, Windows) is deliberately
+# deferred: vm/plat.h and vm/threads.c carry the POSIX and Windows branches,
+# but only the Darwin ones are exercised day to day, so turning those runners
+# on is a porting task of its own and not a CI edit. When it happens, this
+# becomes:
+#
+#   strategy:
+#     matrix:
+#       os: [macos-14, ubuntu-latest, windows-latest]
+#   runs-on: ${{ matrix.os }}
+#
+# and whatever the audit's "compile-time checked only" branches turn out to
+# need.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      # The project has no npm dependencies -- package.json is only a script
+      # runner -- so there is nothing to install; the gate is the compiler
+      # and the test binaries.
+      - name: ci
+        run: pnpm run ci
