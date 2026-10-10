@@ -72,4 +72,16 @@ typedef int bench_frame_t;
 
 #endif
 
+/*
+ * A pointer field store, in every scenario.
+ *
+ * Through the backend rather than written out, because what a store costs is
+ * part of what is being measured: cvm's goes through its write barrier, the
+ * conservative backends' do not, and neither fact belongs in a scenario.
+ *
+ * `offset` is from the object's start, which is what a descriptor names.
+ */
+#define BENCH_STORE(obj, offset, value)                                                \
+    bench_collector.store_field((obj), (offset), (value))
+
 #endif /* BENCH_ROOTS_H */

@@ -223,6 +223,17 @@ static void cvm_backend_stats(BenchStats *out) {
     out->failed_allocations = our_failures;
 }
 
+/*
+ * The write barrier, which is what this backend is here to cost.
+ *
+ * The same call a frontend emits: the offset comes from the object's
+ * descriptor, and the barrier decides for itself whether a collection is
+ * marking and anything needs doing.
+ */
+static void cvm_backend_store_field(void *obj, size_t offset, void *value) {
+    cvm_store_field(obj, offset, value);
+}
+
 BenchCollector const bench_collector = {
     .name = "cvm",
     .modes = BENCH_MODE_SUPPORTS_ALLOC | BENCH_MODE_SUPPORTS_FIXED |
@@ -231,6 +242,7 @@ BenchCollector const bench_collector = {
     .shutdown = cvm_backend_shutdown,
     .alloc = cvm_backend_alloc,
     .alloc_typed = cvm_backend_alloc_typed,
+    .store_field = cvm_backend_store_field,
     .collect = cvm_backend_collect,
     .stats = cvm_backend_stats,
 };

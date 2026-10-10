@@ -74,7 +74,9 @@ CVM_INLINE usize grown_capacity(usize capacity) {
 
 CvmRefArray* cvm_ref_array_push(CvmRefArray* a, opaque_mut item) {
     if (a->used < a->capacity) {
-        a->items[a->used++] = item;
+        /* A slot of a live array, so the store goes through the barrier. */
+        cvm_store_ptr(&a->items[a->used], item);
+        a->used++;
         return a;
     }
 
@@ -98,6 +100,15 @@ CvmRefArray* cvm_ref_array_push(CvmRefArray* a, opaque_mut item) {
 
     /* Both arrays are rooted now; copy the live prefix across. */
     CvmRefArray* from = (CvmRefArray*)f_roots[0];
+    /*
+     * The copies below are the exemption in the barrier's contract, and this
+     * is a real instance of it rather than a hypothetical one: `bigger` is
+     * fresh, so nothing can reach it while it is being filled, so the marker
+     * cannot see it and there is nothing for it to miss. The objects copied
+     * into it stay reachable from `from`, which is in a frame slot. The store
+     * that publishes the array is the caller's, when it puts the result
+     * somewhere live.
+     */
     for (usize i = 0; i < from->used; i++) {
         bigger->items[i] = from->items[i];
     }

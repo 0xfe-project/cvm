@@ -94,7 +94,14 @@ static opaque_mut build_list(i64 n) {
         f_roots[1] = cvm_alloc(&cell_type);
 
         Cell* cell = f_roots[1];
-        cell->next = f_roots[0];
+        /*
+         * The one pointer store in this file, and it goes through the
+         * barrier the way generated code's would: the offset comes from the
+         * descriptor, because that is where a frontend gets it. A frontend
+         * that emitted a bare `cell->next = ...` would be correct only while
+         * marking stops the world.
+         */
+        cvm_store_field(cell, cell_ptr_fields[0].offset, f_roots[0]);
         cell->value = i;
         cell->canary = canary_for(cell);
 

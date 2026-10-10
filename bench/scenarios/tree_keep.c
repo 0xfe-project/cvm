@@ -56,8 +56,8 @@ static void *build(unsigned depth) {
         BENCH_ROOT(f, 2) = node;
         if (node != NULL) {
             Node *n = node;
-            n->left = BENCH_ROOT(f, 0);
-            n->right = BENCH_ROOT(f, 1);
+            BENCH_STORE(n, offsetof(Node, left), BENCH_ROOT(f, 0));
+            BENCH_STORE(n, offsetof(Node, right), BENCH_ROOT(f, 1));
             n->tag = depth;
         }
         BENCH_ROOT(f, 0) = node;

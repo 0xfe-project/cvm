@@ -101,13 +101,36 @@ CVM_INLINE void bit_clear(u32* words, usize i) {
                               memory_order_release);
 }
 
-/* The key in a bucket, on the same terms as the bit above. */
+/*
+ * The key in a bucket, on the same terms as the bit above.
+ *
+ * The store is atomic because the load is: a lock-free reader takes a snapshot
+ * of the arrays and then walks them, and mixing atomic and non-atomic access to
+ * one address is a data race whichever way round it is. That is why the barrier
+ * is a separate call here rather than being the store itself.
+ */
 CVM_INLINE opaque_mut slot_key(opaque_mut const* items, usize i) {
     return atomic_load_explicit((opaque_mut const _Atomic*)(items + i),
                                 memory_order_relaxed);
 }
 
+/* Key store into an array the map is already publishing: the barrier goes with
+ * it. */
 CVM_INLINE void slot_key_set(opaque_mut* items, usize i, opaque_mut key) {
+    atomic_store_explicit((opaque_mut _Atomic*)(items + i), key, memory_order_relaxed);
+    cvm_store_barrier(key);
+}
+
+/*
+ * Key store into an array nothing can reach yet.
+ *
+ * The exemption in the barrier's contract, named so that it is a decision
+ * rather than an omission: a rehash fills a fresh array and publishes it at the
+ * end, so the marker cannot see these slots while they are being written, and
+ * the keys being copied stay reachable from the old array, which is in a frame
+ * slot for the whole rehash.
+ */
+CVM_INLINE void slot_key_set_fresh(opaque_mut* items, usize i, opaque_mut key) {
     atomic_store_explicit((opaque_mut _Atomic*)(items + i), key, memory_order_relaxed);
 }
 
@@ -443,7 +466,8 @@ static bool map_rehash(CvmHashMap* m, usize buckets) {
                 slot = (slot + 1u) & (buckets - 1u);
             }
             bit_set(used->bits, slot);
-            slot_key_set(keys->items, slot, key);
+            slot_key_set_fresh(keys->items, slot, key);
+            /* Fresh array, same exemption as the key above. */
             values->items[slot] = m->values->items[i];
         }
     }
@@ -539,7 +563,8 @@ usize cvm_map_compact(CvmHashMap* m) {
             slot = (slot + 1u) & mask;
         }
         bit_set(used->bits, slot);
-        slot_key_set(keys->items, slot, key);
+        slot_key_set_fresh(keys->items, slot, key);
+        /* Fresh array, same exemption as the key above. */
         values->items[slot] = m->values->items[i];
     }
 
@@ -597,7 +622,7 @@ opaque_mut cvm_map_put(CvmHashMap* m, opaque_mut key, opaque_mut value, bool* ab
 
     if (found) {
         opaque_mut previous = map->values->items[slot];
-        map->values->items[slot] = f_roots[2];
+        cvm_store_ptr(&map->values->items[slot], f_roots[2]);
         if (absent != NULL) {
             *absent = false;
         }
@@ -606,7 +631,7 @@ opaque_mut cvm_map_put(CvmHashMap* m, opaque_mut key, opaque_mut value, bool* ab
     }
 
     slot_key_set(map->keys->items, slot, map->ops->store(f_roots[1]));
-    map->values->items[slot] = f_roots[2];
+    cvm_store_ptr(&map->values->items[slot], f_roots[2]);
     bit_set(bit_words_mut(map), slot);
     map->count++;
 
@@ -654,14 +679,14 @@ static void map_vacate(CvmHashMap* m, usize i) {
         bool movable = (j > i) ? (home <= i || home > j) : (home <= i && home > j);
         if (movable) {
             slot_key_set(m->keys->items, i, slot_key(m->keys->items, j));
-            m->values->items[i] = m->values->items[j];
+            cvm_store_ptr(&m->values->items[i], m->values->items[j]);
             i = j;
         }
     }
 
     bit_clear(used, i);
     slot_key_set(m->keys->items, i, NULL);
-    m->values->items[i] = NULL;
+    cvm_store_ptr(&m->values->items[i], NULL);
     m->count--;
 }
 

@@ -131,16 +131,21 @@ static bool root_grow(void) {
 /* ------------------------------------------------------------------ */
 
 /*
- * Mark an object that is about to become a root, if a collection is
- * running.
+ * Mark an object that is about to become a root, if a mark phase is running.
  *
- * This is the whole reason the table has a barrier. An unmanaged thread
- * is not stopped by a collection, so it can register a root while marking
- * is in progress, and marking may already have walked the table. Marking
- * it here closes that window.
+ * This is the whole reason the table has a barrier. An unmanaged thread is not
+ * stopped by a collection, so it can register a root while marking is in
+ * progress, and marking may already have walked the table. Marking it here
+ * closes that window.
+ *
+ * The mark phase, not the whole stop-the-world window: acting during the sweep
+ * re-marks a block the sweeper has finished with, and the live set is decided
+ * by then, so there is nothing left to protect. See the declaration of
+ * cvm_marking_active in cvm/gc.h.
  */
 static void mark_if_collecting(opaque_mut obj) {
-    if (obj == NULL || !cvm_safepoint_in_progress()) {
+    if (obj == NULL ||
+        !atomic_load_explicit(&cvm_marking_active, memory_order_acquire)) {
         return;
     }
 

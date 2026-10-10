@@ -69,16 +69,16 @@ static void growth(unsigned iteration) {
                 break;
             }
             Block *b = p;
-            b->next = head;
-            b->payload = NULL;
+            BENCH_STORE(b, offsetof(Block, next), head);
+            BENCH_STORE(b, offsetof(Block, payload), NULL);
             head = p;
         }
 
         void *block = bench_alloc(sizeof(Block));
         if (block != NULL) {
             Block *b = block;
-            b->next = BENCH_ROOT(f, 1);
-            b->payload = head;
+            BENCH_STORE(b, offsetof(Block, next), BENCH_ROOT(f, 1));
+            BENCH_STORE(b, offsetof(Block, payload), head);
             BENCH_ROOT(f, 1) = block;
         }
 

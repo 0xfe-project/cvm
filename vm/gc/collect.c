@@ -276,8 +276,22 @@ bool cvm_gc_collect(CvmHeap* heap) {
     /* --- mark --- */
     cvm_thread_set_activity(CVM_ACT_MARKING);
     u64 mark_start = rt_time_nanos();
+
+    /*
+     * From here to the end of the mark phase, the write barrier is live: a
+     * store from a thread this collection is not waiting for has to mark what
+     * it publishes, or the marker can miss it.
+     *
+     * Cleared before the sweep begins, and that is the part that is not
+     * obvious. The safepoint flag stays set for the whole window, and using it
+     * here re-marked blocks the sweeper had already finished with, which its
+     * consistency check reported as "a block is still marked after sweeping".
+     */
+    atomic_store_explicit(&cvm_marking_active, true, memory_order_release);
     cvm_mark_roots(heap);
     phase_run(heap, CVM_GC_MARK, initial_workers, mark_all);
+    atomic_store_explicit(&cvm_marking_active, false, memory_order_release);
+
     u64 mark_end = rt_time_nanos();
     cvm_stats_record(stats, CVM_EVENT_MARK, mark_start, mark_end);
 
