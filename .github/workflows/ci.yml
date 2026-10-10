@@ -15,7 +15,8 @@ name: ci
 #   runs-on: ${{ matrix.os }}
 #
 # and whatever the audit's "compile-time checked only" branches turn out to
-# need.
+# need. The ccache step below already takes a key that separates the matrix
+# entries, which is the part of the matrix that is a CI edit.
 
 on:
   push:
@@ -43,8 +44,31 @@ jobs:
       - name: clang-format
         run: brew install clang-format
 
+      # The build uses ccache when it finds it (scripts/lib/toolchain.mjs), and
+      # the gate compiles the whole runtime four times -- once per
+      # configuration -- so without a cache every run pays for all four from
+      # cold. The action installs ccache if the runner has none, caches the
+      # directory each platform keeps it in, and keys the cache per job and
+      # platform with a timestamp so that a run always saves a fresh entry and
+      # always restores from the most recent one. Pinned to a version rather
+      # than a moving major: this is the only third-party action the project
+      # uses, and "which version ran" should be answerable from the file.
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ github.job }}
+          max-size: 500M
+
       # The project has no npm dependencies -- package.json is only a script
       # runner -- so there is nothing to install; the gate is the compiler
       # and the test binaries.
       - name: ci
         run: pnpm run ci
+
+      # Whether the cache is working is the difference between a gate that
+      # takes a minute and one that takes three, and it is not visible from a
+      # green check. Printed even when the gate fails, because a failing run
+      # is where a cold cache costs the most.
+      - name: ccache stats
+        if: always()
+        run: ccache -s
