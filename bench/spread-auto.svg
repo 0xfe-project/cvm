@@ -14,120 +14,120 @@
 <text x="487.3" y="576" font-size="11.5" fill="#57606a" text-anchor="middle">50%</text>
 <line x1="724.6" y1="86" x2="724.6" y2="558.0" stroke="#d8dee4"/>
 <text x="724.6" y="576" font-size="11.5" fill="#57606a" text-anchor="middle">100%</text>
-<text x="24" y="106.0" font-size="12.5" font-weight="600" fill="#1f2328">write-heavy</text>
-<text x="150" y="106.0" font-size="12" fill="#57606a">cvm × auto</text>
-<rect x="250" y="96.0" width="474.6" height="12" fill="#1f6feb" opacity="0.32"/>
-<circle cx="724.6" cy="102.0" r="3.5" fill="#1f6feb"/>
-<text x="818.0" y="106.0" font-size="11.5" fill="#57606a">264.7%</text>
-<text x="24" y="126.0" font-size="12.5" font-weight="600" fill="#1f2328">growth-1.5</text>
+<text x="24" y="106.0" font-size="12.5" font-weight="600" fill="#1f2328">growth-1.5</text>
+<text x="150" y="106.0" font-size="12" fill="#57606a">tgc × auto</text>
+<rect x="250" y="96.0" width="474.6" height="12" fill="#8b949e" opacity="0.32"/>
+<circle cx="724.6" cy="102.0" r="3.5" fill="#8b949e"/>
+<text x="818.0" y="106.0" font-size="11.5" fill="#57606a">239.3%</text>
+<text x="24" y="126.0" font-size="12.5" font-weight="600" fill="#1f2328">write-heavy</text>
 <text x="150" y="126.0" font-size="12" fill="#57606a">cvm × auto</text>
 <rect x="250" y="116.0" width="474.6" height="12" fill="#1f6feb" opacity="0.32"/>
 <circle cx="724.6" cy="122.0" r="3.5" fill="#1f6feb"/>
-<text x="818.0" y="126.0" font-size="11.5" fill="#57606a">130.6%</text>
-<text x="24" y="146.0" font-size="12.5" font-weight="600" fill="#1f2328">write-heavy</text>
-<text x="150" y="146.0" font-size="12" fill="#57606a">go × auto</text>
-<rect x="250" y="136.0" width="327.1" height="12" fill="#2ea043" opacity="0.32"/>
-<circle cx="577.1" cy="142.0" r="3.5" fill="#2ea043"/>
-<text x="818.0" y="146.0" font-size="11.5" fill="#57606a">68.9%</text>
-<text x="24" y="166.0" font-size="12.5" font-weight="600" fill="#1f2328">growth-1.5</text>
+<text x="818.0" y="126.0" font-size="11.5" fill="#57606a">231.8%</text>
+<text x="24" y="146.0" font-size="12.5" font-weight="600" fill="#1f2328">growth-1.5</text>
+<text x="150" y="146.0" font-size="12" fill="#57606a">cvm × auto</text>
+<rect x="250" y="136.0" width="474.6" height="12" fill="#1f6feb" opacity="0.32"/>
+<circle cx="724.6" cy="142.0" r="3.5" fill="#1f6feb"/>
+<text x="818.0" y="146.0" font-size="11.5" fill="#57606a">131.2%</text>
+<text x="24" y="166.0" font-size="12.5" font-weight="600" fill="#1f2328">write-heavy</text>
 <text x="150" y="166.0" font-size="12" fill="#57606a">go × auto</text>
-<rect x="250" y="156.0" width="321.4" height="12" fill="#2ea043" opacity="0.32"/>
-<circle cx="571.4" cy="162.0" r="3.5" fill="#2ea043"/>
-<text x="818.0" y="166.0" font-size="11.5" fill="#57606a">67.7%</text>
-<text x="24" y="186.0" font-size="12.5" font-weight="600" fill="#1f2328">tree-keep</text>
-<text x="150" y="186.0" font-size="12" fill="#57606a">tgc × auto</text>
-<rect x="250" y="176.0" width="283.5" height="12" fill="#8b949e" opacity="0.32"/>
-<circle cx="533.5" cy="182.0" r="3.5" fill="#8b949e"/>
-<text x="818.0" y="186.0" font-size="11.5" fill="#57606a">59.7%</text>
+<rect x="250" y="156.0" width="314.8" height="12" fill="#2ea043" opacity="0.32"/>
+<circle cx="564.8" cy="162.0" r="3.5" fill="#2ea043"/>
+<text x="818.0" y="166.0" font-size="11.5" fill="#57606a">66.3%</text>
+<text x="24" y="186.0" font-size="12.5" font-weight="600" fill="#1f2328">growth-1.5</text>
+<text x="150" y="186.0" font-size="12" fill="#57606a">go × auto</text>
+<rect x="250" y="176.0" width="178.0" height="12" fill="#2ea043" opacity="0.32"/>
+<circle cx="428.0" cy="182.0" r="3.5" fill="#2ea043"/>
+<text x="818.0" y="186.0" font-size="11.5" fill="#57606a">37.5%</text>
 <text x="24" y="206.0" font-size="12.5" font-weight="600" fill="#1f2328">write-heavy</text>
 <text x="150" y="206.0" font-size="12" fill="#57606a">tgc × auto</text>
-<rect x="250" y="196.0" width="190.5" height="12" fill="#8b949e" opacity="0.32"/>
-<circle cx="440.5" cy="202.0" r="3.5" fill="#8b949e"/>
-<text x="818.0" y="206.0" font-size="11.5" fill="#57606a">40.1%</text>
+<rect x="250" y="196.0" width="174.0" height="12" fill="#8b949e" opacity="0.32"/>
+<circle cx="424.0" cy="202.0" r="3.5" fill="#8b949e"/>
+<text x="818.0" y="206.0" font-size="11.5" fill="#57606a">36.7%</text>
 <text x="24" y="226.0" font-size="12.5" font-weight="600" fill="#1f2328">growth-1.5</text>
 <text x="150" y="226.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<rect x="250" y="216.0" width="144.7" height="12" fill="#d29922" opacity="0.32"/>
-<circle cx="394.7" cy="222.0" r="3.5" fill="#d29922"/>
-<text x="818.0" y="226.0" font-size="11.5" fill="#57606a">30.5%</text>
-<text x="24" y="246.0" font-size="12.5" font-weight="600" fill="#1f2328">mixed-sizes</text>
-<text x="150" y="246.0" font-size="12" fill="#57606a">cvm × auto</text>
-<rect x="250" y="236.0" width="137.4" height="12" fill="#1f6feb" opacity="0.32"/>
-<circle cx="387.4" cy="242.0" r="3.5" fill="#1f6feb"/>
-<text x="818.0" y="246.0" font-size="11.5" fill="#57606a">29.0%</text>
-<text x="24" y="266.0" font-size="12.5" font-weight="600" fill="#1f2328">write-heavy</text>
-<text x="150" y="266.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<rect x="250" y="256.0" width="128.9" height="12" fill="#d29922" opacity="0.32"/>
-<circle cx="378.9" cy="262.0" r="3.5" fill="#d29922"/>
-<text x="818.0" y="266.0" font-size="11.5" fill="#57606a">27.2%</text>
-<text x="24" y="286.0" font-size="12.5" font-weight="600" fill="#1f2328">growth-1.5</text>
-<text x="150" y="286.0" font-size="12" fill="#57606a">tgc × auto</text>
-<rect x="250" y="276.0" width="125.6" height="12" fill="#8b949e" opacity="0.32"/>
-<circle cx="375.6" cy="282.0" r="3.5" fill="#8b949e"/>
-<text x="818.0" y="286.0" font-size="11.5" fill="#57606a">26.5%</text>
-<text x="24" y="306.0" font-size="12.5" font-weight="600" fill="#1f2328">flat-fp</text>
-<text x="150" y="306.0" font-size="12" fill="#57606a">go × auto</text>
-<rect x="250" y="296.0" width="117.4" height="12" fill="#2ea043" opacity="0.32"/>
-<circle cx="367.4" cy="302.0" r="3.5" fill="#2ea043"/>
-<text x="818.0" y="306.0" font-size="11.5" fill="#57606a">24.7%</text>
-<text x="24" y="326.0" font-size="12.5" font-weight="600" fill="#1f2328">tree-keep</text>
-<text x="150" y="326.0" font-size="12" fill="#57606a">cvm × auto</text>
-<rect x="250" y="316.0" width="44.9" height="12" fill="#1f6feb" opacity="0.32"/>
-<circle cx="294.9" cy="322.0" r="3.5" fill="#1f6feb"/>
-<text x="818.0" y="326.0" font-size="11.5" fill="#57606a">9.5%</text>
-<text x="24" y="346.0" font-size="12.5" font-weight="600" fill="#1f2328">read-heavy</text>
-<text x="150" y="346.0" font-size="12" fill="#57606a">go × auto</text>
-<rect x="250" y="336.0" width="36.5" height="12" fill="#2ea043" opacity="0.32"/>
-<circle cx="286.5" cy="342.0" r="3.5" fill="#2ea043"/>
-<text x="818.0" y="346.0" font-size="11.5" fill="#57606a">7.7%</text>
-<text x="24" y="366.0" font-size="12.5" font-weight="600" fill="#1f2328">read-heavy</text>
-<text x="150" y="366.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<rect x="250" y="356.0" width="27.0" height="12" fill="#d29922" opacity="0.32"/>
-<circle cx="277.0" cy="362.0" r="3.5" fill="#d29922"/>
-<text x="818.0" y="366.0" font-size="11.5" fill="#57606a">5.7%</text>
-<text x="24" y="386.0" font-size="12.5" font-weight="600" fill="#1f2328">flat-fp</text>
-<text x="150" y="386.0" font-size="12" fill="#57606a">tgc × auto</text>
-<rect x="250" y="376.0" width="25.1" height="12" fill="#8b949e" opacity="0.32"/>
-<circle cx="275.1" cy="382.0" r="3.5" fill="#8b949e"/>
-<text x="818.0" y="386.0" font-size="11.5" fill="#57606a">5.3%</text>
-<text x="24" y="406.0" font-size="12.5" font-weight="600" fill="#1f2328">tree-keep</text>
-<text x="150" y="406.0" font-size="12" fill="#57606a">go × auto</text>
-<rect x="250" y="396.0" width="19.5" height="12" fill="#2ea043" opacity="0.32"/>
-<circle cx="269.5" cy="402.0" r="3.5" fill="#2ea043"/>
-<text x="818.0" y="406.0" font-size="11.5" fill="#57606a">4.1%</text>
-<text x="24" y="426.0" font-size="12.5" font-weight="600" fill="#1f2328">flat-fp</text>
+<rect x="250" y="216.0" width="107.4" height="12" fill="#d29922" opacity="0.32"/>
+<circle cx="357.4" cy="222.0" r="3.5" fill="#d29922"/>
+<text x="818.0" y="226.0" font-size="11.5" fill="#57606a">22.6%</text>
+<text x="24" y="246.0" font-size="12.5" font-weight="600" fill="#1f2328">write-heavy</text>
+<text x="150" y="246.0" font-size="12" fill="#57606a">bdwgc × auto</text>
+<rect x="250" y="236.0" width="106.3" height="12" fill="#d29922" opacity="0.32"/>
+<circle cx="356.3" cy="242.0" r="3.5" fill="#d29922"/>
+<text x="818.0" y="246.0" font-size="11.5" fill="#57606a">22.4%</text>
+<text x="24" y="266.0" font-size="12.5" font-weight="600" fill="#1f2328">flat-fp</text>
+<text x="150" y="266.0" font-size="12" fill="#57606a">go × auto</text>
+<rect x="250" y="256.0" width="83.1" height="12" fill="#2ea043" opacity="0.32"/>
+<circle cx="333.1" cy="262.0" r="3.5" fill="#2ea043"/>
+<text x="818.0" y="266.0" font-size="11.5" fill="#57606a">17.5%</text>
+<text x="24" y="286.0" font-size="12.5" font-weight="600" fill="#1f2328">mixed-sizes</text>
+<text x="150" y="286.0" font-size="12" fill="#57606a">cvm × auto</text>
+<rect x="250" y="276.0" width="73.8" height="12" fill="#1f6feb" opacity="0.32"/>
+<circle cx="323.8" cy="282.0" r="3.5" fill="#1f6feb"/>
+<text x="818.0" y="286.0" font-size="11.5" fill="#57606a">15.5%</text>
+<text x="24" y="306.0" font-size="12.5" font-weight="600" fill="#1f2328">tree-keep</text>
+<text x="150" y="306.0" font-size="12" fill="#57606a">bdwgc × auto</text>
+<rect x="250" y="296.0" width="71.2" height="12" fill="#d29922" opacity="0.32"/>
+<circle cx="321.2" cy="302.0" r="3.5" fill="#d29922"/>
+<text x="818.0" y="306.0" font-size="11.5" fill="#57606a">15.0%</text>
+<text x="24" y="326.0" font-size="12.5" font-weight="600" fill="#1f2328">read-heavy</text>
+<text x="150" y="326.0" font-size="12" fill="#57606a">go × auto</text>
+<rect x="250" y="316.0" width="68.9" height="12" fill="#2ea043" opacity="0.32"/>
+<circle cx="318.9" cy="322.0" r="3.5" fill="#2ea043"/>
+<text x="818.0" y="326.0" font-size="11.5" fill="#57606a">14.5%</text>
+<text x="24" y="346.0" font-size="12.5" font-weight="600" fill="#1f2328">mixed-sizes</text>
+<text x="150" y="346.0" font-size="12" fill="#57606a">bdwgc × auto</text>
+<rect x="250" y="336.0" width="64.8" height="12" fill="#d29922" opacity="0.32"/>
+<circle cx="314.8" cy="342.0" r="3.5" fill="#d29922"/>
+<text x="818.0" y="346.0" font-size="11.5" fill="#57606a">13.6%</text>
+<text x="24" y="366.0" font-size="12.5" font-weight="600" fill="#1f2328">tree-keep</text>
+<text x="150" y="366.0" font-size="12" fill="#57606a">tgc × auto</text>
+<rect x="250" y="356.0" width="42.9" height="12" fill="#8b949e" opacity="0.32"/>
+<circle cx="292.9" cy="362.0" r="3.5" fill="#8b949e"/>
+<text x="818.0" y="366.0" font-size="11.5" fill="#57606a">9.0%</text>
+<text x="24" y="386.0" font-size="12.5" font-weight="600" fill="#1f2328">read-heavy</text>
+<text x="150" y="386.0" font-size="12" fill="#57606a">cvm × auto</text>
+<rect x="250" y="376.0" width="37.0" height="12" fill="#1f6feb" opacity="0.32"/>
+<circle cx="287.0" cy="382.0" r="3.5" fill="#1f6feb"/>
+<text x="818.0" y="386.0" font-size="11.5" fill="#57606a">7.8%</text>
+<text x="24" y="406.0" font-size="12.5" font-weight="600" fill="#1f2328">flat-fp</text>
+<text x="150" y="406.0" font-size="12" fill="#57606a">tgc × auto</text>
+<rect x="250" y="396.0" width="28.9" height="12" fill="#8b949e" opacity="0.32"/>
+<circle cx="278.9" cy="402.0" r="3.5" fill="#8b949e"/>
+<text x="818.0" y="406.0" font-size="11.5" fill="#57606a">6.1%</text>
+<text x="24" y="426.0" font-size="12.5" font-weight="600" fill="#1f2328">read-heavy</text>
 <text x="150" y="426.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<rect x="250" y="416.0" width="16.2" height="12" fill="#d29922" opacity="0.32"/>
-<circle cx="266.2" cy="422.0" r="3.5" fill="#d29922"/>
-<text x="818.0" y="426.0" font-size="11.5" fill="#57606a">3.4%</text>
-<text x="24" y="446.0" font-size="12.5" font-weight="600" fill="#1f2328">read-heavy</text>
-<text x="150" y="446.0" font-size="12" fill="#57606a">cvm × auto</text>
-<rect x="250" y="436.0" width="14.0" height="12" fill="#1f6feb" opacity="0.32"/>
-<circle cx="264.0" cy="442.0" r="3.5" fill="#1f6feb"/>
-<text x="818.0" y="446.0" font-size="11.5" fill="#57606a">2.9%</text>
-<text x="24" y="466.0" font-size="12.5" font-weight="600" fill="#1f2328">flat-fp</text>
-<text x="150" y="466.0" font-size="12" fill="#57606a">cvm × auto</text>
-<rect x="250" y="456.0" width="13.7" height="12" fill="#1f6feb" opacity="0.32"/>
-<circle cx="263.7" cy="462.0" r="3.5" fill="#1f6feb"/>
-<text x="818.0" y="466.0" font-size="11.5" fill="#57606a">2.9%</text>
-<text x="24" y="486.0" font-size="12.5" font-weight="600" fill="#1f2328">tree-keep</text>
+<rect x="250" y="416.0" width="27.7" height="12" fill="#d29922" opacity="0.32"/>
+<circle cx="277.7" cy="422.0" r="3.5" fill="#d29922"/>
+<text x="818.0" y="426.0" font-size="11.5" fill="#57606a">5.8%</text>
+<text x="24" y="446.0" font-size="12.5" font-weight="600" fill="#1f2328">tree-keep</text>
+<text x="150" y="446.0" font-size="12" fill="#57606a">go × auto</text>
+<rect x="250" y="436.0" width="27.4" height="12" fill="#2ea043" opacity="0.32"/>
+<circle cx="277.4" cy="442.0" r="3.5" fill="#2ea043"/>
+<text x="818.0" y="446.0" font-size="11.5" fill="#57606a">5.8%</text>
+<text x="24" y="466.0" font-size="12.5" font-weight="600" fill="#1f2328">mixed-sizes</text>
+<text x="150" y="466.0" font-size="12" fill="#57606a">go × auto</text>
+<rect x="250" y="456.0" width="26.2" height="12" fill="#2ea043" opacity="0.32"/>
+<circle cx="276.2" cy="462.0" r="3.5" fill="#2ea043"/>
+<text x="818.0" y="466.0" font-size="11.5" fill="#57606a">5.5%</text>
+<text x="24" y="486.0" font-size="12.5" font-weight="600" fill="#1f2328">flat-fp</text>
 <text x="150" y="486.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<rect x="250" y="476.0" width="11.9" height="12" fill="#d29922" opacity="0.32"/>
-<circle cx="261.9" cy="482.0" r="3.5" fill="#d29922"/>
-<text x="818.0" y="486.0" font-size="11.5" fill="#57606a">2.5%</text>
-<text x="24" y="506.0" font-size="12.5" font-weight="600" fill="#1f2328">mixed-sizes</text>
-<text x="150" y="506.0" font-size="12" fill="#57606a">bdwgc × auto</text>
-<rect x="250" y="496.0" width="11.7" height="12" fill="#d29922" opacity="0.32"/>
-<circle cx="261.7" cy="502.0" r="3.5" fill="#d29922"/>
-<text x="818.0" y="506.0" font-size="11.5" fill="#57606a">2.5%</text>
-<text x="24" y="526.0" font-size="12.5" font-weight="600" fill="#1f2328">mixed-sizes</text>
-<text x="150" y="526.0" font-size="12" fill="#57606a">go × auto</text>
-<rect x="250" y="516.0" width="9.5" height="12" fill="#2ea043" opacity="0.32"/>
-<circle cx="259.5" cy="522.0" r="3.5" fill="#2ea043"/>
-<text x="818.0" y="526.0" font-size="11.5" fill="#57606a">2.0%</text>
+<rect x="250" y="476.0" width="22.3" height="12" fill="#d29922" opacity="0.32"/>
+<circle cx="272.3" cy="482.0" r="3.5" fill="#d29922"/>
+<text x="818.0" y="486.0" font-size="11.5" fill="#57606a">4.7%</text>
+<text x="24" y="506.0" font-size="12.5" font-weight="600" fill="#1f2328">flat-fp</text>
+<text x="150" y="506.0" font-size="12" fill="#57606a">cvm × auto</text>
+<rect x="250" y="496.0" width="19.1" height="12" fill="#1f6feb" opacity="0.32"/>
+<circle cx="269.1" cy="502.0" r="3.5" fill="#1f6feb"/>
+<text x="818.0" y="506.0" font-size="11.5" fill="#57606a">4.0%</text>
+<text x="24" y="526.0" font-size="12.5" font-weight="600" fill="#1f2328">tree-keep</text>
+<text x="150" y="526.0" font-size="12" fill="#57606a">cvm × auto</text>
+<rect x="250" y="516.0" width="7.0" height="12" fill="#1f6feb" opacity="0.32"/>
+<circle cx="257.0" cy="522.0" r="3.5" fill="#1f6feb"/>
+<text x="818.0" y="526.0" font-size="11.5" fill="#57606a">1.5%</text>
 <text x="24" y="546.0" font-size="12.5" font-weight="600" fill="#1f2328">mixed-sizes</text>
 <text x="150" y="546.0" font-size="12" fill="#57606a">tgc × auto</text>
-<rect x="250" y="536.0" width="3.2" height="12" fill="#8b949e" opacity="0.32"/>
-<circle cx="253.2" cy="542.0" r="3.5" fill="#8b949e"/>
-<text x="818.0" y="546.0" font-size="11.5" fill="#57606a">0.7%</text>
+<rect x="250" y="536.0" width="6.8" height="12" fill="#8b949e" opacity="0.32"/>
+<circle cx="256.8" cy="542.0" r="3.5" fill="#8b949e"/>
+<text x="818.0" y="546.0" font-size="11.5" fill="#57606a">1.4%</text>
 <text x="530" y="588" font-size="11.5" fill="#8b949e" text-anchor="middle">anything past 100% is drawn at the edge and labelled with its real value</text>
 </svg>
