@@ -35,6 +35,14 @@ jobs:
       - name: Enable pnpm
         run: corepack enable
 
+      # clang-format's output differs between major versions, so the runner has
+      # to format with the same major that development does -- Homebrew's
+      # formula is the same 23.x that is on the development machine. The fmt
+      # step prints the version it used, so a mismatch shows up as a version
+      # in the log rather than as a mysterious diff.
+      - name: clang-format
+        run: brew install clang-format
+
       # The project has no npm dependencies -- package.json is only a script
       # runner -- so there is nothing to install; the gate is the compiler
       # and the test binaries.
