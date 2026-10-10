@@ -1,0 +1,70 @@
+name: linux-probe
+
+# A probe, not part of the gate. It asks one question: does the runtime build
+# and pass its tests on Linux at all?
+#
+# It exists because the platform layer's non-Darwin branches are compile-time
+# checked only -- nothing in this repository has ever *run* on Linux. The
+# answer decides whether adding ubuntu-latest to the gate's matrix is a
+# one-line change or a porting project, and that is worth knowing before the
+# gate goes red on main.
+#
+# Every configuration is continue-on-error, so one run reports all four
+# outcomes instead of stopping at the first. Delete this file once the answer
+# is folded into ci.yml.
+
+on:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    env:
+      # The runner's `cc` is gcc. The project is developed against clang, and
+      # the trap safepoint's assembly is written for clang's integrated
+      # assembler, so the probe has to use the same compiler the project does
+      # or it is measuring a different thing.
+      CC: clang
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: what is here
+        run: |
+          uname -a
+          clang --version | head -2
+          echo "CPUs: $(nproc)"
+
+      - name: build + freestanding audit
+        continue-on-error: true
+        run: node scripts/build.mjs
+
+      - name: tests: debug
+        continue-on-error: true
+        run: |
+          node scripts/build.mjs --test
+          node scripts/run-tests.mjs
+
+      - name: tests: release
+        continue-on-error: true
+        run: |
+          node scripts/build.mjs --test --release
+          node scripts/run-tests.mjs
+
+      - name: tests: asan
+        continue-on-error: true
+        run: |
+          node scripts/build.mjs --test --asan
+          node scripts/run-tests.mjs
+
+      - name: tests: tsan
+        continue-on-error: true
+        run: |
+          node scripts/build.mjs --test --tsan
+          node scripts/run-tests.mjs
