@@ -186,7 +186,7 @@ TEST a_polling_thread_is_stopped_by_arming_its_page(void) {
     ASSERT(rt_thread_create(&thread, spin_polling, NULL));
 
     /* Wait for it to register, bounded. */
-    u64 deadline = rt_time_nanos() + 2000000000ull;
+    u64 deadline = rt_time_nanos() + (u64)2000000000;
     while (!atomic_load(&spinner_attached) && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }
@@ -210,7 +210,7 @@ TEST a_polling_thread_is_stopped_by_arming_its_page(void) {
 
     /* And it resumes, which is what says the trampoline found its way back
      * to the load that faulted. */
-    deadline = rt_time_nanos() + 2000000000ull;
+    deadline = rt_time_nanos() + (u64)2000000000;
     while (atomic_load(&spinner_polls) == parked_polls && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }
@@ -239,7 +239,7 @@ TEST a_thread_faults_many_times_without_losing_its_place(void) {
     RtThread thread;
     ASSERT(rt_thread_create(&thread, spin_polling, NULL));
 
-    u64 deadline = rt_time_nanos() + 2000000000ull;
+    u64 deadline = rt_time_nanos() + (u64)2000000000;
     while (!atomic_load(&spinner_attached) && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }

@@ -27,6 +27,7 @@
 
 #include "vendor/greatest.h"
 
+#include <inttypes.h>
 #include <stddef.h>
 #include <stdio.h>
 
@@ -219,7 +220,7 @@ TEST a_caught_value_survives_a_collection_during_the_catch(void) {
         ASSERT(cvm_object_is_marked(heap(), thrown));
 
         /* And intact, which is what a canary is for. */
-        ASSERT_EQ_FMT(stamped, thrown->canary, "%llu");
+        ASSERT_EQ_FMT(stamped, thrown->canary, "%" PRIu64);
         checked = true;
     }
     CVM_ENDTRY();
@@ -739,7 +740,7 @@ TEST three_levels_of_nesting_carry_the_value_to_the_outermost(void) {
     ASSERT_EQ_FMT(7u, level_caught, "%u");
     /* The value is the one thrown at the innermost level, not a copy that a
      * level in between invented. */
-    ASSERT_EQ_FMT(canary_of(value), value->canary, "%llu");
+    ASSERT_EQ_FMT(canary_of(value), value->canary, "%" PRIu64);
     ASSERT(cvm_handler_top() == NULL);
 
     fixture_leave();
@@ -827,7 +828,7 @@ TEST a_parked_value_survives_only_if_the_descriptor_names_it(void) {
     ASSERT_FALSE(cvm_object_is_marked(heap(), held_by_unlisted));
 
     /* And a collection does not damage the one that is named. */
-    ASSERT_EQ_FMT(canary_of(held_by_listed), held_by_listed->canary, "%llu");
+    ASSERT_EQ_FMT(canary_of(held_by_listed), held_by_listed->canary, "%" PRIu64);
 
     cvm_frame_pop(&root_frame);
     fixture_leave();

@@ -341,7 +341,7 @@ TEST numbers_are_appended_in_their_converted_form(void) {
     cvm_str_buf_init(&b);
     ASSERT(cvm_str_buf_put_i64(&b, -42));
     ASSERT(cvm_str_buf_put_bytes(&b, STR_LITERAL("/")));
-    ASSERT(cvm_str_buf_put_u64(&b, 18446744073709551615ull));
+    ASSERT(cvm_str_buf_put_u64(&b, (u64)18446744073709551615ull));
     ASSERT(cvm_str_buf_put_bytes(&b, STR_LITERAL("/")));
     ASSERT(cvm_str_buf_put_f64(&b, 0.1));
     ASSERT(cvm_str_buf_put_bytes(&b, STR_LITERAL("/")));

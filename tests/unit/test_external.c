@@ -19,6 +19,7 @@
 
 #include "vendor/greatest.h"
 
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -157,7 +158,7 @@ TEST a_finalizer_runs_when_its_object_dies(void) {
     collect();
     cvm_finalizer_drain_now();
 
-    ASSERT_EQ_FMT(before + 1, cvm_finalizer_run_count(), "%llu");
+    ASSERT_EQ_FMT(before + 1, cvm_finalizer_run_count(), "%" PRIu64);
     /* the finalizer receives the C pointer, not the wrapper: the wrapper
      * is already dead by the time this runs */
     ASSERT_EQ_FMT((usize)&resource, atomic_load(&last_finalized_ptr), "%zu");
@@ -182,7 +183,7 @@ TEST a_finalizer_does_not_run_while_the_object_lives(void) {
     cvm_finalizer_drain_now();
 
     ASSERT(is_live(ext));
-    ASSERT_EQ_FMT(before, cvm_finalizer_run_count(), "%llu");
+    ASSERT_EQ_FMT(before, cvm_finalizer_run_count(), "%" PRIu64);
 
     FRAME_END();
     fixture_leave();
@@ -203,9 +204,9 @@ TEST many_finalizers_all_run(void) {
     collect();
     cvm_finalizer_drain_now();
 
-    ASSERT_EQ_FMT(before + N, cvm_finalizer_run_count(), "%llu");
+    ASSERT_EQ_FMT(before + N, cvm_finalizer_run_count(), "%" PRIu64);
     /* nothing was dropped */
-    ASSERT_EQ_FMT(0ull, (unsigned long long)cvm_finalizer_dropped_count(), "%llu");
+    ASSERT_EQ_FMT((u64)0, (u64)cvm_finalizer_dropped_count(), "%" PRIu64);
 
     fixture_leave();
     PASS();
@@ -235,12 +236,12 @@ TEST the_finalizer_thread_runs_them_on_its_own(void) {
      * that has nothing to do with finalizers. See the note in
      * test_safepoint.c on why the suite's waits are what they are.
      */
-    u64 deadline = rt_time_nanos() + 20000000000ull;
+    u64 deadline = rt_time_nanos() + (u64)20000000000;
     while (cvm_finalizer_run_count() < before + N && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }
 
-    ASSERT_EQ_FMT(before + N, cvm_finalizer_run_count(), "%llu");
+    ASSERT_EQ_FMT(before + N, cvm_finalizer_run_count(), "%" PRIu64);
 
     fixture_leave();
     PASS();
@@ -424,14 +425,14 @@ TEST an_external_object_held_by_a_root_stays_alive(void) {
     cvm_finalizer_drain_now();
 
     ASSERT(is_live(ext));
-    ASSERT_EQ_FMT(before, cvm_finalizer_run_count(), "%llu");
+    ASSERT_EQ_FMT(before, cvm_finalizer_run_count(), "%" PRIu64);
 
     /* release it and the finalizer runs on the next collection */
     cvm_root_remove(handle);
     collect();
     cvm_finalizer_drain_now();
 
-    ASSERT_EQ_FMT(before + 1, cvm_finalizer_run_count(), "%llu");
+    ASSERT_EQ_FMT(before + 1, cvm_finalizer_run_count(), "%" PRIu64);
 
     fixture_leave();
     PASS();

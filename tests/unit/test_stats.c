@@ -13,6 +13,7 @@
 
 #include "vendor/greatest.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -122,7 +123,7 @@ TEST record_only_buffers(void) {
 
     /* nothing written yet beyond the header */
     ASSERT_EQ_FMT(2u, stats.buffered, "%u");
-    ASSERT_EQ_FMT(0ull, (unsigned long long)stats.written, "%llu");
+    ASSERT_EQ_FMT((u64)0, (u64)stats.written, "%" PRIu64);
 
     char out[4096];
     slurp(out, sizeof(out));
@@ -199,13 +200,12 @@ TEST buffer_flushes_exactly_at_capacity(void) {
         cvm_stats_record(&stats, CVM_EVENT_MARK_BATCH, 1, 2);
     }
     ASSERT_EQ_FMT(CVM_STATS_CAPACITY, stats.buffered, "%u");
-    ASSERT_EQ_FMT(0ull, (unsigned long long)stats.written, "%llu");
+    ASSERT_EQ_FMT((u64)0, (u64)stats.written, "%" PRIu64);
 
     /* one more event forces the flush, then buffers itself */
     cvm_stats_record(&stats, CVM_EVENT_SYNC, 1, 2);
     ASSERT_EQ_FMT(1u, stats.buffered, "%u");
-    ASSERT_EQ_FMT((unsigned long long)CVM_STATS_CAPACITY,
-                  (unsigned long long)stats.written, "%llu");
+    ASSERT_EQ_FMT((u64)CVM_STATS_CAPACITY, (u64)stats.written, "%" PRIu64);
 
     cvm_stats_shutdown(&stats);
     rt_channel_close(ch);
@@ -225,7 +225,7 @@ TEST repeated_flushes_account_for_every_event(void) {
     }
     cvm_stats_shutdown(&stats);
 
-    ASSERT_EQ_FMT((unsigned long long)total, (unsigned long long)stats.written, "%llu");
+    ASSERT_EQ_FMT((u64)total, (u64)stats.written, "%" PRIu64);
 
     rt_channel_close(ch);
 
@@ -271,7 +271,7 @@ TEST out_of_range_event_type_is_named_not_fatal(void) {
 }
 
 TEST now_is_zero_without_stats_and_real_with(void) {
-    ASSERT_EQ_FMT(0ull, (unsigned long long)cvm_stats_now(NULL), "%llu");
+    ASSERT_EQ_FMT((u64)0, (u64)cvm_stats_now(NULL), "%" PRIu64);
 
     static CvmStats stats;
     /* now() only reads the pointer, so an uninitialised buffer is fine
@@ -288,10 +288,8 @@ TEST collection_counters_accumulate(void) {
     cvm_gc_counters_record_collection(1000, 1500);
     cvm_gc_counters_record_collection(2000, 2200);
 
-    ASSERT_EQ_FMT((unsigned long long)(c0 + 2),
-                  (unsigned long long)cvm_gc_counters_collections(), "%llu");
-    ASSERT_EQ_FMT((unsigned long long)(d0 + 700),
-                  (unsigned long long)cvm_gc_counters_collection_ns(), "%llu");
+    ASSERT_EQ_FMT((u64)(c0 + 2), (u64)cvm_gc_counters_collections(), "%" PRIu64);
+    ASSERT_EQ_FMT((u64)(d0 + 700), (u64)cvm_gc_counters_collection_ns(), "%" PRIu64);
     PASS();
 }
 
@@ -301,10 +299,8 @@ TEST collection_counter_ignores_a_missing_start(void) {
 
     cvm_gc_counters_record_collection(0, 5000);
 
-    ASSERT_EQ_FMT((unsigned long long)c0,
-                  (unsigned long long)cvm_gc_counters_collections(), "%llu");
-    ASSERT_EQ_FMT((unsigned long long)d0,
-                  (unsigned long long)cvm_gc_counters_collection_ns(), "%llu");
+    ASSERT_EQ_FMT((u64)c0, (u64)cvm_gc_counters_collections(), "%" PRIu64);
+    ASSERT_EQ_FMT((u64)d0, (u64)cvm_gc_counters_collection_ns(), "%" PRIu64);
     PASS();
 }
 

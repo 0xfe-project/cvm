@@ -9,6 +9,7 @@
 
 #include "vendor/greatest.h"
 
+#include <inttypes.h>
 #include <string.h>
 
 #include "base/format.h"
@@ -69,9 +70,9 @@ TEST format_unsigned_decimal(void) {
     fmt_lit(&f, ",");
     fmt_u64(&f, 7);
     fmt_lit(&f, ",");
-    fmt_u64(&f, 1234567890ull);
+    fmt_u64(&f, (u64)1234567890);
     fmt_lit(&f, ",");
-    fmt_u64(&f, 18446744073709551615ull); /* u64 max */
+    fmt_u64(&f, (u64)18446744073709551615ull); /* u64 max */
 
     ASSERT(guard_intact(&g));
     ASSERT_STR_EQ("0,7,1234567890,18446744073709551615", fmt_cstr(&g, &f));
@@ -123,7 +124,7 @@ TEST format_hex_padded_is_fixed_width(void) {
 
     fmt_hex_padded(&f, 0x1234ull, 8);
     fmt_lit(&f, "|");
-    fmt_hex_padded(&f, 0ull, 8);
+    fmt_hex_padded(&f, (u64)0, 8);
     fmt_lit(&f, "|");
     /* digits beyond 16 are clamped rather than reading past the value */
     fmt_hex_padded(&f, 0xabcdull, 99);
@@ -242,22 +243,22 @@ TEST fmt_u64_matches_printf_over_a_wide_range(void) {
      * runs hosted.
      */
     static u64 const boundaries[] = {
-        0ull,
-        1ull,
-        9ull,
-        10ull,
-        11ull,
-        99ull,
-        100ull,
-        101ull,
-        999ull,
-        1000ull,
-        12345ull,
-        1000000ull,
-        4294967295ull,
-        4294967296ull,
-        9999999999999999999ull,
-        18446744073709551615ull,
+        (u64)0,
+        (u64)1,
+        (u64)9,
+        (u64)10,
+        (u64)11,
+        (u64)99,
+        (u64)100,
+        (u64)101,
+        (u64)999,
+        (u64)1000,
+        (u64)12345,
+        (u64)1000000,
+        (u64)4294967295,
+        (u64)4294967296,
+        (u64)9999999999999999999ull,
+        (u64)18446744073709551615ull,
     };
 
     for (usize i = 0; i < sizeof(boundaries) / sizeof(boundaries[0]); i++) {
@@ -267,7 +268,7 @@ TEST fmt_u64_matches_printf_over_a_wide_range(void) {
         fmt_u64(&f, boundaries[i]);
 
         char want[32];
-        snprintf(want, sizeof(want), "%llu", (unsigned long long)boundaries[i]);
+        snprintf(want, sizeof(want), "%" PRIu64, (u64)boundaries[i]);
 
         usize n = 0;
         while (want[n] != '\0') {
@@ -275,31 +276,30 @@ TEST fmt_u64_matches_printf_over_a_wide_range(void) {
         }
         str got = fmt_result(&f);
         if (got.len != n || memcmp(got.ptr, want, n) != 0) {
-            fprintf(stderr, "%llu: got %.*s, wanted %s\n",
-                    (unsigned long long)boundaries[i], (int)got.len, (char*)got.ptr,
-                    want);
+            fprintf(stderr, "%" PRIu64 ": got %.*s, wanted %s\n", (u64)boundaries[i],
+                    (int)got.len, (char*)got.ptr, want);
             FAILm("the conversion disagrees with printf");
         }
     }
 
     /* and a sweep that hits both even and odd digit counts, plus the carries */
-    u64 v = 1ull;
+    u64 v = (u64)1;
     for (u32 i = 0; i < 2000u; i++) {
-        v = v * 6364136223846793005ull + 1442695040888963407ull;
+        v = v * (u64)6364136223846793005ull + (u64)1442695040888963407ull;
         char buf[32];
         CvmFmt f;
         fmt_init(&f, (u8*)buf, sizeof(buf));
         fmt_u64(&f, v);
 
         char want[32];
-        snprintf(want, sizeof(want), "%llu", (unsigned long long)v);
+        snprintf(want, sizeof(want), "%" PRIu64, (u64)v);
         str got = fmt_result(&f);
         usize n = 0;
         while (want[n] != '\0') {
             n++;
         }
         if (got.len != n || memcmp(got.ptr, want, n) != 0) {
-            fprintf(stderr, "%llu: a sweep value disagreed\n", (unsigned long long)v);
+            fprintf(stderr, "%" PRIu64 ": a sweep value disagreed\n", (u64)v);
             FAILm("the conversion disagrees with printf on a random value");
         }
     }

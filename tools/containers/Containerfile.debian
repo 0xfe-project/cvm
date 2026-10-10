@@ -1,0 +1,47 @@
+# Iteration container for the Linux port: Debian, glibc, clang.
+#
+# Used for both architectures -- `--platform linux/amd64` builds the same
+# definition for the architecture CI uses, under qemu. The point of having it
+# here rather than in a shell history is that the platform layer's non-Darwin
+# branches are the part of this repository that has been read but never run,
+# and a container is how they get run without waiting on a CI queue.
+#
+#   podman build -t cvm-linux      -f tools/containers/Containerfile.debian tools/containers
+#   podman build -t cvm-linux-amd64 -f tools/containers/Containerfile.debian --platform linux/amd64 tools/containers
+#
+# Debian rather than the runner's Ubuntu so that `--platform linux/amd64`
+# pulls a base image that has an arm64 counterpart too; both are glibc, which
+# is what the port is being tested against. The clang version differs from the
+# runner's (19 here, 18 there), so this container narrows the problem rather
+# than replacing the CI run.
+FROM debian:13-slim
+
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        clang lld ccache curl xz-utils ca-certificates git make \
+    && rm -rf /var/lib/apt/lists/*
+
+# The node major the workflow uses. Fetched rather than taken from Debian's
+# archive, which lags by several majors.
+ARG NODE_VER=v24.9.0
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+        arm64) narch=arm64 ;; \
+        amd64) narch=x64 ;; \
+        *) echo "unhandled architecture" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-linux-${narch}.tar.xz" \
+        -o /tmp/node.tar.xz; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+        --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md; \
+    rm /tmp/node.tar.xz; \
+    node --version; \
+    clang --version | head -1
+
+# The build picks up ccache when it finds it (scripts/lib/toolchain.mjs).
+# Mount a directory at /ccache to keep the cache across runs:
+#
+#   -v "$HOME/.cache/cvm-linux-ccache:/ccache"
+ENV CC=clang
+ENV CCACHE_DIR=/ccache
+
+WORKDIR /src

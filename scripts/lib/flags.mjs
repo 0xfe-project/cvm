@@ -1,8 +1,11 @@
 // scripts/lib/flags.mjs
 //
 // Compiler flag sets. Two flavors exist because the project is split:
-//   freestanding  rt/ and vm/  — no libc at all
-//   hosted        tests/       — ordinary userland, libc allowed
+//   freestanding  vm/ only — no libc at all
+//   hosted        rt/ and tests/ — ordinary userland, libc allowed
+//
+// (rt/ used to be freestanding too; it is the platform layer, so it is the
+// one place that has to talk to the OS.)
 
 import path from "node:path";
 import { freestandingInclude } from "./toolchain.mjs";
@@ -77,7 +80,26 @@ function safepointTrapFlags(opts) {
 
 /** Flags shared by both flavors, before the flavor-specific ones. */
 function commonFor(opts) {
-    return [...COMMON, ...safepointTrapFlags(opts)];
+    return [...COMMON, ...featureTestFlags(), ...safepointTrapFlags(opts)];
+}
+
+/**
+ * The platform's feature-test macro, where one is needed.
+ *
+ * macOS exposes the BSD-style jump API -- sigjmp_buf, sigsetjmp,
+ * siglongjmp -- unconditionally, and this project uses it: a signal that
+ * arrives during a safepoint is not something setjmp/longjmp can be trusted
+ * to survive, so rt_jump stores a sigjmp_buf. glibc declares the same API
+ * only under _GNU_SOURCE (it is in the __USE_MISC group, which -std=c11
+ * turns off by defining __STRICT_ANSI__). Without this, the first Linux
+ * compile stops at rt/rt_jump.h: unknown type name 'sigjmp_buf' -- and the
+ * errors after it are consequences, because an undeclared type name is
+ * parsed as an expression.
+ *
+ * Harmless for the freestanding flavor, which never includes a libc header.
+ */
+function featureTestFlags() {
+    return process.platform === "linux" ? ["-D_GNU_SOURCE"] : [];
 }
 
 /**
