@@ -111,7 +111,14 @@ TEST small_allocation_lands_in_the_heap_with_a_header(void) {
     /* the header sits immediately before the payload */
     CvmGcHeader const* header = cvm_header_of(p);
     ASSERT(header->type == &scalar8);
-    ASSERT_EQ_FMT(0u, (u32)header->flags, "%u");
+
+    /*
+     * One word, and that is the point of it: the two flags this collector
+     * has are in the address's metadata byte, where whippet keeps the same
+     * kind of information, and the mark state was never in the object. Two
+     * words make a 24-byte node 48 bytes instead of 32.
+     */
+    ASSERT_EQ_FMT(sizeof(void*), (usize)sizeof(CvmGcHeader), "%zu");
 
     /* and the bytemap says an object starts here */
     ASSERT(object_meta_is_allocated(
@@ -131,7 +138,17 @@ TEST allocations_are_distinct_and_aligned(void) {
     for (int i = 0; i < N; i++) {
         seen[i] = cvm_alloc(&scalar8);
         ASSERT(seen[i] != NULL);
-        ASSERT_EQ_FMT(0u, (u32)((usize)seen[i] % CVM_ALLOC_ALIGNMENT), "%u");
+
+        /*
+         * The object, not the payload: the header is what the metadata
+         * table indexes, and 16-byte alignment is what makes an object's
+         * entry exact. The payload is one header further on, so it is
+         * 8-aligned since the header became one word; a type that needs
+         * more has to pad its own payload, and the frontend knows the
+         * header's size.
+         */
+        ASSERT_EQ_FMT(0u, (u32)((usize)cvm_header_of(seen[i]) % CVM_ALLOC_ALIGNMENT),
+                      "%u");
         ASSERT(in_heap(seen[i]));
     }
 
@@ -238,7 +255,7 @@ TEST an_object_larger_than_a_line_takes_the_overflow_path(void) {
     ASSERT(q != p);
 
     usize step =
-        sizeof(CvmGcHeader) + cvm_align_up(medium1000.size, CVM_ALLOC_ALIGNMENT);
+        cvm_align_up(sizeof(CvmGcHeader) + medium1000.size, CVM_ALLOC_ALIGNMENT);
     ASSERT_EQ_FMT(step, (usize)(q - p), "%zu");
 
     fixture_leave();

@@ -99,53 +99,34 @@ struct CvmTypeDescriptor {
 /* ------------------------------------------------------------------ */
 
 /*
- * Header flags are a bitmask over a u32 field: plain macros, not an enum.
- * A fixed-underlying-type enum is C23, and an enum cannot name an OR of
- * two flags anyway.
+ * A per-object flag is not in the object.
+ *
+ * Both of the flags this runtime has are properties of an *object* rather
+ * than of its type -- which is why they are not in the descriptor -- but they
+ * are read by the collector while it is already holding the address's
+ * metadata byte, and that byte is where whippet keeps the same kind of
+ * information (its allocation kind sits beside the mark state in one byte per
+ * granule). So they live there, in gc/meta.h, and the object header is one
+ * word.
+ *
+ * That word is the difference between this collector's objects and both
+ * references': a header of two words makes a 24-byte node 48 bytes where
+ * commix's one-word header and whippet's one-word tag make it 32, and 48
+ * bytes is past the point where an object stops fitting a cache line with
+ * its neighbour.
+ *
+ * The two bits the header used to carry:
+ *
+ *   CVM_OM_FLAG_WEAK       the object does not hold its referent alive
+ *   CVM_OM_FLAG_FINALIZER  the object owns something outside the heap
+ *
+ * A third, CVM_GC_MARKED, is gone rather than moved: marking has been
+ * recorded in the metadata byte since this collector was written -- a mark
+ * bit in the object is what a conservative collector needs, because it
+ * cannot always find the metadata for an address it guessed at, and this one
+ * always can -- so the bit had no reader and no writer anywhere in the
+ * repository.
  */
-#define CVM_GC_MARKED ((u32)1u << 0)
-
-/*
- * Bit 1 is free, and deliberately so.
- *
- * It was CVM_GC_PINNED, meaning "this object's address must not change".
- * Pinning is only observable to a collector that moves objects, and no
- * collector here does: cvm does not evacuate, the Commix reference this
- * project ports from does not either, and neither does Go. So the flag had
- * no code that set it and none that read it — a promise of behaviour with
- * nothing behind it, which is the kind of thing a frontend reads in a
- * header and relies on.
- *
- * When evacuation arrives, the flag comes back with the code that reads it,
- * in the same change. That is the rule for every flag in this header: a
- * flag exists because something honours it.
- */
-
-/*
- * A weak reference. Marking records such an object but does not trace
- * through it, so its referent is not kept alive by it; the nullify phase
- * decides afterwards what to clear.
- *
- * This is a property of the object rather than of its type, which is why
- * it is a header flag: two objects of the same type can differ in whether
- * they hold their referent strongly, and a type descriptor is shared.
- */
-#define CVM_GC_WEAK_REF ((u32)1u << 2)
-
-/*
- * An object that owns a resource outside the heap.
- *
- * When such an object dies, the runtime extracts its pointer and its
- * finalizer into a queue and a dedicated thread runs the finalizer, so
- * that a finalizer which allocates or blocks cannot do so in the middle
- * of a sweep. See vm/gc/finalize.h.
- *
- * The object itself contains no GC pointers: the C pointer it holds is
- * outside the heap, and the finalizer is code. Its descriptor is
- * therefore a scalar, which is also what stops the marker from trying to
- * follow either of them.
- */
-#define CVM_GC_HAS_FINALIZER ((u32)1u << 3)
 
 /*
  * Allocation granularity.
@@ -158,6 +139,13 @@ struct CvmTypeDescriptor {
  * The runtime's object metadata table has the same granularity: an
  * address maps to exactly one metadata entry only if object starts are
  * at least this aligned. vm/gc/layout.h asserts the two agree.
+ *
+ * The *payload* is aligned to the header's size and no more, which is one
+ * word: 8 bytes. A type whose fields need more than that has to pad its own
+ * payload, and it can, because the header's size is this header's business
+ * and the frontend reads it here. Saying so is the point -- the payload was
+ * 16-aligned for as long as the header was two words, and nothing said that
+ * was a promise rather than a coincidence.
  */
 #define CVM_ALLOC_ALIGNMENT ((usize)(2 * CVM_WORD_SIZE))
 
@@ -180,13 +168,11 @@ struct CvmTypeDescriptor {
 #define CVM_OBJECT_SLOT_ALLOCATED ((u8)0x2)
 
 /*
- * Every GC heap object begins with this header. Allocation returns
- * a pointer to the header; user payload follows immediately after.
+ * Every GC heap object begins with this header. Allocation returns a
+ * pointer to the header; user payload follows immediately after.
  */
 typedef struct CvmGcHeader {
     CvmTypeDescriptor const* type; /* static, compiler-generated */
-    u32 flags;                     /* CVM_GC_* bitmask */
-    u32 _pad;                      /* keeps header word-aligned */
 } CvmGcHeader;
 
 /* ------------------------------------------------------------------ */
@@ -652,7 +638,6 @@ CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
 
     CvmGcHeader* hdr = (CvmGcHeader*)p;
     hdr->type = type;
-    hdr->flags = 0;
 
     /*
      * Mark the slot. Without this the object exists but the collector

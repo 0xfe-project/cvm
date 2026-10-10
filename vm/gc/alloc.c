@@ -140,7 +140,6 @@ static opaque_mut publish(CvmAllocator* alloc, u8* start, usize size,
 
     CvmGcHeader* header = (CvmGcHeader*)start;
     header->type = type;
-    header->flags = 0;
 
     ObjectMeta* meta = bytemap_get(alloc->bytemap, start);
     object_meta_set_allocated(meta);

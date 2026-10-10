@@ -91,8 +91,6 @@ void cvm_mark_batch(CvmHeap* heap, CvmGreyPacket* in, CvmGreyPacket** out,
 bool cvm_mark_is_done(CvmHeap* heap);
 
 /* Mark one object and enqueue it for tracing. */
-void cvm_mark_object(CvmHeap* heap, u8* start, CvmGreyPacket** out,
-                     CvmGreyPacket** out_weak);
 
 /* Mark a pointer value, if it names an object in the heap. */
 void cvm_mark_field(CvmHeap* heap, opaque_mut field, CvmGreyPacket** out,

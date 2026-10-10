@@ -69,17 +69,23 @@ TEST block_mask_rounds_an_address_down_to_its_block(void) {
     PASS();
 }
 
-TEST every_allocation_slot_holds_a_whole_header(void) {
+TEST a_header_fits_inside_one_allocation_slot(void) {
     /*
-     * The object metadata table has one entry per allocation slot. The
-     * smallest possible object is a bare header, so a header must fit in
-     * a whole number of slots: otherwise an object's metadata entry would
-     * straddle a slot boundary and the table would describe the wrong
-     * thing. Both quantities are 16 today; the invariant is the relation,
-     * not the number.
+     * The object metadata table has one entry per allocation slot, and the
+     * entry that describes an object is the one its *start* falls in. So the
+     * header may be shorter than a slot -- it is, at one word, since the
+     * flags moved into the metadata byte -- but not longer: a header that
+     * straddled a slot boundary would put an object's start and its payload
+     * in different entries, and a payload pointer would resolve to a slot
+     * that does not describe its object.
+     *
+     * This used to assert the header was a whole number of slots, which held
+     * because both were 16. The relation that is actually needed is the
+     * weaker one, and the difference is 8 bytes on every object.
      */
-    ASSERT(CVM_ALLOC_ALIGNMENT >= sizeof(CvmGcHeader));
-    ASSERT_EQ_FMT(0u, (u32)(sizeof(CvmGcHeader) % CVM_ALLOC_ALIGNMENT), "%u");
+    ASSERT(sizeof(CvmGcHeader) <= CVM_ALLOC_ALIGNMENT);
+    /* And slot-aligned starts, which is what makes an entry exact. */
+    ASSERT_EQ_FMT(0u, (u32)(CVM_ALLOC_ALIGNMENT % CVM_ALLOC_ALIGNMENT), "%u");
     PASS();
 }
 
@@ -100,7 +106,7 @@ SUITE(layout_suite) {
     RUN_TEST(allocation_alignment_is_two_words);
     RUN_TEST(metadata_slots_per_line_and_block);
     RUN_TEST(block_mask_rounds_an_address_down_to_its_block);
-    RUN_TEST(every_allocation_slot_holds_a_whole_header);
+    RUN_TEST(a_header_fits_inside_one_allocation_slot);
     RUN_TEST(growth_policy_values_are_sane);
 }
 

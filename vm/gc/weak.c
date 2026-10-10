@@ -15,6 +15,7 @@
 #include "gc/grey_packet.h"
 #include "gc/heap.h"
 #include "gc/marker.h"
+#include "gc/world.h"
 #include "gc/meta.h"
 #include "log.h"
 #include "rt.h"
@@ -45,7 +46,9 @@ opaque_mut cvm_weak_ref_new(opaque_mut target) {
     weak->target = target;
 
     /* The flag is what makes the marker record rather than trace it. */
-    cvm_header_of_mut(weak)->flags |= CVM_GC_WEAK_REF;
+    ObjectMeta* meta =
+        bytemap_get(cvm_world()->heap.bytemap, (u8 const*)cvm_header_of(weak));
+    object_meta_set_weak(meta);
     return weak;
 }
 
@@ -93,7 +96,8 @@ static u32 nullify_packet(CvmHeap* heap, CvmGreyPacket* packet) {
          */
         u8* start = cvm_grey_packet_pop(packet);
 
-        cvm_assert((((CvmGcHeader*)start)->flags & CVM_GC_WEAK_REF) != 0);
+        cvm_assert(
+            object_meta_is_weak(bytemap_get_const(heap->bytemap, (u8 const*)start)));
 
         CvmWeakRef* weak = (CvmWeakRef*)(start + sizeof(CvmGcHeader));
         opaque_mut target = weak->target;

@@ -77,7 +77,9 @@ static void extract_finalizers(Bytemap* bytemap, u8* start, u8* limit) {
         if (object_meta_is_allocated(slot)) {
             CvmGcHeader* header = (CvmGcHeader*)p;
 
-            if ((header->flags & CVM_GC_HAS_FINALIZER) != 0) {
+            /* The flag rides in the slot byte, which this loop is already
+             * holding: see the note on CvmGcHeader. */
+            if (object_meta_has_finalizer(slot)) {
                 CvmExternal* ext = (CvmExternal*)(p + sizeof(CvmGcHeader));
                 /*
                  * A failure means the queue is full, which is counted and
@@ -116,9 +118,8 @@ static void sweep_line_with_finalizers(ObjectMeta* line_cursor, u8* line_start) 
 
         if (object_meta_is_allocated(slot)) {
             u8* addr = line_start + i * CVM_ALLOC_ALIGNMENT;
-            CvmGcHeader* header = (CvmGcHeader*)addr;
 
-            if ((header->flags & CVM_GC_HAS_FINALIZER) != 0) {
+            if (object_meta_has_finalizer(slot)) {
                 CvmExternal* ext = (CvmExternal*)(addr + sizeof(CvmGcHeader));
                 (void)cvm_finalizer_enqueue(ext->c_ptr, ext->finalizer);
             }

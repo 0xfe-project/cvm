@@ -123,7 +123,8 @@ TEST a_new_external_object_holds_its_pointer(void) {
 
     ASSERT(cvm_external_ptr(ext) == &resource);
     /* no finalizer, so no flag: there is nothing to release */
-    ASSERT((cvm_header_of(ext)->flags & CVM_GC_HAS_FINALIZER) == 0);
+    ASSERT(!object_meta_has_finalizer(
+        bytemap_get_const(heap()->bytemap, (u8 const*)cvm_header_of(ext))));
 
     fixture_leave();
     PASS();
@@ -149,7 +150,8 @@ TEST a_finalizer_runs_when_its_object_dies(void) {
 
     int resource = 7;
     void* ext = cvm_external_new(&resource, counting_finalizer);
-    ASSERT((cvm_header_of(ext)->flags & CVM_GC_HAS_FINALIZER) != 0);
+    ASSERT(object_meta_has_finalizer(
+        bytemap_get_const(heap()->bytemap, (u8 const*)cvm_header_of(ext))));
 
     /* nothing points at it, so it dies */
     collect();

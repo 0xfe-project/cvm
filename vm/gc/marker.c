@@ -163,8 +163,15 @@ void cvm_mark_give_packet(CvmHeap* heap, CvmGreyPacket* packet, bool weak) {
  * line-managed at all, and their block metadata is a superblock chain
  * rather than a simple block.
  */
-static void mark_metadata(CvmHeap* heap, u8* start, ObjectMeta* meta) {
-    object_meta_set_marked(meta);
+static void mark_metadata(CvmHeap* heap, u8* start, ObjectMeta* meta, u8 was) {
+    /*
+     * The flags share this byte with the state, so marking it is a
+     * read-modify-write rather than a store -- and the caller has just read
+     * the byte to decide the object was unmarked, so it passes it in rather
+     * than making this function load it again. See the note on CvmGcHeader
+     * for why the flags are here.
+     */
+    cvm_mark_byte_set(meta, (u8)((was & CVM_OM_FLAG_MASK) | (u8)CVM_OM_MARKED));
 
     BlockMeta* block =
         block_meta_of_word(heap->block_meta_start, heap->heap_start, start);
@@ -214,15 +221,28 @@ static void mark_metadata(CvmHeap* heap, u8* start, ObjectMeta* meta) {
     }
 }
 
-void cvm_mark_object(CvmHeap* heap, u8* start, CvmGreyPacket** out,
-                     CvmGreyPacket** out_weak) {
-    ObjectMeta* meta = bytemap_get(heap->bytemap, start);
+static void mark_object(CvmHeap* heap, u8* start, ObjectMeta* meta, u8 was,
+                        CvmGreyPacket** out, CvmGreyPacket** out_weak);
 
-    mark_metadata(heap, start, meta);
+/*
+ * The body of cvm_mark_object, with the metadata byte's value passed in.
+ *
+ * Split out so that the field path -- which has just read that byte to
+ * decide the object was unmarked and unallocated -- does not read it a second
+ * time. Marking has to preserve the other bits in it, so it cannot be the
+ * bare store it used to be, and one load saved is one load.
+ */
+static void mark_object(CvmHeap* heap, u8* start, ObjectMeta* meta, u8 was,
+                        CvmGreyPacket** out, CvmGreyPacket** out_weak) {
+    mark_metadata(heap, start, meta, was);
 
-    CvmGcHeader const* header = (CvmGcHeader const*)start;
-
-    if ((header->flags & CVM_GC_WEAK_REF) != 0) {
+    /*
+     * Whether this object holds its referent is a property of the object,
+     * and it is in the metadata byte rather than in the header: the marker
+     * has the byte in hand, and the header is one word because of it. See
+     * the note on CvmGcHeader.
+     */
+    if (object_meta_is_weak(meta)) {
         /*
          * A weak reference is recorded, not traced. Recording it here is
          * what keeps its referent from being kept alive by it: the
@@ -261,17 +281,23 @@ void cvm_mark_field(CvmHeap* heap, opaque_mut field, CvmGreyPacket** out,
     ObjectMeta* meta = bytemap_get(heap->bytemap, (u8 const*)header);
 
     /*
-     * One load, not two. The state is a single byte compared by equality, and
-     * "allocated and not marked" is exactly "the byte says allocated" — the
-     * two states are distinct values, so asking them separately reads the
-     * same cache line twice for the same answer. This is the most-executed
-     * branch in the marker.
+     * One load, not two. "Allocated and not marked" is exactly "the state
+     * says allocated" — the states are distinct numbers — so asking them
+     * separately would read the same byte twice for the same answer. This is
+     * the most-executed branch in the marker.
+     *
+     * The state, not the byte: the byte also carries the object's flags, and
+     * comparing the whole of it against ALLOCATED would make every weak
+     * reference and every finalizable object look already-marked, and be
+     * collected while something still points at it. That is what this said
+     * when the flags moved into the byte, and it is what the weak-reference
+     * and finalizer tests caught.
      */
-    if (cvm_mark_byte_get(meta) != (u8)CVM_OM_ALLOCATED) {
+    if (object_meta_state(meta) != (u8)CVM_OM_ALLOCATED) {
         return;
     }
 
-    cvm_mark_object(heap, (u8*)header, out, out_weak);
+    mark_object(heap, (u8*)header, meta, cvm_mark_byte_get(meta), out, out_weak);
 }
 
 /* ------------------------------------------------------------------ */

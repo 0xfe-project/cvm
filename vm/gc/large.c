@@ -284,7 +284,6 @@ static u8* try_large_alloc(CvmLargeAllocator* large, usize size) {
 static opaque_mut adopt_large_chunk(u8* payload, CvmTypeDescriptor const* type) {
     CvmGcHeader* header = cvm_header_of_mut(payload);
     header->type = type;
-    header->flags = 0;
     return payload;
 }
 
