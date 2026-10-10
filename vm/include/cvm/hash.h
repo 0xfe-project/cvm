@@ -191,6 +191,35 @@ bool cvm_map_del(CvmHashMap* m, opaque_mut key);
 usize cvm_map_slot(CvmHashMap const* m, opaque_mut key);
 
 /*
+ * The same lookup, for a table another thread may be writing. Takes no lock.
+ *
+ * This is what a table shared between threads reads with, and the argument that
+ * it is safe has three parts:
+ *
+ *   - a lookup allocates nothing, so it contains no safepoint, and the collector
+ *     runs only at safepoints. A collection therefore cannot begin while a reader
+ *     is inside the arrays, and the arrays it is walking cannot be collected
+ *     underneath it.
+ *
+ *   - the occupancy bit and the key in a slot are published in that order, so a
+ *     reader that sees a bucket occupied sees the key that occupies it. What a
+ *     reader may see is a table that is *older* than the writer's latest state —
+ *     an insert it has not observed yet — and never one that is inconsistent.
+ *
+ *   - a missed insert is caught where it matters. The reader that misses one goes
+ *     on to insert, and the insert path takes the writer's lock and looks again,
+ *     which is what keeps two entries for one text from existing.
+ *
+ * The array is read once, before the walk: a resize replaces it, and the old and
+ * new arrays have different lengths.
+ *
+ * What a caller may *not* do is hold a slot index across an insert or a delete,
+ * or keep a key alive by having read it here — the same rule the rest of this
+ * interface follows, for the same reason.
+ */
+usize cvm_map_slot_shared(CvmHashMap const* m, opaque_mut key);
+
+/*
  * Remove the entry in `slot`, which must be occupied.
  *
  * Runtime-internal rather than part of the table's surface: a caller with a slot
@@ -270,7 +299,7 @@ usize cvm_map_compact(CvmHashMap* m);
  */
 usize cvm_map_next(CvmHashMap const* m, usize from);
 
-/* The key stored in `slot`. */
+/* The key stored in `slot`. An atomic read: see cvm_map_slot_shared. */
 opaque_mut cvm_map_key_at(CvmHashMap const* m, usize slot);
 
 /* The value stored in `slot`. */
