@@ -364,6 +364,341 @@ TEST collection_reclaims_space(void) {
     PASS();
 }
 
+/*
+ * Bytes the collector has released that are not zero.
+ *
+ * The object-level check further down is the claim the contract makes, but on
+ * its own it is not enough to test it: the allocator is free to serve the
+ * second round from blocks it has never used, and the check then passes
+ * without having looked at a single reclaimed byte. That is not hypothetical
+ * -- it is what this test did at first, and removing a clear did not fail it.
+ *
+ * So the pool is checked rather than the allocation, and by state rather than
+ * by guesswork:
+ *
+ *   free or reserved            the whole block must be zero
+ *   a superblock with no live object at its start
+ *                               the whole run must be zero
+ *   simple                      every free-line run must be zero, except the
+ *                               first 16 bytes of each run, which is where
+ *                               the free-line node lives until the allocator
+ *                               clears it on the way in
+ *   anything with a live object nothing can be said, so nothing is checked
+ *
+ * A block being "handed back" in a state other than free is why the states
+ * are enumerated: a swept large object's block reaches the allocator described
+ * as a one-block superblock, not as free, and a check that only looked at free
+ * blocks would step straight over it.
+ */
+static u32 released_bytes_that_are_not_zero(void) {
+    u32 offenders = 0;
+    CvmHeap* h = heap();
+
+    for (u32 b = 0; b < h->block_count; b++) {
+        BlockMeta* meta = cvm_heap_block_meta(h, b);
+        u8* start = cvm_heap_block_address(h, b);
+        usize run = 1;
+
+        if (block_meta_is_superblock_start(meta)) {
+            run = block_meta_superblock_size(meta);
+            ASSERT(run > 0 && b + run <= h->block_count);
+
+            /*
+             * A superblock holds large objects at granularity strides, and
+             * any of them may have died while the object at the start
+             * survived -- which is the case the chunk walk in the sweeper
+             * exists for, and the only one where that walk's clear has
+             * something to clear that is not already zero. A free chunk says
+             * so in the bytemap: its first slot is a placeholder.
+             *
+             * The chunk's own header is the free list's link and holds
+             * neither zeroes nor the object, so it is skipped; the size it
+             * carries is what says how far the chunk reaches.
+             */
+            for (usize off = 0; off < run * CVM_BLOCK_SIZE;
+                 off += CVM_LARGE_OBJECT_MIN_SIZE) {
+                u8* at = start + off;
+                if (!object_meta_is_placeholder(bytemap_get(h->bytemap, at))) {
+                    continue;
+                }
+                usize bytes = *(usize*)at;
+                if (bytes < CVM_LARGE_OBJECT_MIN_SIZE || bytes > CVM_BLOCK_SIZE) {
+                    continue; /* not a chunk header we can make sense of */
+                }
+                for (usize i = 16; i < bytes; i++) {
+                    if (at[i] != 0) {
+                        offenders++;
+                        break;
+                    }
+                }
+            }
+
+            b += run - 1;
+            continue;
+        } else if (block_meta_is_simple(meta)) {
+            for (i8 line = block_meta_first_free_line(meta); line != CVM_LAST_HOLE;) {
+                FreeLineMeta* node =
+                    (FreeLineMeta*)(start + (usize)line * CVM_LINE_SIZE);
+                usize bytes = (usize)node->size * CVM_LINE_SIZE;
+                for (usize i = 16; i < bytes; i++) {
+                    if (((u8*)node)[i] != 0) {
+                        offenders++;
+                        break;
+                    }
+                }
+                line = node->next;
+            }
+            continue;
+        }
+
+        /* Free, reserved, or a dead superblock whose metadata has been swept:
+         * every byte of it is memory the collector has released. */
+        for (usize i = 0; i < run * CVM_BLOCK_SIZE; i++) {
+            if (start[i] != 0) {
+                offenders++;
+                break;
+            }
+        }
+    }
+
+    return offenders;
+}
+
+TEST reclaimed_memory_is_zeroed_before_it_is_reused(void) {
+    /*
+     * The object contract says a fresh object's payload is zeroed, and the
+     * allocator no longer does that -- the collector does it when it
+     * reclaims the memory, and the platform does it when the heap is first
+     * mapped. So the case that matters is not the first allocation from a
+     * fresh heap, which is covered in test_alloc.c, but the one that reuses
+     * memory a dead program wrote into.
+     *
+     * Every size class is walked because each has a reclaim site of its own:
+     * a wholly dead block, a run of free lines inside a block that still has
+     * survivors, the blocks that body a multi-block large object, the single
+     * block one large object gets to itself, and a large object's chunk.
+     *
+     * A pattern rather than a canary: one byte in the right place is not
+     * enough to catch a clear that covered the wrong range, and every one of
+     * these sites is about a range.
+     */
+    /*
+     * Sizes that between them walk every reclaim path, and enough of them
+     * that the heap runs out of room: a round has to be larger than half the
+     * heap's maximum, or the second round is served from memory the heap has
+     * never used and the test passes without testing anything. That is not
+     * hypothetical -- with 300 per size the heap grew, the second round took
+     * fresh blocks, and removing the clear from the single-block superblock
+     * path did not fail the test.
+     */
+    static usize const sizes[] = {16, 48, 64, 512, 2000, 9000};
+    static unsigned const waves[] = {600, 600, 600, 600, 600, 2200};
+    enum { KINDS = sizeof(sizes) / sizeof(sizes[0]) };
+
+    fixture_enter();
+    FRAME(1);
+
+    for (unsigned k = 0; k < KINDS; k++) {
+        CvmTypeDescriptor desc = {.size = (u32)sizes[k], .kind = CVM_TYPE_SCALAR};
+        for (unsigned i = 0; i < waves[k]; i++) {
+            u8* p = cvm_alloc(&desc);
+            ASSERT(p != NULL);
+            for (usize b = 0; b < sizes[k]; b++) {
+                p[b] = (u8)(0xa5u ^ (u8)b);
+            }
+        }
+    }
+
+    collect();
+
+    ASSERT_EQ_FMT(0u, released_bytes_that_are_not_zero(), "%u");
+
+    for (unsigned k = 0; k < KINDS; k++) {
+        CvmTypeDescriptor desc = {.size = (u32)sizes[k], .kind = CVM_TYPE_SCALAR};
+        for (unsigned i = 0; i < waves[k]; i++) {
+            u8* p = cvm_alloc(&desc);
+            ASSERT(p != NULL);
+            for (usize b = 0; b < sizes[k]; b++) {
+                if (p[b] != 0) {
+                    FAILm("reclaimed memory was handed out without being cleared");
+                }
+            }
+        }
+    }
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST a_partly_free_block_is_zeroed_where_it_is_free(void) {
+    /*
+     * The other half of the same claim.
+     *
+     * A collection in which nothing survives leaves whole blocks free, and
+     * those are cleared in one call each. A collection in which *something*
+     * survives leaves a block with holes -- free runs of lines beside lines
+     * that still hold live objects -- and a free run is cleared as a run,
+     * with the free-line node written back into its first line afterwards.
+     * A workload with no survivor never produces a hole, so it cannot see
+     * that path at all: removing the run clear left the other test passing.
+     *
+     * The keeper is the instrument. It is what makes a block partly free,
+     * and checking that it is still live at the end is what proves the test
+     * was in the state it claims to be in.
+     */
+    enum { GARBAGE = 4000 };
+
+    fixture_enter();
+    FRAME(1);
+
+    for (unsigned i = 0; i < GARBAGE; i++) {
+        u8* p = cvm_alloc(&leaf_desc);
+        ASSERT(p != NULL);
+        stamp(p, 0xa5a5a5a5a5a5a5a5ull);
+        if (i == GARBAGE / 2) {
+            f_roots[0] = p;
+        }
+    }
+
+    collect();
+
+    ASSERT(f_roots[0] != NULL);
+    ASSERT(is_live(f_roots[0]));
+    ASSERT_EQ_FMT(0u, released_bytes_that_are_not_zero(), "%u");
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST a_spanning_object_survives_and_is_reclaimed(void) {
+    /*
+     * A large object bigger than a block is a superblock: a run of whole
+     * blocks with the object at the front of it. Nothing used to allocate
+     * one, so cvm_sweep_superblock had no workload that reached it, and the
+     * clearing it does when it reclaims one -- the front blocks, the last
+     * block, the dead chunks in a block that still has a survivor -- was
+     * unreachable code with a test that could not fail.
+     *
+     * This is the workload. A spanning object is allocated, held across a
+     * collection, checked byte for byte, dropped, and its memory allocated
+     * again and checked for zeroes, which is the same claim the two tests
+     * above make about a block and about a free run.
+     */
+    enum { SIZE = 70000 };
+    CvmTypeDescriptor desc = {.size = SIZE, .kind = CVM_TYPE_SCALAR};
+
+    fixture_enter();
+    FRAME(1);
+
+    u8* first = cvm_alloc(&desc);
+    ASSERT(first != NULL);
+    for (usize i = 0; i < SIZE; i++) {
+        first[i] = (u8)(0x3cu ^ (u8)i);
+    }
+    f_roots[0] = first;
+
+    collect();
+
+    /* Live, so nothing was cleared under it and nothing moved it. */
+    ASSERT(is_live(f_roots[0]));
+    for (usize i = 0; i < SIZE; i++) {
+        if (first[i] != (u8)(0x3cu ^ (u8)i)) {
+            FAILm("a spanning object's contents did not survive the collection");
+        }
+    }
+
+    f_roots[0] = NULL;
+    collect();
+
+    ASSERT_EQ_FMT(0u, released_bytes_that_are_not_zero(), "%u");
+
+    u8* again = cvm_alloc(&desc);
+    ASSERT(again != NULL);
+    for (usize i = 0; i < SIZE; i++) {
+        if (again[i] != 0) {
+            FAILm("a reclaimed superblock was handed out without being cleared");
+        }
+    }
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST a_superblock_clears_the_chunk_beside_a_survivor(void) {
+    /*
+     * A block holding two large objects, one of which survives.
+     *
+     * This is the case cvm_sweep_superblock's chunk walk exists for, and the
+     * only one that can show whether its clear works. A chunk that is free
+     * is already zero and clearing it again changes nothing; a chunk that
+     * held a live object which then died is full of that object's bytes, and
+     * only then does the clear have anything to do.
+     *
+     * Two objects of 8 KiB come to 16 KiB each with the header rounding,
+     * which is exactly half a block, so the second one lands in what is left
+     * of the first one's superblock. Rooting the first and dropping the
+     * second is what separates them; the pool check afterwards is what reads
+     * the result, and it does not care where the allocator puts the next
+     * object.
+     */
+    enum { SIZE = 8192 };
+    CvmTypeDescriptor desc = {.size = SIZE, .kind = CVM_TYPE_SCALAR};
+
+    fixture_enter();
+    FRAME(1);
+
+    /*
+     * Start from an empty chunk free list, or the two objects below need not
+     * land in one block: a chunk left over from an earlier test in this
+     * binary is a chunk of the same size class, and the first allocation can
+     * pop that instead of a fresh superblock. A collection with nothing
+     * rooted frees every block whole, so nothing is filed as a chunk and the
+     * list comes back empty.
+     */
+    f_roots[0] = NULL;
+    collect();
+
+    u8* survivor = cvm_alloc(&desc);
+    u8* doomed = cvm_alloc(&desc);
+    ASSERT(survivor != NULL);
+    ASSERT(doomed != NULL);
+
+    /*
+     * Same block, or this test is not in the state it claims to be in. Worth
+     * asserting rather than assuming: packing two large objects into one
+     * block is the allocator's business, and a change to it would otherwise
+     * turn this into a test of nothing.
+     */
+    CvmHeap* h = heap();
+    u32 survivor_block = block_index_of(h->heap_start, (u8*)cvm_header_of(survivor));
+    u32 doomed_block = block_index_of(h->heap_start, (u8*)cvm_header_of(doomed));
+    ASSERT_EQ_FMT(survivor_block, doomed_block, "%u");
+
+    for (usize i = 0; i < SIZE; i++) {
+        survivor[i] = (u8)(0x77u ^ (u8)i);
+        doomed[i] = (u8)(0x11u ^ (u8)i);
+    }
+    f_roots[0] = survivor;
+
+    collect();
+
+    ASSERT(is_live(f_roots[0]));
+    for (usize i = 0; i < SIZE; i++) {
+        if (survivor[i] != (u8)(0x77u ^ (u8)i)) {
+            FAILm("the survivor's contents did not survive");
+        }
+    }
+
+    ASSERT_EQ_FMT(0u, released_bytes_that_are_not_zero(), "%u");
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
 TEST allocation_still_works_after_a_collection(void) {
     /* The allocator's caches were cleared by the collection, so this is
      * what checks that it can rebuild them. */
@@ -509,6 +844,10 @@ SUITE(collect_suite) {
     RUN_TEST(the_tail_of_a_broken_chain_is_reclaimed);
     RUN_TEST(repeated_collections_are_stable);
     RUN_TEST(collection_reclaims_space);
+    RUN_TEST(reclaimed_memory_is_zeroed_before_it_is_reused);
+    RUN_TEST(a_partly_free_block_is_zeroed_where_it_is_free);
+    RUN_TEST(a_spanning_object_survives_and_is_reclaimed);
+    RUN_TEST(a_superblock_clears_the_chunk_beside_a_survivor);
     RUN_TEST(allocation_still_works_after_a_collection);
     RUN_TEST(surviving_objects_keep_their_identity_across_collections);
     RUN_TEST(a_large_object_is_reclaimed_when_it_dies);

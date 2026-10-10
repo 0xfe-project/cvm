@@ -55,6 +55,18 @@ static CvmTypeDescriptor const large9000 = {
     .kind = CVM_TYPE_SCALAR,
 };
 
+/*
+ * Larger than one block, which is the other kind of large object: a chunk is
+ * carved out of a block and cannot span one, so an object this size is a run
+ * of whole blocks -- a superblock. 70000 bytes plus a header rounds to 73728,
+ * which is three blocks, and three is deliberately not a power of two: that is
+ * the case where the heap grows by four to hold three.
+ */
+static CvmTypeDescriptor const spanning70000 = {
+    .size = 70000,
+    .kind = CVM_TYPE_SCALAR,
+};
+
 /* ------------------------------------------------------------------ */
 /* fixture                                                             */
 /* ------------------------------------------------------------------ */
@@ -99,7 +111,14 @@ TEST small_allocation_lands_in_the_heap_with_a_header(void) {
     /* the header sits immediately before the payload */
     CvmGcHeader const* header = cvm_header_of(p);
     ASSERT(header->type == &scalar8);
-    ASSERT_EQ_FMT(0u, (u32)header->flags, "%u");
+
+    /*
+     * One word, and that is the point of it: the two flags this collector
+     * has are in the address's metadata byte, where whippet keeps the same
+     * kind of information, and the mark state was never in the object. Two
+     * words make a 24-byte node 48 bytes instead of 32.
+     */
+    ASSERT_EQ_FMT(sizeof(void*), (usize)sizeof(CvmGcHeader), "%zu");
 
     /* and the bytemap says an object starts here */
     ASSERT(object_meta_is_allocated(
@@ -119,7 +138,17 @@ TEST allocations_are_distinct_and_aligned(void) {
     for (int i = 0; i < N; i++) {
         seen[i] = cvm_alloc(&scalar8);
         ASSERT(seen[i] != NULL);
-        ASSERT_EQ_FMT(0u, (u32)((usize)seen[i] % CVM_ALLOC_ALIGNMENT), "%u");
+
+        /*
+         * The object, not the payload: the header is what the metadata
+         * table indexes, and 16-byte alignment is what makes an object's
+         * entry exact. The payload is one header further on, so it is
+         * 8-aligned since the header became one word; a type that needs
+         * more has to pad its own payload, and the frontend knows the
+         * header's size.
+         */
+        ASSERT_EQ_FMT(0u, (u32)((usize)cvm_header_of(seen[i]) % CVM_ALLOC_ALIGNMENT),
+                      "%u");
         ASSERT(in_heap(seen[i]));
     }
 
@@ -226,7 +255,7 @@ TEST an_object_larger_than_a_line_takes_the_overflow_path(void) {
     ASSERT(q != p);
 
     usize step =
-        sizeof(CvmGcHeader) + cvm_align_up(medium1000.size, CVM_ALLOC_ALIGNMENT);
+        cvm_align_up(sizeof(CvmGcHeader) + medium1000.size, CVM_ALLOC_ALIGNMENT);
     ASSERT_EQ_FMT(step, (usize)(q - p), "%zu");
 
     fixture_leave();
@@ -254,6 +283,81 @@ TEST a_large_object_is_chunk_allocated(void) {
      * granularity, so the object fits with room to spare */
     usize needed = sizeof(CvmGcHeader) + large9000.size;
     ASSERT(cvm_align_up(needed, CVM_LARGE_OBJECT_MIN_SIZE) >= needed);
+
+    fixture_leave();
+    PASS();
+}
+
+TEST an_object_larger_than_a_block_takes_a_superblock(void) {
+    fixture_enter();
+    ASSERT(cvm_thread_ctx() != NULL);
+
+    u8* p = cvm_alloc(&spanning70000);
+    ASSERT(p != NULL);
+    ASSERT(in_heap(p));
+
+    CvmGcHeader const* header = cvm_header_of(p);
+    ASSERT(header->type == &spanning70000);
+    ASSERT(
+        object_meta_is_allocated(bytemap_get_const(the_bytemap(), (u8 const*)header)));
+
+    /*
+     * The object's blocks are described as one superblock, and its size is
+     * the number of blocks it reaches. That is what the sweeper reads to
+     * decide which blocks are its body: it frees every block but the last
+     * when the object at the start is dead.
+     */
+    usize needed =
+        cvm_align_up(sizeof(CvmGcHeader) + spanning70000.size, CVM_BLOCK_SIZE);
+    u32 blocks = (u32)(needed / CVM_BLOCK_SIZE);
+    ASSERT(blocks > 1);
+
+    CvmHeap* h = the_heap();
+    BlockMeta* head =
+        cvm_heap_block_meta(h, block_index_of(h->heap_start, (u8*)header));
+    ASSERT(block_meta_is_superblock_start(head));
+    ASSERT_EQ_FMT(blocks, block_meta_superblock_size(head), "%u");
+
+    /* Every other block of the run says it is a tail, which is what tells
+     * the marker not to look for line marks in it. */
+    for (u32 i = 1; i < blocks; i++) {
+        ASSERT(block_meta_is_superblock_tail(head + i));
+    }
+
+    /* The object's whole payload is the object's: write it end to end and
+     * read it back, which a superblock handed out twice would not survive. */
+    for (usize i = 0; i < spanning70000.size; i++) {
+        p[i] = (u8)(0x5au ^ (u8)i);
+    }
+    for (usize i = 0; i < spanning70000.size; i++) {
+        ASSERT_EQ_FMT((u8)(0x5au ^ (u8)i), p[i], "%u");
+    }
+
+    fixture_leave();
+    PASS();
+}
+
+TEST spanning_objects_do_not_overlap(void) {
+    fixture_enter();
+    ASSERT(cvm_thread_ctx() != NULL);
+
+    enum { N = 4 };
+    u8* p[N];
+    for (int i = 0; i < N; i++) {
+        p[i] = cvm_alloc(&spanning70000);
+        ASSERT(p[i] != NULL);
+    }
+
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            if (i == j) {
+                continue;
+            }
+            usize a = (usize)p[i];
+            usize b = (usize)p[j];
+            ASSERT(a >= b + spanning70000.size || b >= a + spanning70000.size);
+        }
+    }
 
     fixture_leave();
     PASS();
@@ -295,17 +399,20 @@ TEST a_returned_chunk_is_reused(void) {
     fixture_enter();
     ASSERT(cvm_thread_ctx() != NULL);
 
-    CvmLargeAllocator* large = &cvm_thread_node()->large_allocator;
-
-    u32 free_before = cvm_large_free_chunk_count(large);
+    /*
+     * The lists are the heap's, so the count is too -- which is the property
+     * that matters: a chunk filed by one thread is visible to the next, and
+     * to a GC worker that sweeps.
+     */
+    u32 free_before = cvm_large_free_chunk_count(the_heap());
 
     /* Build a chunk from a fresh block and hand it back. */
     CvmChunk* chunk = (CvmChunk*)cvm_heap_block_address(the_heap(), 0);
     ASSERT(chunk != NULL);
-    cvm_large_add_chunk(large, chunk, CVM_LARGE_OBJECT_MIN_SIZE);
+    cvm_large_add_chunk(the_heap(), chunk, CVM_LARGE_OBJECT_MIN_SIZE);
 
-    ASSERT_EQ_FMT(free_before + 1, cvm_large_free_chunk_count(large), "%u");
-    ASSERT(cvm_large_free_bytes(large) >= CVM_LARGE_OBJECT_MIN_SIZE);
+    ASSERT_EQ_FMT(free_before + 1, cvm_large_free_chunk_count(the_heap()), "%u");
+    ASSERT(cvm_large_free_bytes(the_heap()) >= CVM_LARGE_OBJECT_MIN_SIZE);
 
     fixture_leave();
     PASS();
@@ -338,7 +445,23 @@ TEST a_fresh_thread_has_a_clear_allocator(void) {
     ASSERT(node->allocator.bytemap == the_bytemap());
     ASSERT(node->allocator.block_alloc == &cvm_world()->block_alloc);
     ASSERT_EQ_FMT(0u, cvm_allocator_recycled_count(&node->allocator), "%u");
-    ASSERT_EQ_FMT(0u, cvm_large_free_chunk_count(&node->large_allocator), "%u");
+
+    /*
+     * The chunk free lists are not part of this. They are the heap's, so a
+     * thread attaching neither inherits them nor clears them -- and the
+     * check that used to be here, that a fresh thread sees them empty, only
+     * passed because an earlier test in this binary had not filed anything
+     * yet. An invariant that holds by accident of test order is not one.
+     *
+     * What is asserted instead is the property that matters: attaching does
+     * not disturb them. A GC worker sweeping files chunks into these lists
+     * without attaching at all, so anything that cleared them per attach
+     * would throw that work away.
+     */
+    u32 chunks_before = cvm_large_free_chunk_count(the_heap());
+    fixture_leave();
+    fixture_enter();
+    ASSERT_EQ_FMT(chunks_before, cvm_large_free_chunk_count(the_heap()), "%u");
 
     fixture_leave();
     PASS();
@@ -375,6 +498,8 @@ SUITE(alloc_suite) {
     RUN_TEST(many_allocations_stay_inside_the_heap);
     RUN_TEST(an_object_larger_than_a_line_takes_the_overflow_path);
     RUN_TEST(a_large_object_is_chunk_allocated);
+    RUN_TEST(an_object_larger_than_a_block_takes_a_superblock);
+    RUN_TEST(spanning_objects_do_not_overlap);
     RUN_TEST(large_objects_do_not_overlap);
     RUN_TEST(a_returned_chunk_is_reused);
     RUN_TEST(large_allocation_reports_the_granularity);

@@ -128,22 +128,35 @@ CVM_INLINE LineMeta const* line_meta_of_block_const(LineMeta const* start, u32 b
 /*
  * One byte per allocation slot, describing what is at that address.
  *
- *   free         nothing lives here
- *   placeholder  this address is the interior of a large object; the
- *                object's own metadata entry is at its first slot
- *   allocated    a live object starts here
- *   marked       a live object starts here and has been reached by this
- *                cycle's marking
+ *   bits 0-2  the state: free, placeholder, allocated, or marked
+ *   bit 3     this object is a weak reference
+ *   bit 4     this object owns a resource and has a finalizer
  *
- * The states are compared by equality, not by bit tests, so these values
- * are load-bearing.
+ * The flags are here rather than in the object because this byte is read on
+ * every object the collector looks at, and the object is not: the marker has
+ * the slot in hand when it needs to know whether what it is looking at holds
+ * its referent, and the sweeper has it when it needs to know whether a dead
+ * object owns something outside the heap. Whippet is the reference for the
+ * shape -- its metadata byte carries the allocation's kind the same way, next
+ * to the mark state -- and it is what lets a two-word object header be one
+ * word, which is what every reference has and this collector did not.
+ *
+ * The state is masked and compared, the flags are masked and tested: a state
+ * cannot be compared as a whole byte once anything else shares the byte.
  */
 typedef enum ObjectFlag {
     CVM_OM_FREE = 0x0,
     CVM_OM_PLACEHOLDER = 0x1,
     CVM_OM_ALLOCATED = 0x2,
-    CVM_OM_MARKED = 0x4,
+    CVM_OM_MARKED = 0x3,
+
+    CVM_OM_FLAG_WEAK = 0x8,
+    CVM_OM_FLAG_FINALIZER = 0x10,
 } ObjectFlag;
+
+/* Which bits hold the state, and which are the flags. */
+#define CVM_OM_STATE_MASK ((u8)0x7)
+#define CVM_OM_FLAG_MASK ((u8)~CVM_OM_STATE_MASK)
 
 typedef u8 ObjectMeta;
 
@@ -155,28 +168,57 @@ typedef u8 ObjectMeta;
 _Static_assert((u8)CVM_OM_ALLOCATED == CVM_OBJECT_SLOT_ALLOCATED,
                "the inlined allocation path and ObjectMeta must agree on "
                "what 'allocated' is");
+_Static_assert(((u8)CVM_OM_ALLOCATED & CVM_OM_FLAG_MASK) == 0,
+               "the allocated state must not overlap the flag bits, or the "
+               "inlined path would store a byte with flags set");
 _Static_assert(sizeof(ObjectMeta) == sizeof(u8),
                "the inlined path indexes the metadata table as bytes");
 
+CVM_INLINE u8 object_meta_state(ObjectMeta const* m) {
+    return (u8)(cvm_mark_byte_get(m) & CVM_OM_STATE_MASK);
+}
+
 CVM_INLINE bool object_meta_is_free(ObjectMeta const* m) {
-    return cvm_mark_byte_get(m) == (u8)CVM_OM_FREE;
+    return object_meta_state(m) == (u8)CVM_OM_FREE;
 }
 
 CVM_INLINE bool object_meta_is_placeholder(ObjectMeta const* m) {
-    return cvm_mark_byte_get(m) == (u8)CVM_OM_PLACEHOLDER;
+    return object_meta_state(m) == (u8)CVM_OM_PLACEHOLDER;
 }
 
 CVM_INLINE bool object_meta_is_allocated(ObjectMeta const* m) {
-    return cvm_mark_byte_get(m) == (u8)CVM_OM_ALLOCATED;
+    return object_meta_state(m) == (u8)CVM_OM_ALLOCATED;
 }
 
 CVM_INLINE bool object_meta_is_marked(ObjectMeta const* m) {
-    return cvm_mark_byte_get(m) == (u8)CVM_OM_MARKED;
+    return object_meta_state(m) == (u8)CVM_OM_MARKED;
 }
 
 /* True for anything that is not free: allocated, marked, or placeholder. */
 CVM_INLINE bool object_meta_is_occupied(ObjectMeta const* m) {
-    return cvm_mark_byte_get(m) != (u8)CVM_OM_FREE;
+    return object_meta_state(m) != (u8)CVM_OM_FREE;
+}
+
+CVM_INLINE bool object_meta_is_weak(ObjectMeta const* m) {
+    return (cvm_mark_byte_get(m) & (u8)CVM_OM_FLAG_WEAK) != 0;
+}
+
+CVM_INLINE bool object_meta_has_finalizer(ObjectMeta const* m) {
+    return (cvm_mark_byte_get(m) & (u8)CVM_OM_FLAG_FINALIZER) != 0;
+}
+
+/*
+ * State transitions keep the flags.
+ *
+ * A read and a write of the same byte, where it used to be a bare store: the
+ * flags are set after an object exists and have to survive every state the
+ * object goes through afterwards. The read is of a byte the caller has just
+ * looked at in every case that is on a hot path, so it is a load from a line
+ * already in flight rather than a new one.
+ */
+CVM_INLINE void object_meta_set_state(ObjectMeta* m, ObjectFlag state) {
+    u8 flags = (u8)(cvm_mark_byte_get(m) & CVM_OM_FLAG_MASK);
+    cvm_mark_byte_set(m, (u8)(flags | (u8)state));
 }
 
 CVM_INLINE void object_meta_set_free(ObjectMeta* m) {
@@ -188,11 +230,31 @@ CVM_INLINE void object_meta_set_placeholder(ObjectMeta* m) {
 }
 
 CVM_INLINE void object_meta_set_allocated(ObjectMeta* m) {
-    cvm_mark_byte_set(m, (u8)CVM_OM_ALLOCATED);
+    object_meta_set_state(m, CVM_OM_ALLOCATED);
 }
 
 CVM_INLINE void object_meta_set_marked(ObjectMeta* m) {
-    cvm_mark_byte_set(m, (u8)CVM_OM_MARKED);
+    object_meta_set_state(m, CVM_OM_MARKED);
+}
+
+/*
+ * Mark an object weak, or record that it owns a resource. Both are set on an
+ * object that already exists, from the mutator, and both are read by the
+ * collector through the same byte.
+ *
+ * Relaxed: the byte is only ever read while the world is stopped, and the
+ * mutator that sets a flag is not running then. Atomic because the collector's
+ * reads of this byte are, and mixing the two kinds of access to one address is
+ * a data race whichever way round it is.
+ */
+CVM_INLINE void object_meta_set_weak(ObjectMeta* m) {
+    atomic_fetch_or_explicit((_Atomic u8*)m, (u8)CVM_OM_FLAG_WEAK,
+                             memory_order_relaxed);
+}
+
+CVM_INLINE void object_meta_set_has_finalizer(ObjectMeta* m) {
+    atomic_fetch_or_explicit((_Atomic u8*)m, (u8)CVM_OM_FLAG_FINALIZER,
+                             memory_order_relaxed);
 }
 
 /*

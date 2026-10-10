@@ -19,6 +19,7 @@ import path from "node:path";
 
 import { run, runOrDie, which } from "../exec.mjs";
 import { mkdirp, collect } from "../util.mjs";
+import { freestandingInclude } from "../toolchain.mjs";
 import { BENCH_OPT, bdwgcIncludeDirs, bdwgcLibrary, tgcIncludeDir, tgcObject } from "./thirdparty.mjs";
 
 const BENCH_BUILD = "bench/build";
@@ -76,6 +77,52 @@ export const BACKENDS = [
  * twenty-nine objects on every run would make the benchmark unusable, and
  * getting the staleness rule wrong would make it lie.
  */
+/**
+ * The flags the runtime is compiled with here.
+ *
+ * This used to be `-std=c11 -O1 -g0 -DNDEBUG` and nothing else, and that was
+ * measuring a collector nobody runs. Two of the four differences changed the
+ * numbers by more than the differences being measured:
+ *
+ *   - freestanding. vm/ is compiled -ffreestanding -nostdinc in the library
+ *     and in the tests, and it matters: under -ffreestanding the compiler
+ *     will not turn a clearing loop into a call to memset, so the loop stays
+ *     a loop. The bench got the call, the shipped build got the loop, and the
+ *     medium-object workload was 6x slower in the shipped one -- a factor the
+ *     published table showed as a row we won.
+ *   - trap-based safepoints. flags.mjs enables them for the debug and release
+ *     configurations and not under a sanitizer; the bench never enabled them,
+ *     so every row measured the fallback poll.
+ *
+ * -O1 stays, because BENCH.md 2.1 pins one optimization level for every
+ * backend including the runtime, and the other three are not optimization
+ * levels: they are how the collector is built and which mechanism it uses.
+ */
+function runtimeFlags(root, toolchain, { freestanding }) {
+    const common = [
+        "-std=c11",
+        "-fno-common",
+        "-DCVM_SAFEPOINT_TRAPS",
+        BENCH_OPT,
+        "-g0",
+        "-DNDEBUG",
+    ];
+    if (!freestanding) return common;
+
+    /*
+     * vm/ only. rt/ is the hosted layer -- it is where the syscalls and the
+     * libc calls live -- and compiling it -nostdinc is not a stricter build,
+     * it is a broken one: the first include of <stdlib.h> fails.
+     */
+    return [
+        ...common,
+        "-ffreestanding",
+        "-nostdinc",
+        "-fno-stack-protector",
+        ...freestandingInclude(toolchain.cc, toolchain.isClang),
+    ];
+}
+
 export function buildRuntime({ root, toolchain, ui, verbose }) {
     const objDir = path.join(root, OBJ_DIR);
     mkdirp(objDir);
@@ -118,12 +165,32 @@ export function buildRuntime({ root, toolchain, ui, verbose }) {
     const objects = [];
     let built = 0;
 
+    /*
+     * The flags are part of whether an object is current.
+     *
+     * They were not, and changing them rebuilt nothing: the freshness check
+     * compared an object against its source and the newest header, so a
+     * runtime built with one set of flags stayed in place after the flags
+     * changed. That is the same shape of mistake the note above describes
+     * costing an hour, so the flags are written down and compared.
+     */
+    const hostedFlags = [...runtimeFlags(root, toolchain, { freestanding: false }), ...includes];
+    const freeFlags = [...runtimeFlags(root, toolchain, { freestanding: true }), ...includes];
+    const flagsForSource = (src) =>
+        src.includes(`${path.sep}vm${path.sep}`) ? freeFlags : hostedFlags;
+
+    const stampPath = path.join(objDir, ".flags");
+    const stamp = [...hostedFlags, "--", ...freeFlags].join(" ");
+    const flagsMatch =
+        fs.existsSync(stampPath) && fs.readFileSync(stampPath, "utf8") === stamp;
+
     for (const src of [...sources, ...asm]) {
         const rel = path.relative(root, src);
         const obj = path.join(objDir, rel.replace(/[\\/]/g, "_") + ".o");
         objects.push(obj);
 
         const fresh =
+            flagsMatch &&
             fs.existsSync(obj) &&
             fs.statSync(obj).mtimeMs >= fs.statSync(src).mtimeMs &&
             fs.statSync(obj).mtimeMs >= newestHeader;
@@ -131,22 +198,13 @@ export function buildRuntime({ root, toolchain, ui, verbose }) {
 
         runOrDie(
             toolchain.cc,
-            [
-                "-std=c11",
-                BENCH_OPT,
-                "-g0",
-                "-DNDEBUG",
-                ...includes,
-                "-c",
-                rel,
-                "-o",
-                path.relative(root, obj),
-            ],
+            [...flagsForSource(src), "-c", rel, "-o", path.relative(root, obj)],
             { cwd: root, verbose, ui, what: `cvm runtime: ${rel}` },
         );
         built++;
     }
 
+    fs.writeFileSync(stampPath, stamp);
     ui.log(`cvm runtime: ${objects.length} object(s), ${built} rebuilt (${BENCH_OPT})`);
     return objects;
 }

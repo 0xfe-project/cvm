@@ -148,9 +148,17 @@ static void prepare_for_sweep(CvmHeap* heap) {
          * parked thread allocating into a block the sweep is about to reuse.
          */
         cvm_allocator_clear(&node->allocator, &node->ctx);
-        cvm_large_clear(&node->large_allocator);
     }
     cvm_threads_unlock_read();
+
+    /*
+     * The chunk free lists are the heap's, so they are dropped once, not once
+     * per thread -- and dropping them per thread would be wrong as well as
+     * pointless: a chunk filed by a GC worker's sweep belongs to a list every
+     * mutator reads, and clearing it from each attach would throw away
+     * whatever the previous one had filed.
+     */
+    cvm_large_clear(heap);
 
 #if defined(CVM_DEBUG)
     /*

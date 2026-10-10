@@ -4,9 +4,26 @@
  * The large-object allocator, ported from refs/commix/LargeAllocator.{h,c}.
  *
  * Objects at least CVM_LARGE_OBJECT_MIN_SIZE (8 KiB) are not line-managed.
- * They are cut from whole free blocks in 8 KiB multiples, and the pieces
- * are reused through segregated free lists rather than being returned to
- * the block allocator and re-cut every time.
+ * Up to one block they are cut from whole free blocks in 8 KiB multiples,
+ * and the pieces are reused through segregated free lists rather than being
+ * returned to the block allocator and re-cut every time. Above one block
+ * they are a run of whole blocks -- a superblock, asked for as one from the
+ * block allocator -- because a chunk is defined by fitting inside a block.
+ *
+ * ---------------------------------------------------------------------
+ * Objects larger than a block
+ * ---------------------------------------------------------------------
+ *
+ * The superblock is the shape the rest of the collector already reads for a
+ * large object: the marker skips line marking for a block marked as a
+ * superblock head or tail, and cvm_sweep_superblock walks the head slot and
+ * the last block, which is where an object that bodies the front blocks and
+ * ends in the last one is described. A spanning object is one object per
+ * superblock: the tail of its last block is not cut into chunks for other
+ * objects, so up to a block per spanning object is left inside the run and
+ * reclaimed with it. Filling that tail is what the chunk path in
+ * cvm_sweep_superblock is written for and is not implemented, which is why
+ * the sweep's clears there have no workload that reaches them.
  *
  * ---------------------------------------------------------------------
  * Why chunks rather than blocks
@@ -60,18 +77,13 @@
  *
  * `size` must be read before the chunk is allocated, because allocation
  * overwrites this header with the object header.
+ *
+ * CvmChunk and CvmFreeList are declared in gc/heap.h, because the free lists
+ * belong to the heap rather than to a mutator: a chunk comes back from
+ * whichever thread swept the block it lived in, and a GC worker sweeping has
+ * no mutator to hand it to.
  */
-typedef struct CvmChunk {
-    usize size;            /* total bytes in this chunk */
-    struct CvmChunk* next; /* next free chunk of the same size class */
-} CvmChunk;
-
-typedef struct CvmFreeList {
-    _Atomic(usize) head; /* CvmChunk*, as an integer so zero means empty */
-} CvmFreeList;
-
 typedef struct CvmLargeAllocator {
-    CvmFreeList free_lists[CVM_LARGE_FREE_LIST_COUNT];
     Bytemap* bytemap;
     CvmBlockAllocator* block_alloc;
     CvmHeap* heap;
@@ -80,23 +92,28 @@ typedef struct CvmLargeAllocator {
 void cvm_large_init(CvmLargeAllocator* large, CvmBlockAllocator* blocks,
                     Bytemap* bytemap, CvmHeap* heap);
 
-/* Drop every free list. Called when a collection starts. */
-void cvm_large_clear(CvmLargeAllocator* large);
+/* Drop every free list on the heap. Called when a collection starts. */
+void cvm_large_clear(CvmHeap* heap);
 
 /*
- * Return a chunk to the free lists.
+ * Return a chunk to the heap's free lists.
  *
  * `total_size` is the chunk's size in bytes, which the caller knows from
- * the block metadata. It must be a multiple of the large-object
- * granularity and smaller than a block; a whole block goes back to the
- * block allocator instead.
+ * the block metadata. It must be a multiple of the large-object granularity
+ * and smaller than a block; a whole block goes back to the block allocator
+ * instead.
+ *
+ * Takes the heap rather than an allocator because the caller may be a GC
+ * worker, which has no allocator of its own. Passing one anyway -- or passing
+ * NULL, which is what the sweep used to do -- is how a worker sweeping a
+ * block with a dead chunk in it came to dereference a null allocator.
  */
-void cvm_large_add_chunk(CvmLargeAllocator* large, CvmChunk* chunk, usize total_size);
+void cvm_large_add_chunk(CvmHeap* heap, CvmChunk* chunk, usize total_size);
 
 /* Bytes currently available across the free lists. */
-usize cvm_large_free_bytes(CvmLargeAllocator const* large);
+usize cvm_large_free_bytes(CvmHeap const* heap);
 
 /* Chunks currently on the free lists. */
-u32 cvm_large_free_chunk_count(CvmLargeAllocator const* large);
+u32 cvm_large_free_chunk_count(CvmHeap const* heap);
 
 #endif /* CVM_GC_LARGE_H */

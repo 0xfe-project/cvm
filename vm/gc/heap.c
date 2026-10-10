@@ -168,6 +168,15 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     heap->pool = NULL;
     heap->block_alloc = NULL;
 
+    /*
+     * The chunk free lists are the heap's, and they start empty. Set up here
+     * rather than by a thread's attach, because the threads that file chunks
+     * are the sweepers -- and a GC worker sweeping has no attach of its own.
+     */
+    for (u32 i = 0; i < CVM_LARGE_FREE_LIST_COUNT; i++) {
+        atomic_store(&heap->large_free_lists[i].head, 0);
+    }
+
     if (min_size < CVM_MIN_HEAP_SIZE) {
         min_size = CVM_MIN_HEAP_SIZE;
     }
@@ -184,6 +193,23 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     u32 initial_blocks = blocks_for_min(min_size);
     if (initial_blocks == 0) {
         initial_blocks = 1;
+    }
+
+    /*
+     * A heap cannot start larger than its own maximum, and the two counts
+     * round in opposite directions on purpose -- down for the maximum, so the
+     * reservation does not exceed what was asked for, and up for the initial
+     * count, so the heap does not start below the requested minimum. A block
+     * is 34956 bytes including its metadata, so a heap size that is not a
+     * multiple of that gets different answers from the two.
+     *
+     * For min_size == max_size the answers differ by one block, and asking
+     * for one block more than the maximum failed the whole init: a fixed-size
+     * heap -- a reasonable thing to ask for, and the first thing a
+     * microbenchmark asks for -- was rejected with "heap reservation failed".
+     */
+    if (initial_blocks > max_blocks) {
+        initial_blocks = max_blocks;
     }
     if (max_blocks <= 1) {
         /* A one-block heap cannot hold a superblock, so nothing above the

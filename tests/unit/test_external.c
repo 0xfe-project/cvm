@@ -123,7 +123,8 @@ TEST a_new_external_object_holds_its_pointer(void) {
 
     ASSERT(cvm_external_ptr(ext) == &resource);
     /* no finalizer, so no flag: there is nothing to release */
-    ASSERT((cvm_header_of(ext)->flags & CVM_GC_HAS_FINALIZER) == 0);
+    ASSERT(!object_meta_has_finalizer(
+        bytemap_get_const(heap()->bytemap, (u8 const*)cvm_header_of(ext))));
 
     fixture_leave();
     PASS();
@@ -149,7 +150,8 @@ TEST a_finalizer_runs_when_its_object_dies(void) {
 
     int resource = 7;
     void* ext = cvm_external_new(&resource, counting_finalizer);
-    ASSERT((cvm_header_of(ext)->flags & CVM_GC_HAS_FINALIZER) != 0);
+    ASSERT(object_meta_has_finalizer(
+        bytemap_get_const(heap()->bytemap, (u8 const*)cvm_header_of(ext))));
 
     /* nothing points at it, so it dies */
     collect();
@@ -226,7 +228,14 @@ TEST the_finalizer_thread_runs_them_on_its_own(void) {
     collect();
 
     /* Wait for the thread rather than draining on this one, bounded. */
-    u64 deadline = rt_time_nanos() + 5000000000ull;
+    /*
+     * Generous on purpose: the finalizer thread runs when the scheduler lets
+     * it, and what this test is about is whether the finalizer runs at all,
+     * not how quickly. A tight deadline here fails under load for a reason
+     * that has nothing to do with finalizers. See the note in
+     * test_safepoint.c on why the suite's waits are what they are.
+     */
+    u64 deadline = rt_time_nanos() + 20000000000ull;
     while (cvm_finalizer_run_count() < before + N && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }

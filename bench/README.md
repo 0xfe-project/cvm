@@ -28,29 +28,55 @@ collector choose, so it measures the policy.
 
 | scenario | cvm | go | bdwgc | tgc |
 |---|---|---|---|---|
-| churn-unary | 24.97 | 28.67 | 27.59 | 623.70 |
-| tree-keep | 49.10 | 48.25 | 51.03 | 4033.95 |
-| mixed-sizes | 46.90 | 81.62 | — | 220.71 |
-| flat-fp | 13.90 | 11.82 | 13.62 | 13.66 |
+| churn-unary | 15.29 | 33.69 | 32.13 | 596.27 |
+| tree-keep | 38.22 | 52.80 | 53.14 | 3735.22 |
+| mixed-sizes | 42.15 | 100.00 | — | 226.75 |
+| flat-fp | 12.94 | 13.83 | 13.89 | 13.90 |
 
 **auto**
 
 | scenario | cvm | go | bdwgc | tgc |
 |---|---|---|---|---|
-| tree-keep | 66.86 | 54.94 | 55.01 | 1806.66 |
-| mixed-sizes | 29.34 | 75.74 | 84.76 | 227.56 |
-| flat-fp | 13.65 | 11.78 | 13.19 | 13.20 |
-| read-heavy | 28.54 | 13.38 | 19.32 | — |
-| write-heavy | 0.31 | 1.02 | 0.52 | 5.14 |
-| growth-1.5 | 2.12 | 3.06 | 2.32 | 41.34 |
+| tree-keep | 41.70 | 56.63 | 55.51 | 1783.81 |
+| mixed-sizes | 14.88 | 74.67 | 87.46 | 223.13 |
+| flat-fp | 12.96 | 12.84 | 13.02 | 13.23 |
+| read-heavy | 26.37 | 14.45 | 19.66 | — |
+| write-heavy | 0.16 | 1.01 | 0.63 | 5.13 |
+| growth-1.5 | 0.62 | 4.16 | 3.04 | 35.22 |
 
 The full comparison is in `results/`, and the figures below are generated from
 it by `pnpm run bench:svg`.
 
-## The figures
+**The cvm column is the cvm library, compiled the way it is shipped.** It was
+not, until it was: the runtime was built hosted at -O1, so it got the
+compiler's `memset` for loops the library keeps as loops under
+`-ffreestanding`, and it polled for safepoints where the library faults on a
+protected page. Both changed the numbers by more than the differences they
+were measuring -- 6x on the medium-object workload, 9% on tree-keep's
+allocator -- and both were in the flattering direction. The rows before this
+one are therefore a different collector and are not comparable with it; the
+commit that changed the flags says which rows moved and by how much.
 
-Each is one experimental condition. They are generated, so they cannot drift
-from the data.
+What the two tables say now, and it is not one story:
+
+**cvm is the fastest of the four wherever allocating is the work.** On
+churn-unary it beats the next best by 2.1x; on tree-keep's alloc-only row by
+39%; on the keeping rows of auto (tree-keep by 25%, mixed-sizes by 5x, the
+growing tree by 4.9x). On flat-fp all four are within 2% of each other -- that
+row is memory-bandwidth-bound and nobody's collector is the cost.
+
+**cvm is the slowest of the three that can run read-heavy**, and its stop-the-world
+window is the longest of the three: 26.37 ms against 14.45 (go) and 19.66
+(bdwgc); pauses 4.7 ms against 0.035 ms and 1.5 ms. Go's advantage is
+concurrency -- its marker runs alongside the mutator, so its
+stop-the-world window is a fraction of a millisecond no matter the heap -- and
+bdwgc's is that it walks a C call stack it can keep small. cvm's window is
+whole-heap marking under a stop, and this row is what that costs.
+
+**tgc cannot run read-heavy.** Its recursive marker overflows the stack on a
+deep chain, which is exactly the workload this row is, so it has no auto-mode
+number at all. The figures below say the same, with each run's spread drawn as
+the line around its median.
 
 ![Wall time, alloc-only](wall-alloc.svg)
 

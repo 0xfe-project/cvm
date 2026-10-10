@@ -37,7 +37,7 @@ void bench_roots_keep(void *p);
 
 #include "cvm/gc.h"
 
-typedef CvmGcFrame bench_frame_t;
+typedef CvmFrameHandle bench_frame_t;
 
 #define BENCH_FRAME_DECL(name, n)                                                      \
     opaque_mut name##_roots[(n)];                                                      \

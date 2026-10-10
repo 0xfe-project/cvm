@@ -43,7 +43,8 @@ opaque_mut cvm_external_new(opaque_mut c_ptr, CvmFinalizerFn finalizer) {
 
     if (finalizer != NULL) {
         CvmGcHeader* header = cvm_header_of_mut(ext);
-        header->flags |= CVM_GC_HAS_FINALIZER;
+        object_meta_set_has_finalizer(
+            bytemap_get(cvm_world()->heap.bytemap, (u8 const*)header));
 
         /*
          * Flag the block, so the sweeper knows to look for finalizers in

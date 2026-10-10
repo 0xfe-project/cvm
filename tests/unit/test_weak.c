@@ -116,7 +116,8 @@ TEST a_new_weak_ref_carries_the_flag(void) {
 
     ASSERT(cvm_weak_ref_target(weak) == leaf);
     /* the flag is what makes the marker record rather than trace it */
-    ASSERT((cvm_header_of(weak)->flags & CVM_GC_WEAK_REF) != 0);
+    ASSERT(object_meta_is_weak(
+        bytemap_get_const(heap()->bytemap, (u8 const*)cvm_header_of(weak))));
 
     fixture_leave();
     PASS();

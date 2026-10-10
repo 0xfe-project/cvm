@@ -30,6 +30,30 @@
 #include "safepoint.h"
 
 /*
+ * How long a test waits for another thread to do something that should
+ * happen in microseconds.
+ *
+ * Two seconds, and the reason that is not enough is the point of the
+ * constant: every wait below is "wait for the event, but give up and fail if
+ * it does not come", and under load the event can be late by far more than
+ * its own cost. A machine running the debug, release and two sanitizer
+ * suites back to back has every core busy with GC workers left over from the
+ * previous binary, and a 2s budget that the thread misses turns a passing
+ * test into a failing one.
+ *
+ * That is what makes a suite worth ignoring, and it happened: `pnpm run ci`
+ * went red three times in six runs, each time in a different step, each time
+ * green on re-run -- and a red run nobody investigates is worse than none.
+ *
+ * A longer deadline cannot turn a passing test into a failing one, because
+ * the loop exits on the event and not on the clock. What it costs is time to
+ * report a genuine hang, and the runner's own per-binary timeout is 60s. Ten
+ * seconds is orders of magnitude above the expected cost and still leaves
+ * room for several of these in one binary.
+ */
+#define SAFEPOINT_WAIT_NANOS 10000000000ull
+
+/*
  * Start a test from a world that is definitely running.
  *
  * A test that fails between acquire and release leaves the stop flag set,
@@ -133,7 +157,7 @@ TEST acquire_waits_for_a_polling_thread(void) {
     ASSERT(rt_thread_create(&poller, polls_until_stopped, &arg));
 
     /* wait for the poller to register, bounded */
-    u64 deadline = rt_time_nanos() + 2000000000ull;
+    u64 deadline = rt_time_nanos() + SAFEPOINT_WAIT_NANOS;
     while (!atomic_load(&arg.attached) && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }
@@ -165,7 +189,7 @@ TEST acquire_waits_for_a_polling_thread(void) {
     cvm_safepoint_release();
 
     /* and it resumes */
-    deadline = rt_time_nanos() + 2000000000ull;
+    deadline = rt_time_nanos() + SAFEPOINT_WAIT_NANOS;
     while (atomic_load(&arg.polls) == polls_before && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }
@@ -218,7 +242,7 @@ TEST unmanaged_thread_is_not_waited_for(void) {
     RtThread foreign;
     ASSERT(rt_thread_create(&foreign, sits_in_foreign_code, &arg));
 
-    u64 deadline = rt_time_nanos() + 2000000000ull;
+    u64 deadline = rt_time_nanos() + SAFEPOINT_WAIT_NANOS;
     while (!atomic_load(&arg.ready) && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }
@@ -286,7 +310,7 @@ static opaque_mut sits_in_nested_foreign_code(opaque_mut arg) {
      * thread leaves and parks, the collection finishes, and the assertion
      * on the diagnostic counter is what fails.
      */
-    u64 deadline = rt_time_nanos() + 2000000000ull;
+    u64 deadline = rt_time_nanos() + SAFEPOINT_WAIT_NANOS;
     while (!atomic_load(&a->go) && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }
@@ -306,7 +330,7 @@ TEST a_nested_unmanaged_thread_is_not_waited_for(void) {
     RtThread foreign;
     ASSERT(rt_thread_create(&foreign, sits_in_nested_foreign_code, &arg));
 
-    u64 deadline = rt_time_nanos() + 2000000000ull;
+    u64 deadline = rt_time_nanos() + SAFEPOINT_WAIT_NANOS;
     while (!atomic_load(&arg.ready) && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }
@@ -377,7 +401,7 @@ TEST stuck_thread_is_reported(void) {
      * should be read as coming from here rather than chased as a bug.
      */
     fprintf(stderr, "test_safepoint: expecting a stuck-thread warning below\n");
-    u64 deadline = rt_time_nanos() + 5000000000ull;
+    u64 deadline = rt_time_nanos() + SAFEPOINT_WAIT_NANOS;
     while (cvm_safepoint_stuck_reports() == reports_before &&
            rt_time_nanos() < deadline) {
         spin_without_polling(1000000ull); /* 1ms at a time */
@@ -446,7 +470,7 @@ TEST second_acquire_reports_false_while_held(void) {
     RtThread second;
     ASSERT(rt_thread_create(&second, tries_to_collect, &arg));
 
-    u64 deadline = rt_time_nanos() + 2000000000ull;
+    u64 deadline = rt_time_nanos() + SAFEPOINT_WAIT_NANOS;
     while (!atomic_load(&arg.ready) && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }
@@ -465,7 +489,7 @@ TEST second_acquire_reports_false_while_held(void) {
      */
     atomic_store(&arg.go, true);
 
-    u64 wait_deadline = rt_time_nanos() + 2000000000ull;
+    u64 wait_deadline = rt_time_nanos() + SAFEPOINT_WAIT_NANOS;
     while (cvm_safepoint_acquire_waiters() == 0 && rt_time_nanos() < wait_deadline) {
         rt_thread_yield();
     }
@@ -473,7 +497,7 @@ TEST second_acquire_reports_false_while_held(void) {
 
     cvm_safepoint_release();
 
-    deadline = rt_time_nanos() + 2000000000ull;
+    deadline = rt_time_nanos() + SAFEPOINT_WAIT_NANOS;
     while (!atomic_load(&arg.returned) && rt_time_nanos() < deadline) {
         rt_thread_yield();
     }

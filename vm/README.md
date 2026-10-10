@@ -18,10 +18,14 @@ block with surviving lines goes back to the mutator pool with a free-line
 list describing its holes.
 
 **Objects.** An object is a header — a type descriptor pointer and a flags
-word — followed by the payload that generated code sees. Objects never span
-blocks. Allocation is a bump pointer into the current block, which is three
-instructions; a block with holes hands out its free lines before it hands out
-fresh space.
+word — followed by the payload that generated code sees. A line-allocated
+object never spans blocks: the inline path's limit is one line, and the
+slow path keeps a medium object inside one block. An object at or above the
+large-object threshold does span them when it has to, as a run of whole
+blocks that the block allocator hands out as a superblock — see
+`gc/large.h`. Allocation is a bump pointer into the current block, which is
+three instructions; a block with holes hands out its free lines before it
+hands out fresh space.
 
 **Metadata is in side tables, not in objects.** One byte per 16 payload bytes
 of bytemap says what each slot is: free, a placeholder for the interior of a

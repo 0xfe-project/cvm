@@ -154,7 +154,25 @@ typedef struct CvmVmStats {
      */
     u64 pause_max_ns;
 
-    /* Live objects. Counted on demand: see the note in gc/collect.h. */
+    /*
+     * Live objects.
+     *
+     * Counted on demand rather than tracked, because a running count would
+     * have to be updated on the allocation fast path -- the one place that
+     * has to stay a few instructions -- and on the sweep, which is the only
+     * thing that knows an object died.
+     *
+     * Counted means counted: the call walks one metadata byte per sixteen
+     * bytes of the heap's *reservation*, not of its live set. A program with
+     * a 512 MiB maximum pays 32 million byte reads per call, and the walk is
+     * the dominant cost of cvm_vm_stats by a wide margin -- 57% of the
+     * benchmark process's samples, measured -- even though nothing in it is
+     * slow.
+     *
+     * So: a call per collection is nothing, a call per allocation is the
+     * program, and a call from a timer is a decision about that reservation
+     * size. The rest of the struct is a handful of loads.
+     */
     u64 objects_live;
 
     /* Blocks the heap has brought into use, and how many of those the

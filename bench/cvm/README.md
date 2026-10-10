@@ -35,7 +35,7 @@ reads them during marking and a stack descriptor would be dangling by then.
 | `allocations` | this backend's own count | cvm has no allocation counter of its own, by design — one would have to sit on the bump fast path. The corroboration that work happened is `live_objects` and the heap size |
 | `collections` | `cvm_vm_stats()` | |
 | `pause_max_ns` | the collector's own counter | mark + nullify + sweep preparation. Not the sweep: that continues after the world resumes |
-| `live_objects` | `cvm_vm_stats()` | counted on demand by walking the bytemap, not tracked |
+| `live_objects` | `cvm_vm_stats()` | counted on demand by walking the bytemap, not tracked; the walk is over the reservation, so it is the whole cost of the call and the harness makes it per repetition, outside the timed window |
 | `heap_bytes` | `cvm_vm_stats()` | the heap's size, not the live set |
 
 ## Modes

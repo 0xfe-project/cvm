@@ -145,12 +145,36 @@ opaque_mut rt_mem_realloc(opaque_mut p, usize bytes);
  * (every POSIX), reserve already gives usable memory and commit is a
  * no-op; on Windows the two are genuinely separate, which is why the
  * split exists in the ABI rather than being folded into one call.
+ *
+ * A reservation comes back zeroed, and the collector depends on that
+ * rather than merely preferring it: the payload of a fresh object is zeroed
+ * because the memory it is cut from was zeroed when the collector acquired
+ * it, not because allocation clears it. A port whose rt_mem_reserve cannot
+ * promise this -- a bare-metal target with no zeroing allocator, say -- has
+ * to clear the range itself, here, or the object contract is a lie.
  */
 opaque_mut rt_mem_reserve(usize bytes);
 bool rt_mem_commit(opaque_mut base, usize bytes);
 
 /* Return the whole reservation. The size must match the reservation. */
 void rt_mem_release(opaque_mut base, usize bytes);
+
+/*
+ * Set a range of bytes to zero.
+ *
+ * This exists because vm/ is freestanding, and freestanding is what stops
+ * the compiler from doing this for us: a clearing loop in a -ffreestanding
+ * translation unit is left as a loop, because the compiler may not assume a
+ * memset exists to call. The library's own loop is the one that knows how to
+ * clear 32 KiB with the widest stores the target has; ours is the one that
+ * clears a byte at a time. Measured, that difference was 6x on the
+ * medium-object workload, which is enough to be the whole run.
+ *
+ * So the runtime names the routine rather than hoping the compiler emits
+ * one. The clearing itself is the collector's business; how to clear quickly
+ * is the platform's, and rt is the platform.
+ */
+void rt_mem_zero(opaque_mut p, usize bytes);
 
 /*
  * Granularity of the smallest independently usable mapping. Used to size
