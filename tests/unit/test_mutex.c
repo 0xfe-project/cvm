@@ -82,6 +82,14 @@ typedef struct HoldArg {
     CvmMutex* m;
     bool raw_waiter;
 
+    /*
+     * The holder does not allocate, so no collection can happen while it
+     * holds the lock. Set by a test that must not have one -- see the
+     * raw-wait test, where a collection in the window is a deadlock by
+     * construction rather than a race.
+     */
+    bool quiet;
+
     _Atomic bool held;
     _Atomic bool release;
     _Atomic u32 allocations;
@@ -104,6 +112,15 @@ static opaque_mut holder_worker(opaque_mut raw) {
     atomic_store(&arg->held, true);
 
     while (!atomic_load(&arg->release)) {
+        /*
+         * Allocating is what makes this a holder the collector can park: it
+         * reaches a safepoint on its own. A test that must not have a
+         * collection happen while the lock is held turns that off.
+         */
+        if (arg->quiet) {
+            rt_thread_yield();
+            continue;
+        }
         void* p = cvm_alloc(&leaf_desc);
         (void)p;
         atomic_fetch_add(&arg->allocations, 1);
@@ -229,6 +246,7 @@ TEST a_raw_wait_stays_visible_to_the_collector(void) {
     memset(&arg, 0, sizeof(arg));
     arg.m = &m;
     arg.raw_waiter = true;
+    arg.quiet = true;
 
     RtThread holder, waiter;
     ASSERT(start_holder_and_waiter(&arg, &holder, &waiter));
@@ -240,7 +258,22 @@ TEST a_raw_wait_stays_visible_to_the_collector(void) {
      */
     for (u32 i = 0; i < 20000u && !atomic_load(&arg.waiter_got); i++) {
         ASSERT_EQ_FMT(0u, unmanaged_threads(), "%u");
-        (void)cvm_alloc(&leaf_desc);
+        /*
+         * Deliberately not allocating, and the holder is quiet for the same
+         * reason: this test's window must not be able to contain a collection.
+         *
+         * What it observes is that the raw form says nothing to the
+         * collector, and that is a fact about the lock rather than about a
+         * collection. A collection in this window is instead the deadlock the
+         * other three tests are about -- the collector parks the holder, which
+         * holds the lock, and this waiter, being managed, never reaches a
+         * safepoint. That is not a race in the test, it is the outcome by
+         * construction, and it needs only the holder to cross the collection
+         * threshold. Allocating here made the test's own outcome depend on how
+         * many allocations fit in the window, which is why it passed on a fast
+         * machine and hung on CI.
+         */
+        rt_thread_yield();
     }
     ASSERT(!atomic_load(&arg.waiter_got));
 
