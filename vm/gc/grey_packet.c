@@ -100,6 +100,8 @@ u32 cvm_grey_list_size(CvmGreyList const* list) {
         return 0;
     }
 
+    /* Raw: the collector's own threads, and a packet list is pushed to from the
+     * marker and the barrier alike. */
     rt_mutex_lock(&mutable_list->lock);
     CvmGreyPacketRef ref;
     ref.atom = mutable_list->head;
@@ -112,6 +114,8 @@ void cvm_grey_list_push(CvmGreyList* list, CvmGreyPacket* packets_start,
                         CvmGreyPacket* packet) {
     u32 index = packet_index_of(packets_start, packet);
 
+    /* Raw: the collector's own threads, and a packet list is pushed to from the
+     * marker and the barrier alike. */
     rt_mutex_lock(&list->lock);
 
     CvmGreyPacketRef head;
@@ -144,6 +148,8 @@ void cvm_grey_list_push_all(CvmGreyList* list, CvmGreyPacket* packets_start,
     u32 index = packet_index_of(packets_start, first);
     CvmGreyPacket* last = first + (count - 1);
 
+    /* Raw: the collector's own threads, and a packet list is pushed to from the
+     * marker and the barrier alike. */
     rt_mutex_lock(&list->lock);
 
     CvmGreyPacketRef head;
@@ -170,6 +176,8 @@ void cvm_grey_list_push_all(CvmGreyList* list, CvmGreyPacket* packets_start,
 }
 
 CvmGreyPacket* cvm_grey_list_pop(CvmGreyList* list, CvmGreyPacket* packets_start) {
+    /* Raw: the collector's own threads, and a packet list is pushed to from the
+     * marker and the barrier alike. */
     rt_mutex_lock(&list->lock);
 
     CvmGreyPacketRef head;

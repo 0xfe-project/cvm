@@ -23,6 +23,7 @@
 
 #include "vendor/greatest.h"
 
+#include <inttypes.h>
 #include <stddef.h>
 #include <stdio.h>
 
@@ -179,7 +180,7 @@ TEST a_reachable_object_survives(void) {
 
     /* TP: still live, and still holding what was written into it */
     ASSERT(is_live(leaf));
-    ASSERT_EQ_FMT(canary_for(leaf), ((Leaf*)leaf)->canary, "%llu");
+    ASSERT_EQ_FMT(canary_for(leaf), ((Leaf*)leaf)->canary, "%" PRIu64);
 
     FRAME_END();
     fixture_leave();
@@ -254,7 +255,7 @@ TEST a_chain_survives_a_collection(void) {
 
     for (int i = 0; i < N; i++) {
         ASSERT(is_live(nodes[i]));
-        ASSERT_EQ_FMT(canary_for(nodes[i]), nodes[i]->canary, "%llu");
+        ASSERT_EQ_FMT(canary_for(nodes[i]), nodes[i]->canary, "%" PRIu64);
     }
 
     FRAME_END();
@@ -314,7 +315,7 @@ TEST repeated_collections_are_stable(void) {
         collect();
 
         ASSERT(is_live(keeper));
-        ASSERT_EQ_FMT(canary_for(keeper), ((Leaf*)keeper)->canary, "%llu");
+        ASSERT_EQ_FMT(canary_for(keeper), ((Leaf*)keeper)->canary, "%" PRIu64);
     }
 
     FRAME_END();
@@ -715,7 +716,7 @@ TEST allocation_still_works_after_a_collection(void) {
         void* p = cvm_alloc(&leaf_desc);
         ASSERT(p != NULL);
         stamp(p, canary_for(p));
-        ASSERT_EQ_FMT(canary_for(p), ((Leaf*)p)->canary, "%llu");
+        ASSERT_EQ_FMT(canary_for(p), ((Leaf*)p)->canary, "%" PRIu64);
     }
 
     ASSERT(is_live(keeper));
@@ -744,7 +745,8 @@ TEST surviving_objects_keep_their_identity_across_collections(void) {
         collect();
         for (int i = 0; i < N; i++) {
             ASSERT(f_roots[i] == objects[i]);
-            ASSERT_EQ_FMT(canary_for(objects[i]), ((Leaf*)objects[i])->canary, "%llu");
+            ASSERT_EQ_FMT(canary_for(objects[i]), ((Leaf*)objects[i])->canary,
+                          "%" PRIu64);
         }
     }
 

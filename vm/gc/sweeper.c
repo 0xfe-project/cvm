@@ -836,6 +836,7 @@ void cvm_sweep_lazy_coalesce(CvmHeap* heap) {
      * twice and the second finds blocks that are already free. See the note
      * on sweep.coalesce_lock.
      */
+    /* Raw: the collector's own thread. */
     rt_mutex_lock(&heap->sweep.coalesce_lock);
     {
         CvmThreadNode* holder = cvm_thread_node();

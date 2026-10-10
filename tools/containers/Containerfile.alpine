@@ -1,0 +1,20 @@
+# The musl probe: does the port hold on a libc that is not glibc?
+#
+# Alpine's clang is not the same build as Debian's, and musl's headers expose
+# a different amount of the BSD and GNU surface under `-std=c11`. A port that
+# works only because glibc happens to declare something is not a port, it is a
+# coincidence with one libc -- and the coincidence is exactly what
+# `rt/rt_jump.h` turned out to be: `sigjmp_buf` is unconditional on macOS,
+# behind `_GNU_SOURCE` on glibc, and simply absent on musl.
+#
+#   podman build -t cvm-alpine -f tools/containers/Containerfile.alpine tools/containers
+#
+# Native on an arm64 host, so it costs about what the Debian container does.
+FROM alpine:3.21
+
+RUN apk add --no-cache clang lld ccache curl xz git make nodejs
+
+ENV CC=clang
+ENV CCACHE_DIR=/ccache
+
+WORKDIR /src

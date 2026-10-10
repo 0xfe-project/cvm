@@ -13,6 +13,7 @@
 
 #include "vendor/greatest.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 
 #include "base/types.h"
@@ -104,7 +105,7 @@ TEST a_zero_capacity_array_is_still_usable(void) {
     a = cvm_ref_array_push(a, item_new(7));
     f_roots[0] = a;
     ASSERT_EQ_FMT((usize)1, cvm_ref_array_length(a), "%zu");
-    ASSERT_EQ_FMT(7ull, ((Item*)cvm_ref_array_get(a, 0))->value, "%llu");
+    ASSERT_EQ_FMT((u64)7, ((Item*)cvm_ref_array_get(a, 0))->value, "%" PRIu64);
 
     FRAME_END();
     fixture_leave();
@@ -159,7 +160,7 @@ TEST push_fills_slots_in_order(void) {
     ASSERT_EQ_FMT((usize)4, cvm_ref_array_length(a), "%zu");
     ASSERT_EQ_FMT((usize)4, cvm_ref_array_capacity(a), "%zu");
     for (usize i = 0; i < 4; i++) {
-        ASSERT_EQ_FMT((u64)i, ((Item*)cvm_ref_array_get(a, i))->value, "%llu");
+        ASSERT_EQ_FMT((u64)i, ((Item*)cvm_ref_array_get(a, i))->value, "%" PRIu64);
     }
 
     FRAME_END();
@@ -192,7 +193,7 @@ TEST appending_past_the_end_returns_a_new_array(void) {
     ASSERT_EQ_FMT((usize)3, cvm_ref_array_length(bigger), "%zu");
     for (u64 i = 0; i < 3; i++) {
         ASSERT_EQ_FMT(i + 1, ((Item*)cvm_ref_array_get(bigger, (usize)i))->value,
-                      "%llu");
+                      "%" PRIu64);
     }
 
     /*
@@ -201,7 +202,7 @@ TEST appending_past_the_end_returns_a_new_array(void) {
      */
     ASSERT_EQ_FMT((usize)2, cvm_ref_array_length(small), "%zu");
     ASSERT_EQ_FMT((usize)2, cvm_ref_array_capacity(small), "%zu");
-    ASSERT_EQ_FMT(1ull, ((Item*)cvm_ref_array_get(small, 0))->value, "%llu");
+    ASSERT_EQ_FMT((u64)1, ((Item*)cvm_ref_array_get(small, 0))->value, "%" PRIu64);
 
     FRAME_END();
     fixture_leave();
@@ -233,7 +234,7 @@ TEST growth_is_about_one_and_a_half_each_time(void) {
     /* every item is still there and still in order */
     ASSERT_EQ_FMT((usize)64, cvm_ref_array_length(a), "%zu");
     for (usize i = 0; i < 64; i++) {
-        ASSERT_EQ_FMT((u64)i, ((Item*)cvm_ref_array_get(a, i))->value, "%llu");
+        ASSERT_EQ_FMT((u64)i, ((Item*)cvm_ref_array_get(a, i))->value, "%" PRIu64);
     }
 
     FRAME_END();
@@ -276,7 +277,7 @@ TEST a_rooted_array_keeps_its_items_alive(void) {
     for (usize i = 0; i < 4; i++) {
         Item* it = (Item*)cvm_ref_array_get(a, i);
         ASSERT(it != NULL);
-        ASSERT_EQ_FMT((u64)(i * 10u), it->value, "%llu");
+        ASSERT_EQ_FMT((u64)(i * 10u), it->value, "%" PRIu64);
     }
 
     FRAME_END();

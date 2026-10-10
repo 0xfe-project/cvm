@@ -16,6 +16,7 @@
 
 #include "vendor/greatest.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -187,19 +188,19 @@ TEST integer_conversions_match_the_libc_ones(void) {
     u8 buf[64];
     char want[64];
 
-    static u64 const uvals[] = {0ull,
-                                1ull,
-                                9ull,
-                                10ull,
-                                99ull,
-                                100ull,
-                                4294967295ull,
-                                4294967296ull,
-                                12345678901234567890ull,
-                                18446744073709551615ull};
+    static u64 const uvals[] = {(u64)0,
+                                (u64)1,
+                                (u64)9,
+                                (u64)10,
+                                (u64)99,
+                                (u64)100,
+                                (u64)4294967295,
+                                (u64)4294967296,
+                                (u64)12345678901234567890ull,
+                                (u64)18446744073709551615ull};
     for (usize i = 0; i < sizeof(uvals) / sizeof(uvals[0]); i++) {
         usize n = cvm_u64toa(buf, uvals[i]);
-        snprintf(want, sizeof(want), "%llu", (unsigned long long)uvals[i]);
+        snprintf(want, sizeof(want), "%" PRIu64, (u64)uvals[i]);
         ASSERT_EQ_FMT(strlen(want), n, "%zu");
         ASSERT(memcmp(buf, want, n) == 0);
 
@@ -240,10 +241,10 @@ TEST radix_conversions_read_back(void) {
         u32 radix;
         char const* want;
     } const cases[] = {
-        {0ull, 16, "0"},         {255ull, 16, "ff"},
-        {255ull, 2, "11111111"}, {255ull, 36, "73"},
-        {35ull, 36, "z"},        {16ull, 16, "10"},
-        {1ull, 2, "1"},          {4294967295ull, 16, "ffffffff"},
+        {(u64)0, 16, "0"},         {(u64)255, 16, "ff"},
+        {(u64)255, 2, "11111111"}, {(u64)255, 36, "73"},
+        {(u64)35, 36, "z"},        {(u64)16, 16, "10"},
+        {(u64)1, 2, "1"},          {(u64)4294967295, 16, "ffffffff"},
     };
 
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {

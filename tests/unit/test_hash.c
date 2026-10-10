@@ -13,6 +13,7 @@
 
 #include "vendor/greatest.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 
 #include "base/types.h"
@@ -219,7 +220,7 @@ TEST deleting_a_key_leaves_the_others_reachable(void) {
                 FAILm("a key behind a deleted one became unreachable");
             }
             Item* it = (Item*)cvm_map_get(m, k);
-            ASSERT_EQ_FMT((u64)i, it->value, "%llu");
+            ASSERT_EQ_FMT((u64)i, it->value, "%" PRIu64);
         }
     }
 
@@ -324,7 +325,7 @@ TEST growth_keeps_every_entry_findable(void) {
         if (it == NULL) {
             FAILm("an entry was lost across a growth");
         }
-        ASSERT_EQ_FMT((u64)i, it->value, "%llu");
+        ASSERT_EQ_FMT((u64)i, it->value, "%" PRIu64);
     }
 
     FRAME_END();
@@ -362,7 +363,7 @@ TEST a_table_can_shrink_back(void) {
     /* the survivor is still there, with its value */
     Item* it = (Item*)cvm_map_get(m, key_from_u32(0));
     ASSERT(it != NULL);
-    ASSERT_EQ_FMT((u64)0, it->value, "%llu");
+    ASSERT_EQ_FMT((u64)0, it->value, "%" PRIu64);
 
     /* a resize that cannot fit the contents is refused, and changes nothing */
     for (u32 i = 0; i < 50; i++) {
@@ -455,7 +456,7 @@ TEST a_table_keeps_its_keys_and_values_alive(void) {
         if (it == NULL) {
             FAILm("an entry did not survive the collection");
         }
-        ASSERT_EQ_FMT((u64)i * 100u, it->value, "%llu");
+        ASSERT_EQ_FMT((u64)i * 100u, it->value, "%" PRIu64);
     }
 
     FRAME_END();
@@ -494,7 +495,7 @@ TEST entries_can_be_deleted_while_the_collector_runs(void) {
     /* the one key that stayed is untouched by all of it */
     Item* it = (Item*)cvm_map_get(m, key_new("resident"));
     ASSERT(it != NULL);
-    ASSERT_EQ_FMT((u64)1, it->value, "%llu");
+    ASSERT_EQ_FMT((u64)1, it->value, "%" PRIu64);
 
     FRAME_END();
     fixture_leave();

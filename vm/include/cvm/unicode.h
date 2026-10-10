@@ -152,9 +152,9 @@ CVM_INLINE bool cvm_unicode_is_ident_continue(rune c) {
  * Where scratch memory comes from.
  *
  * The ported code wants to grow a buffer and hand it to the caller, which in the
- * original is a libc realloc callback. Our platform layer offers alloc and free
- * and no realloc, so the contract is those two and whatever grows keeps track of
- * its own size — see the note in vm/str/unicode.c. Both the normalizer and the
+ * original is a libc realloc callback. Our contract is base/alloc.h's, which is
+ * the three calls and a context, so the realloc is available and a structure that
+ * grows can ask for it rather than copying itself. Both the normalizer and the
  * character ranges take one of these, which is why it is here rather than next to
  * either of them.
  */

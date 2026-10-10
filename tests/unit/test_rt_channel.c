@@ -161,8 +161,8 @@ TEST time_is_monotonic(void) {
     u64 ms = rt_time_millis();
     /* milliseconds must be in the same ballpark as nanos/1e6, which also
      * catches a unit mix-up in either function */
-    ASSERT(ms <= (c / 1000000ull) + 1000ull);
-    ASSERT(ms + 1000ull >= (c / 1000000ull));
+    ASSERT(ms <= (c / (u64)1000000) + (u64)1000);
+    ASSERT(ms + (u64)1000 >= (c / (u64)1000000));
     PASS();
 }
 

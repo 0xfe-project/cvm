@@ -143,6 +143,8 @@ static void take_for_use(BlockMeta* meta_start, BlockMeta* meta) {
 /* ------------------------------------------------------------------ */
 
 void cvm_block_alloc_acquire(CvmBlockAllocator* alloc) {
+    /* Raw: free lists, no allocation inside, so nothing can park while this is
+     * held. */
     rt_mutex_lock(&alloc->allocation_lock);
     atomic_thread_fence(memory_order_acquire);
 }

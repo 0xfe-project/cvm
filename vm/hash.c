@@ -68,16 +68,83 @@ CVM_INLINE u32* bit_words_mut(CvmHashMap* m) {
     return ((CvmMapBits*)m->used)->bits;
 }
 
+/*
+ * Occupancy, and the key in the slot, are written by one thread and read by
+ * others: a table can be looked up without taking the writer's lock (see
+ * cvm_map_slot_shared). So the two are atomic, and their order is the publication
+ * order a lock-free reader depends on:
+ *
+ *   - an insert writes the key first and sets the bit second, with a release. A
+ *     reader that sees the bit set, with an acquire, therefore sees the key.
+ *
+ *   - a delete clears the bit first and nulls the key second. A reader that sees
+ *     the bit set may still see the old key, which is harmless: the key it sees is
+ *     one that was in the table, and matching it is a correct answer to a lookup
+ *     that began before the delete.
+ *
+ * The reverse order in either place would let a reader see an occupied bucket
+ * whose key is not there yet, which is a lookup that misses an entry that exists.
+ */
 CVM_INLINE bool bit_used(u32 const* words, usize i) {
-    return ((words[i >> 5] >> (i & 31u)) & 1u) != 0u;
+    u32 word = atomic_load_explicit((u32 const _Atomic*)(words + (i >> 5)),
+                                    memory_order_acquire);
+    return ((word >> (i & 31u)) & 1u) != 0u;
 }
 
 CVM_INLINE void bit_set(u32* words, usize i) {
-    words[i >> 5] |= 1u << (i & 31u);
+    atomic_fetch_or_explicit((u32 _Atomic*)(words + (i >> 5)), 1u << (i & 31u),
+                             memory_order_release);
 }
 
 CVM_INLINE void bit_clear(u32* words, usize i) {
-    words[i >> 5] &= ~(1u << (i & 31u));
+    atomic_fetch_and_explicit((u32 _Atomic*)(words + (i >> 5)), ~(1u << (i & 31u)),
+                              memory_order_release);
+}
+
+/* The key in a bucket, on the same terms as the bit above. */
+CVM_INLINE opaque_mut slot_key(opaque_mut const* items, usize i) {
+    return atomic_load_explicit((opaque_mut const _Atomic*)(items + i),
+                                memory_order_relaxed);
+}
+
+CVM_INLINE void slot_key_set(opaque_mut* items, usize i, opaque_mut key) {
+    atomic_store_explicit((opaque_mut _Atomic*)(items + i), key, memory_order_relaxed);
+}
+
+/*
+ * The map's own arrays, as the writer publishes them and a lock-free reader takes
+ * them.
+ *
+ * Plain storage with atomic access, which is how the rest of the runtime does it:
+ * a resize or a compaction installs a whole new set of arrays at once, and the
+ * publication has to be visible as a group — a reader that saw the new occupancy
+ * bitmap beside the old key array would be walking a table that never existed.
+ * `keys` doubles as the generation: every replacement installs a fresh array, so a
+ * reader can walk a snapshot and then check that the array it began with is still
+ * the one in the map.
+ */
+CVM_INLINE CvmRefArray* map_keys_load(CvmHashMap const* m) {
+    return (CvmRefArray*)atomic_load_explicit((CvmRefArray* const _Atomic*)&m->keys,
+                                              memory_order_acquire);
+}
+
+CVM_INLINE opaque_mut map_used_load(CvmHashMap const* m) {
+    return atomic_load_explicit((opaque_mut const _Atomic*)&m->used,
+                                memory_order_acquire);
+}
+
+CVM_INLINE u32 map_bits_load(CvmHashMap const* m) {
+    return atomic_load_explicit((u32 const _Atomic*)&m->bits, memory_order_acquire);
+}
+
+static void map_publish(CvmHashMap* m, CvmRefArray* keys, CvmRefArray* values,
+                        opaque_mut used, u32 bits) {
+    atomic_store_explicit((opaque_mut _Atomic*)&m->used, used, memory_order_release);
+    atomic_store_explicit((u32 _Atomic*)&m->bits, bits, memory_order_release);
+    /* Last: this is the field a reader checks to know the snapshot still stands. */
+    atomic_store_explicit((CvmRefArray * _Atomic*)&m->keys, keys, memory_order_release);
+    atomic_store_explicit((CvmRefArray * _Atomic*)&m->values, values,
+                          memory_order_release);
 }
 
 /* ------------------------------------------------------------------ */
@@ -220,23 +287,65 @@ CvmHashMap* cvm_map_new_seeded(u32 seed) {
  * because deletion closes the chain rather than leaving a tombstone, and a
  * rehash re-inserts everything.
  */
-static usize map_find(CvmHashMap const* m, u32 hash, opaque_mut key) {
-    usize buckets = cvm_map_buckets(m);
-    if (buckets == 0u) {
+/*
+ * The arrays a probe walks, taken once.
+ *
+ * A resize or a compaction replaces the map's arrays, and the old and new ones
+ * have different lengths. A probe that read `keys` again on every step could pair
+ * the old occupancy bitmap with the new key array and index past the end of the
+ * one it is used on — so each array is read once, before the walk, and the walk is
+ * then a walk of one table.
+ */
+typedef struct MapView {
+    /* The array itself, so a reader can check that this snapshot still stands. */
+    CvmRefArray* array;
+    opaque_mut const* keys;
+    u32 const* used;
+    usize buckets;
+    u32 salt;
+    u32 bits;
+} MapView;
+
+static MapView map_view(CvmHashMap const* m) {
+    MapView v;
+    CvmRefArray* keys = map_keys_load(m);
+    opaque_mut used = map_used_load(m);
+    v.array = keys;
+    v.keys = keys == NULL ? NULL : keys->items;
+    v.used = used == NULL ? NULL : ((CvmMapBits const*)used)->bits;
+    v.buckets = keys == NULL ? 0u : cvm_ref_array_length(keys);
+    v.salt = m->salt;
+    v.bits = map_bits_load(m);
+    return v;
+}
+
+static usize map_find_view(MapView const* v, CvmMapOps const* ops, u32 hash,
+                           opaque_mut key) {
+    if (v->buckets == 0u) {
         return CVM_MAP_NO_SLOT;
     }
 
-    u32 const* used = bit_words(m);
-    usize mask = buckets - 1u;
-    usize i = map_bucket(hash, m->salt, m->bits);
+    usize mask = v->buckets - 1u;
+    usize i = map_bucket(hash, v->salt, v->bits);
 
-    while (bit_used(used, i)) {
-        if (m->ops->matches(m->keys->items[i], key)) {
+    while (bit_used(v->used, i)) {
+        opaque_mut stored = slot_key(v->keys, i);
+        /*
+         * An occupied bucket with no key is a bucket whose occupant is being
+         * written or cleared right now. It is not the end of the chain, so the
+         * walk continues past it.
+         */
+        if (stored != NULL && ops->matches(stored, key)) {
             return i;
         }
         i = (i + 1u) & mask;
     }
     return CVM_MAP_NO_SLOT;
+}
+
+static usize map_find(CvmHashMap const* m, u32 hash, opaque_mut key) {
+    MapView v = map_view(m);
+    return map_find_view(&v, m->ops, hash, key);
 }
 
 /*
@@ -250,7 +359,7 @@ static usize map_slot_for(CvmHashMap const* m, u32 hash, opaque_mut key, bool* f
     usize i = map_bucket(hash, m->salt, m->bits);
 
     while (bit_used(used, i)) {
-        if (m->ops->matches(m->keys->items[i], key)) {
+        if (m->ops->matches(slot_key(m->keys->items, i), key)) {
             *found = true;
             return i;
         }
@@ -326,7 +435,7 @@ static bool map_rehash(CvmHashMap* m, usize buckets) {
             if (!bit_used(old_used, i)) {
                 continue;
             }
-            opaque_mut key = m->keys->items[i];
+            opaque_mut key = slot_key(m->keys->items, i);
             u32 hash = m->ops->hash_stored(key);
 
             usize slot = map_bucket(hash, m->salt, bits);
@@ -334,15 +443,12 @@ static bool map_rehash(CvmHashMap* m, usize buckets) {
                 slot = (slot + 1u) & (buckets - 1u);
             }
             bit_set(used->bits, slot);
-            keys->items[slot] = key;
+            slot_key_set(keys->items, slot, key);
             values->items[slot] = m->values->items[i];
         }
     }
 
-    m->keys = keys;
-    m->values = values;
-    m->used = used;
-    m->bits = bits;
+    map_publish(m, keys, values, used, bits);
 
     cvm_frame_pop(&f_frame);
     return true;
@@ -379,7 +485,7 @@ usize cvm_map_compact(CvmHashMap* m) {
             continue;
         }
         occupied++;
-        if (m->ops->valid(m->keys->items[i])) {
+        if (m->ops->valid(slot_key(m->keys->items, i))) {
             live++;
         }
     }
@@ -397,10 +503,7 @@ usize cvm_map_compact(CvmHashMap* m) {
     if (live == 0u) {
         /* Everything died: the table goes back to being a fresh one, arrays and
          * all, rather than keeping a large empty object alive. */
-        m->keys = NULL;
-        m->values = NULL;
-        m->used = NULL;
-        m->bits = 0;
+        map_publish(m, NULL, NULL, NULL, 0u);
         m->count = 0;
         cvm_frame_pop(&f_frame);
         return occupied;
@@ -426,7 +529,7 @@ usize cvm_map_compact(CvmHashMap* m) {
         if (!bit_used(old_used, i)) {
             continue;
         }
-        opaque_mut key = m->keys->items[i];
+        opaque_mut key = slot_key(m->keys->items, i);
         if (!m->ops->valid(key)) {
             continue; /* dropped */
         }
@@ -436,14 +539,11 @@ usize cvm_map_compact(CvmHashMap* m) {
             slot = (slot + 1u) & mask;
         }
         bit_set(used->bits, slot);
-        keys->items[slot] = key;
+        slot_key_set(keys->items, slot, key);
         values->items[slot] = m->values->items[i];
     }
 
-    m->keys = keys;
-    m->values = values;
-    m->used = used;
-    m->bits = new_bits;
+    map_publish(m, keys, values, used, new_bits);
     m->count = live; /* authoritative, whatever the old count had drifted to */
 
     cvm_frame_pop(&f_frame);
@@ -505,7 +605,7 @@ opaque_mut cvm_map_put(CvmHashMap* m, opaque_mut key, opaque_mut value, bool* ab
         return previous;
     }
 
-    map->keys->items[slot] = map->ops->store(f_roots[1]);
+    slot_key_set(map->keys->items, slot, map->ops->store(f_roots[1]));
     map->values->items[slot] = f_roots[2];
     bit_set(bit_words_mut(map), slot);
     map->count++;
@@ -549,18 +649,18 @@ static void map_vacate(CvmHashMap* m, usize i) {
             break;
         }
 
-        usize home =
-            map_bucket(m->ops->hash_stored(m->keys->items[j]), m->salt, m->bits);
+        usize home = map_bucket(m->ops->hash_stored(slot_key(m->keys->items, j)),
+                                m->salt, m->bits);
         bool movable = (j > i) ? (home <= i || home > j) : (home <= i && home > j);
         if (movable) {
-            m->keys->items[i] = m->keys->items[j];
+            slot_key_set(m->keys->items, i, slot_key(m->keys->items, j));
             m->values->items[i] = m->values->items[j];
             i = j;
         }
     }
 
     bit_clear(used, i);
-    m->keys->items[i] = NULL;
+    slot_key_set(m->keys->items, i, NULL);
     m->values->items[i] = NULL;
     m->count--;
 }
@@ -600,7 +700,7 @@ void cvm_map_clear(CvmHashMap* m) {
      * whole of what "empty" means.
      */
     for (usize i = 0; i < buckets; i++) {
-        m->keys->items[i] = NULL;
+        slot_key_set(m->keys->items, i, NULL);
         m->values->items[i] = NULL;
     }
     u32* used = bit_words_mut(m);
@@ -615,12 +715,14 @@ void cvm_map_clear(CvmHashMap* m) {
 /* ------------------------------------------------------------------ */
 
 usize cvm_map_next(CvmHashMap const* m, usize from) {
-    usize buckets = cvm_map_buckets(m);
+    /* Through the map's publication, like every other reader of these arrays. */
+    MapView v = map_view(m);
+    usize buckets = v.buckets;
     if (buckets == 0u || from >= buckets) {
         return CVM_MAP_NO_SLOT;
     }
 
-    u32 const* used = bit_words(m);
+    u32 const* used = v.used;
     for (usize i = from; i < buckets; i++) {
         if (bit_used(used, i)) {
             return i;
@@ -631,10 +733,14 @@ usize cvm_map_next(CvmHashMap const* m, usize from) {
 
 opaque_mut cvm_map_key_at(CvmHashMap const* m, usize slot) {
     cvm_assert(slot < cvm_map_buckets(m));
-    return m->keys->items[slot];
+    /* Through the same publication the writer used: this is reachable from a
+     * lookup that took no lock. */
+    return slot_key(map_keys_load(m)->items, slot);
 }
 
 opaque_mut cvm_map_value_at(CvmHashMap const* m, usize slot) {
     cvm_assert(slot < cvm_map_buckets(m));
-    return m->values->items[slot];
+    CvmRefArray* values = (CvmRefArray*)atomic_load_explicit(
+        (CvmRefArray* const _Atomic*)&m->values, memory_order_acquire);
+    return values->items[slot];
 }

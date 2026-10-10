@@ -90,12 +90,9 @@ static void text_printf(Text* t, char const* fmt, ...) {
 
 /* An array of integers: the cheapest possible document per byte. */
 static void build_numbers(Text* t, u32 count) {
-    (void)text_printf;
     text_add(t, "[", 1u);
     for (u32 i = 0; i < count; i++) {
-        char buf[16];
-        int n = snprintf(buf, sizeof(buf), i ? ",%u" : "%u", i * 7u);
-        text_add(t, buf, (usize)n);
+        text_printf(t, "%s%u", i ? "," : "", i * 7u);
     }
     text_add(t, "]", 1u);
 }
@@ -114,15 +111,18 @@ static void build_records(Text* t, u32 count) {
     text_add(t, "]", 1u);
 }
 
-/* Strings with escapes: the part of a parser that is a scan, not a tree. */
+/*
+ * Strings with escapes: the part of a parser that is a scan, not a tree. The
+ * escapes matter — a parser that only copies bytes would not see this work. The
+ * text is written through one format string so no length is counted by hand.
+ */
 static void build_strings(Text* t, u32 count) {
     text_add(t, "[", 1u);
     for (u32 i = 0; i < count; i++) {
-        text_add(t, i ? ",\"" : "\"", 2u);
-        for (u32 k = 0; k < 6u; k++) {
-            text_add(t, "some text with \\\" and \\n and unicode \\u00e9 ", 47u);
-        }
-        text_add(t, "\"", 1u);
+        text_printf(t,
+                    "%s\"some text with \\\" and \\n and unicode \\u00e9 "
+                    "more text here, and yet more, to make this an ordinary string\"",
+                    i ? "," : "");
     }
     text_add(t, "]", 1u);
 }
@@ -155,6 +155,13 @@ static u64 now_ns(void) {
  * about to use.
  */
 static opaque_mut g_ours_root;
+
+/*
+ * Where the harness keeps things alive: slot 1 (the table) and slot 2 (a string
+ * that is on its way into the table). The visitors reach the scratch slot through
+ * this pointer because a local variable is not something the collector can see.
+ */
+static opaque_mut* g_roots;
 
 static void* ours_parse(char* text, usize len) {
     usize err = 0;
@@ -332,10 +339,14 @@ static void yyjson_walk(yyjson_val* val, Stats* s) {
         break;
     }
     case YYJSON_TYPE_OBJ: {
+        /* yyjson_obj_iter_next hands back the *key*; the value is one hop away.
+         * Member names are not walked: the `strs` column counts value strings, so
+         * that it means the same thing in all three columns. They are still
+         * created, in materialize, because a program can read them. */
         yyjson_obj_iter it = yyjson_obj_iter_with(val);
-        yyjson_val* child;
-        while ((child = yyjson_obj_iter_next(&it)) != NULL) {
-            yyjson_walk(child, s);
+        yyjson_val* key;
+        while ((key = yyjson_obj_iter_next(&it)) != NULL) {
+            yyjson_walk(yyjson_obj_iter_get_val(key), s);
         }
         break;
     }
@@ -394,10 +405,22 @@ static Impl const IMPLS[] = {
  * shared with the key's length, not in a field of its own — `json->ikey.type` is
  * how the library reads it too.
  */
+/*
+ * Interning allocates: a map that runs out of room builds a bigger key array, and
+ * that allocation may collect. So the candidate and the table must both be in
+ * roots across the call — which is the frame discipline every caller of cvm_intern
+ * owes, and the reason the API takes a rooted value rather than a borrowed one.
+ */
+static void intern_rooted(CvmHashMap* table, CvmString* s) {
+    g_roots[2] = s;
+    (void)cvm_intern(table, s);
+    g_roots[2] = 0;
+}
+
 static void ours_materialize_visit(CvmJson* v, CvmHashMap* table, Stats* s) {
     switch (cvm_json_kind(v)) {
     case CVM_JSON_STRING:
-        (void)cvm_intern(table, cvm_json_as_string(v));
+        intern_rooted(table, cvm_json_as_string(v));
         break;
     case CVM_JSON_ARRAY:
         for (usize i = 0; i < cvm_json_array_length(v); i++) {
@@ -422,7 +445,7 @@ static u32 ljson_materialize_visit(json_object* json, CvmHashMap* table) {
         str raw = {.ptr = (u8 const*)json->value.vstr, .len = json->istr.len};
         CvmString* s = cvm_string_from_utf8(raw);
         if (s != NULL) {
-            (void)cvm_intern(table, s);
+            intern_rooted(table, s);
             n = 1u;
         }
         break;
@@ -433,7 +456,16 @@ static u32 ljson_materialize_visit(json_object* json, CvmHashMap* table) {
         memset(&items, 0, sizeof(items));
         if (json_get_items(json, &items) == 0) {
             for (u32 i = 0; i < items.count; i++) {
-                n += ljson_materialize_visit(items.items[i].json, table);
+                json_object* child = items.items[i].json;
+                if (child->key != NULL && child->ikey.len != 0u) {
+                    str raw = {.ptr = (u8 const*)child->key, .len = child->ikey.len};
+                    CvmString* name = cvm_string_from_utf8(raw);
+                    if (name != NULL) {
+                        intern_rooted(table, name);
+                        n++;
+                    }
+                }
+                n += ljson_materialize_visit(child, table);
             }
         }
         break;
@@ -466,9 +498,17 @@ static u32 yyjson_materialize_visit(yyjson_val* val, CvmHashMap* table) {
     }
     case YYJSON_TYPE_OBJ: {
         yyjson_obj_iter it = yyjson_obj_iter_with(val);
-        yyjson_val* child;
-        while ((child = yyjson_obj_iter_next(&it)) != NULL) {
-            n += yyjson_materialize_visit(child, table);
+        yyjson_val* key;
+        while ((key = yyjson_obj_iter_next(&it)) != NULL) {
+            /* The member name is a string the program can read: borrowed here,
+             * already a CvmString in our own representation. */
+            str raw = {.ptr = (u8 const*)yyjson_get_str(key), .len = yyjson_get_len(key)};
+            CvmString* name = cvm_string_from_utf8(raw);
+            if (name != NULL) {
+                intern_rooted(table, name);
+                n++;
+            }
+            n += yyjson_materialize_visit(yyjson_obj_iter_get_val(key), table);
         }
         break;
     }
@@ -488,70 +528,91 @@ typedef struct Result {
     bool ok;
 } Result;
 
-static Result measure(Impl const* impl, char const* text, usize len, u32 repeats) {
+/*
+ * One corpus through one implementation, averaged over rounds.
+ *
+ * Averaging rather than taking the best round is deliberate: the collector is
+ * live, the previous round's document is garbage by now, and a collection that
+ * lands inside a parse is a cost a real program pays. "Best of N" would quietly
+ * report the round where nothing was collected.
+ *
+ * The corpus is re-copied every round because the fast modes write into it.
+ */
+static Result measure(Impl const* impl, char const* text, usize len, u32 rounds) {
     Result r;
     memset(&r, 0, sizeof(r));
     r.ok = true;
 
     CvmHashMap* table = cvm_intern_new();
 
-    /* A writable copy per library: both fast modes want to write into the input,
-     * and the copy is not part of what is being measured. */
-    char* copy = malloc(len + 8u);
-    memcpy(copy, text, len);
-    memset(copy + len, 0, 8u);
-
     /* One frame for the whole measurement: our documents are GC objects and the
-     * other two are not, so it is held for both and costs nothing for theirs. */
-    CVM_FRAME_DECL(f, 1);
-    cvm_frame_push(&f_frame, f_roots, 1);
+     * other two are not, so it is held for both and costs nothing for theirs.
+     * Each round overwrites the slot, which is what turns the previous round's
+     * document into garbage and makes the collector part of the measurement. */
+    CVM_FRAME_DECL(f, 3);
+    cvm_frame_push(&f_frame, f_roots, 3);
+    g_roots = f_roots;
+    f_roots[1] = table; /* the table is a GC object too */
 
-    u64 t0 = now_ns();
-    void* doc = impl->parse(copy, len);
-    u64 t1 = now_ns();
-    if (doc == NULL) {
-        cvm_frame_pop(&f_frame);
-        free(copy);
-        r.ok = false;
-        return r;
-    }
-    f_roots[0] = g_ours_root;
-    r.ns_parse = t1 - t0;
+    char* copy = (char*)malloc(len + 8u);
 
-    t0 = now_ns();
-    impl->navigate(doc, &r.stats);
-    t1 = now_ns();
-    r.ns_navigate = t1 - t0;
+    for (u32 round = 0; round < rounds; round++) {
+        memcpy(copy, text, len);
+        memset(copy + len, 0, 8u);
 
-    t0 = now_ns();
-    if (impl->strings_are_ours) {
-        /* already CvmStrings: walking to intern them would be measuring our own
-         * hash table, not a boundary */
-        r.ns_materialize = 0;
-    } else if (strcmp(impl->name, "ljson") == 0) {
-        r.materialized = ljson_materialize_visit(((LjsonDoc*)doc)->root, table);
-    } else {
-        r.materialized =
-            yyjson_materialize_visit(yyjson_doc_get_root((yyjson_doc*)doc), table);
-    }
-    t1 = now_ns();
-    r.ns_materialize = t1 - t0;
+        u64 t0 = now_ns();
+        void* doc = impl->parse(copy, len);
+        u64 t1 = now_ns();
+        if (doc == NULL) {
+            cvm_frame_pop(&f_frame);
+            free(copy);
+            r.ok = false;
+            return r;
+        }
+        f_roots[0] = g_ours_root;
+        r.ns_parse += t1 - t0;
 
-    t0 = now_ns();
-    for (u32 i = 0; i < repeats; i++) {
+        memset(&r.stats, 0, sizeof(r.stats)); /* the counts are per document */
+        t0 = now_ns();
+        impl->navigate(doc, &r.stats);
+        t1 = now_ns();
+        r.ns_navigate += t1 - t0;
+
+        t0 = now_ns();
+        if (impl->strings_are_ours) {
+            /* Already CvmStrings: interning them again would measure our own hash
+             * table, not a boundary. */
+        } else if (strcmp(impl->name, "ljson") == 0) {
+            r.materialized = ljson_materialize_visit(((LjsonDoc*)doc)->root, table);
+        } else {
+            r.materialized =
+                yyjson_materialize_visit(yyjson_doc_get_root((yyjson_doc*)doc), table);
+        }
+        t1 = now_ns();
+        r.ns_materialize += t1 - t0;
+
+        /* A fresh buffer each round: growing it is part of printing. */
         CvmBuf out;
         cvm_buf_init(&out, cvm_buf_system_alloc());
+        t0 = now_ns();
         if (!impl->print(doc, &out)) {
             r.ok = false;
         }
+        t1 = now_ns();
+        r.ns_print += t1 - t0;
         cvm_buf_free(&out);
-    }
-    t1 = now_ns();
-    r.ns_print = (t1 - t0) / (u64)repeats;
 
-    impl->release(doc);
+        impl->release(doc);
+    }
+
+    g_roots = NULL;
     cvm_frame_pop(&f_frame);
     free(copy);
+
+    r.ns_parse /= rounds;
+    r.ns_navigate /= rounds;
+    r.ns_materialize /= rounds;
+    r.ns_print /= rounds;
     return r;
 }
 

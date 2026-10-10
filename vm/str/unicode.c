@@ -639,18 +639,21 @@ void cvm_cr_free(CvmCharRange* cr) {
 
 i32 cvm_cr_realloc(CvmCharRange* cr, i32 size) {
     /*
-     * Grow by allocating and copying: the allocator has no realloc, and the old
-     * length is `cr->size`, so this is the whole of what a realloc would do.
+     * The allocator can grow in place where the platform allows it, and a range
+     * that doubles would otherwise copy its points on every growth.
      */
-    u32* fresh = cr->alloc.alloc(cr->alloc.ctx, (usize)size * sizeof(u32));
+    if (size == 0) {
+        if (cr->points != NULL) {
+            cr->alloc.free(cr->alloc.ctx, cr->points);
+        }
+        cr->points = NULL;
+        cr->size = 0;
+        return 0;
+    }
+    u32* fresh =
+        cr->alloc.realloc(cr->alloc.ctx, cr->points, (usize)size * sizeof(u32));
     if (fresh == NULL) {
         return -1;
-    }
-    for (i32 i = 0; i < cr->len; i++) {
-        fresh[i] = cr->points[i];
-    }
-    if (cr->points != NULL) {
-        cr->alloc.free(cr->alloc.ctx, cr->points);
     }
     cr->points = fresh;
     cr->size = size;

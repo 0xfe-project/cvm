@@ -51,7 +51,7 @@
  * seconds is orders of magnitude above the expected cost and still leaves
  * room for several of these in one binary.
  */
-#define SAFEPOINT_WAIT_NANOS 10000000000ull
+#define SAFEPOINT_WAIT_NANOS (u64)10000000000
 
 /*
  * Start a test from a world that is definitely running.
@@ -404,7 +404,7 @@ TEST stuck_thread_is_reported(void) {
     u64 deadline = rt_time_nanos() + SAFEPOINT_WAIT_NANOS;
     while (cvm_safepoint_stuck_reports() == reports_before &&
            rt_time_nanos() < deadline) {
-        spin_without_polling(1000000ull); /* 1ms at a time */
+        spin_without_polling((u64)1000000); /* 1ms at a time */
     }
 
     ASSERT(cvm_safepoint_stuck_reports() > reports_before);

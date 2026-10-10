@@ -68,6 +68,8 @@
 #ifndef CVM_HASH_H
 #define CVM_HASH_H
 
+#include <stdatomic.h>
+
 #include "base/types.h"
 #include "cvm/array.h"
 #include "cvm/gc.h"
@@ -214,8 +216,20 @@ CVM_INLINE usize cvm_map_count(CvmHashMap const* m) {
     return m->count;
 }
 
+/*
+ * Read as the writer published them, because this is reached from a lookup that
+ * takes no lock — an assertion inside one, for instance. The two fields are read
+ * with acquire so that a reader that sees the new key array also sees the bucket
+ * count that goes with it.
+ */
 CVM_INLINE usize cvm_map_buckets(CvmHashMap const* m) {
-    return m->keys == NULL ? 0u : (usize)1u << m->bits;
+    CvmRefArray* keys = (CvmRefArray*)atomic_load_explicit(
+        (CvmRefArray* const _Atomic*)&m->keys, memory_order_acquire);
+    if (keys == NULL) {
+        return 0u;
+    }
+    return (usize)1u << atomic_load_explicit((u32 const _Atomic*)&m->bits,
+                                             memory_order_acquire);
 }
 
 /*
@@ -270,7 +284,8 @@ usize cvm_map_compact(CvmHashMap* m);
  */
 usize cvm_map_next(CvmHashMap const* m, usize from);
 
-/* The key stored in `slot`. */
+/* The key stored in `slot`. Read through the map's publication, since a writer
+ * may be replacing the array it lives in. */
 opaque_mut cvm_map_key_at(CvmHashMap const* m, usize slot);
 
 /* The value stored in `slot`. */
