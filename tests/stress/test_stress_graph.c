@@ -187,8 +187,8 @@ static opaque_mut build_tree_recursive(u32 depth) {
     f_roots[0] = cvm_alloc(&node_desc);
 
     Node* node = f_roots[0];
-    node->left = NULL;
-    node->right = NULL;
+    cvm_store_field(node, offsetof(Node, left), NULL);
+    cvm_store_field(node, offsetof(Node, right), NULL);
     node->canary = oracle_field_canary(node);
 
     if (depth > 0) {
@@ -196,8 +196,8 @@ static opaque_mut build_tree_recursive(u32 depth) {
          * The children are built while this node sits in a root slot, which
          * is what keeps it alive across allocations that may collect.
          */
-        node->left = build_tree_recursive(depth - 1);
-        node->right = build_tree_recursive(depth - 1);
+        cvm_store_field(node, offsetof(Node, left), build_tree_recursive(depth - 1));
+        cvm_store_field(node, offsetof(Node, right), build_tree_recursive(depth - 1));
     }
 
     opaque_mut result = f_roots[0];
@@ -420,8 +420,8 @@ TEST mutating_a_live_graph_in_place_is_safe(void) {
     ORACLE_FRAME(1);
 
     Node* root = cvm_alloc(&node_desc);
-    root->left = NULL;
-    root->right = NULL;
+    cvm_store_field(root, offsetof(Node, left), NULL);
+    cvm_store_field(root, offsetof(Node, right), NULL);
     root->canary = oracle_field_canary(root);
     oracle_f_roots[0] = root;
 
@@ -430,9 +430,9 @@ TEST mutating_a_live_graph_in_place_is_safe(void) {
         void* fresh = build_tree_recursive(3);
 
         if (round % 2 == 0) {
-            root->left = fresh;
+            cvm_store_field(root, offsetof(Node, left), fresh);
         } else {
-            root->right = fresh;
+            cvm_store_field(root, offsetof(Node, right), fresh);
         }
 
         oracle_collect();
@@ -475,10 +475,10 @@ TEST a_cycle_is_marked_and_a_detached_cycle_is_not(void) {
     Node* a = cvm_alloc(&node_desc);
     Node* b = cvm_alloc(&node_desc);
     Node* c = cvm_alloc(&node_desc);
-    a->left = b;
-    b->left = c;
-    c->left = a;
-    a->right = b->right = c->right = NULL;
+    cvm_store_field(a, offsetof(Node, left), b);
+    cvm_store_field(b, offsetof(Node, left), c);
+    cvm_store_field(c, offsetof(Node, left), a);
+    cvm_store_field(a, offsetof(Node, right), b->right = c->right = NULL);
     a->canary = oracle_field_canary(a);
     b->canary = oracle_field_canary(b);
     c->canary = oracle_field_canary(c);
@@ -487,9 +487,9 @@ TEST a_cycle_is_marked_and_a_detached_cycle_is_not(void) {
     /* A second ring, reachable from nothing. */
     Node* x = cvm_alloc(&node_desc);
     Node* y = cvm_alloc(&node_desc);
-    x->left = y;
-    y->left = x;
-    x->right = y->right = NULL;
+    cvm_store_field(x, offsetof(Node, left), y);
+    cvm_store_field(y, offsetof(Node, left), x);
+    cvm_store_field(x, offsetof(Node, right), y->right = NULL);
 
     oracle_collect();
 

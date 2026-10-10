@@ -95,7 +95,7 @@ typedef struct {
 
 static void slots_clear(SlotTable* t) {
     for (u32 i = 0; i < SLOTS; i++) {
-        t->payloads[i] = NULL;
+        cvm_store_field(t, offsetof(SlotTable, payloads) + i * sizeof(void*), NULL);
         t->in_use[i] = false;
     }
 }

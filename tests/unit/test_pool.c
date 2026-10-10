@@ -116,7 +116,7 @@ static opaque_mut build_chain(i64 n) {
     for (i64 i = 0; i < n; i++) {
         f_roots[1] = cvm_alloc(&node_type);
         Node* node = f_roots[1];
-        node->next = f_roots[0];
+        cvm_store_field(node, offsetof(Node, next), f_roots[0]);
         node->canary = canary_for(node);
         f_roots[0] = f_roots[1];
         f_roots[1] = NULL;
@@ -230,7 +230,7 @@ static void run_workload(opaque_mut* head_out, CvmRootHandle* root_out) {
             cvm_alloc_array(&ptr_array_type, N, cvm_array_stride(&ptr_array_type));
         f_roots[1] = array;
         for (int i = 0; i < N; i++) {
-            array->items[i] = NULL;
+            cvm_store_field(array, offsetof(PtrArray, items) + i * sizeof(void*), NULL);
         }
         f_roots[1] = NULL;
 
@@ -319,7 +319,7 @@ TEST workers_handle_a_large_array(void) {
     for (int i = 0; i < N; i++) {
         Leaf* leaf = cvm_alloc(&leaf_type);
         leaf->canary = canary_for(leaf);
-        array->items[i] = leaf;
+        cvm_store_field(array, offsetof(PtrArray, items) + i * sizeof(void*), leaf);
     }
 
     cvm_gc_collect_and_finish(heap());

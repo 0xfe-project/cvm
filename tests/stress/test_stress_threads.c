@@ -299,8 +299,8 @@ static opaque_mut keeping_worker(opaque_mut raw) {
     for (u32 i = 0; i < WORKER_KEEP; i++) {
         if (i % 2 == 0) {
             Node* n = cvm_alloc(&node_desc);
-            n->left = NULL;
-            n->right = NULL;
+            cvm_store_field(n, offsetof(Node, left), NULL);
+            cvm_store_field(n, offsetof(Node, right), NULL);
             n->canary = oracle_field_canary(n);
             f_roots[i] = n;
         } else {

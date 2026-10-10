@@ -118,17 +118,6 @@ typedef struct BenchCollector {
      * nobody looked at. */
     void *(*alloc_typed)(BenchShape const *shape);
 
-    /*
-     * Store a pointer into an object's field.
-     *
-     * A backend's own choice, because it is the thing being compared: cvm's
-     * is its write barrier, and bdwgc's and tgc's are plain stores, because
-     * neither has a marking phase that runs alongside the program. A scenario
-     * must not decide this for them -- that would be measuring one backend's
-     * mechanism in all three.
-     */
-    void (*store_field)(void *obj, size_t offset, void *value);
-
     /* Force a collection. Returns false if this backend has no way to be
      * asked, in which case the harness reports the mode as unavailable
      * rather than substituting a different one. */

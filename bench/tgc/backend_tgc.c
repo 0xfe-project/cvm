@@ -100,16 +100,6 @@ static void tgc_backend_stats(BenchStats *out) {
     out->failed_allocations = our_failures;
 }
 
-/*
- * A plain store.
- *
- * tgc marks with the world stopped, so a store cannot open a window for its
- * marker and there is nothing to do here.
- */
-static void tgc_backend_store_field(void *obj, size_t offset, void *value) {
-    *(void **)((char *)obj + offset) = value;
-}
-
 BenchCollector const bench_collector = {
     .name = "tgc",
     /*
@@ -126,7 +116,6 @@ BenchCollector const bench_collector = {
     .shutdown = tgc_backend_shutdown,
     .alloc = tgc_backend_alloc,
     .alloc_typed = tgc_backend_alloc_typed,
-    .store_field = tgc_backend_store_field,
     .collect = tgc_backend_collect,
     .stats = tgc_backend_stats,
 };

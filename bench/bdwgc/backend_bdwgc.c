@@ -168,17 +168,6 @@ static void bdwgc_backend_stats(BenchStats *out) {
     out->heap_bytes = (uint64_t)heap_size;
 }
 
-/*
- * A plain store.
- *
- * bdwgc marks with the world stopped, so a store cannot open a window for its
- * marker and there is nothing to do here. This being a plain store is the
- * baseline the other backend's barrier is measured against.
- */
-static void bdwgc_backend_store_field(void *obj, size_t offset, void *value) {
-    *(void **)((char *)obj + offset) = value;
-}
-
 BenchCollector const bench_collector = {
     .name = "bdwgc",
     .modes = BENCH_MODE_SUPPORTS_ALLOC | BENCH_MODE_SUPPORTS_FIXED |
@@ -187,7 +176,6 @@ BenchCollector const bench_collector = {
     .shutdown = bdwgc_backend_shutdown,
     .alloc = bdwgc_backend_alloc,
     .alloc_typed = bdwgc_backend_alloc_typed,
-    .store_field = bdwgc_backend_store_field,
     .collect = bdwgc_backend_collect,
     .stats = bdwgc_backend_stats,
 };

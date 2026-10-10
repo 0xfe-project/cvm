@@ -52,6 +52,22 @@ typedef CvmFrameHandle bench_frame_t;
 
 #define BENCH_ROOT(name, i) (name##_roots[i])
 
+/*
+ * A pointer field store.
+ *
+ * The backend's own store, chosen at compile time rather than through the
+ * vtable, and for a measured reason: through the vtable it is an indirect call
+ * that cannot be inlined, and write-heavy -- the scenario that exists to
+ * measure pointer stores -- came out 144% slower, which is the call and not the
+ * barrier. A macro expands to the backend's own code, exactly like the frame
+ * macros above.
+ *
+ * It still belongs here rather than in a scenario: what a store costs is part
+ * of what is being compared, and a scenario must not decide it.
+ */
+#define BENCH_STORE(obj, offset, value)                                                \
+    cvm_store_field((obj), (offset), (value))
+
 #else /* conservative: the slots only have to live on the stack */
 
 typedef int bench_frame_t;
@@ -70,18 +86,14 @@ typedef int bench_frame_t;
 
 #define BENCH_ROOT(name, i) (name##_roots[i])
 
-#endif
-
 /*
- * A pointer field store, in every scenario.
- *
- * Through the backend rather than written out, because what a store costs is
- * part of what is being measured: cvm's goes through its write barrier, the
- * conservative backends' do not, and neither fact belongs in a scenario.
- *
- * `offset` is from the object's start, which is what a descriptor names.
+ * A pointer field store. A plain store, because neither of these collectors
+ * has a marking phase that runs alongside the program -- this is the baseline
+ * the other backend's barrier is measured against.
  */
 #define BENCH_STORE(obj, offset, value)                                                \
-    bench_collector.store_field((obj), (offset), (value))
+    (*(void **)((char *)(obj) + (offset)) = (value))
+
+#endif
 
 #endif /* BENCH_ROOTS_H */

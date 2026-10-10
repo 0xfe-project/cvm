@@ -78,7 +78,7 @@ static bool extend(opaque_mut* head) {
     if (node == NULL) {
         return false;
     }
-    node->next = *head;
+    cvm_store_field(node, offsetof(Chain, next), *head);
     node->canary = oracle_field_canary(node);
     *head = node;
     return true;
@@ -145,7 +145,7 @@ static opaque_mut sweep_worker(opaque_mut raw) {
         if ((round % 5) == 0) {
             f_roots[1] = cvm_alloc(&chain_desc);
             if (f_roots[1] != NULL) {
-                ((Chain*)f_roots[1])->next = NULL;
+                cvm_store_field(((Chain*)f_roots[1]), offsetof(Chain, next), NULL);
                 ((Chain*)f_roots[1])->canary = oracle_field_canary(f_roots[1]);
             }
         }

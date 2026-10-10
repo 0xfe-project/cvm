@@ -215,7 +215,7 @@ TEST a_weak_ref_keeps_its_target_when_something_else_does(void) {
     void* leaf = cvm_alloc(&leaf_desc);
     void* weak = cvm_weak_ref_new(leaf);
     Node* holder = cvm_alloc(&node_desc);
-    holder->next = leaf;
+    cvm_store_field(holder, offsetof(Node, next), leaf);
 
     f_roots[0] = weak;
     f_roots[1] = holder;
@@ -244,10 +244,10 @@ TEST a_chain_survives_a_collection(void) {
     for (int i = 0; i < N; i++) {
         nodes[i] = cvm_alloc(&node_desc);
         nodes[i]->canary = canary_for(nodes[i]);
-        nodes[i]->next = NULL;
+        cvm_store_field(nodes[i], offsetof(Node, next), NULL);
     }
     for (int i = 0; i + 1 < N; i++) {
-        nodes[i]->next = nodes[i + 1];
+        cvm_store_field(nodes[i], offsetof(Node, next), nodes[i + 1]);
     }
     f_roots[0] = nodes[0];
 
@@ -272,9 +272,9 @@ TEST the_tail_of_a_broken_chain_is_reclaimed(void) {
     Node* middle = cvm_alloc(&node_desc);
     Node* tail = cvm_alloc(&node_desc);
 
-    head->next = middle;
-    middle->next = NULL; /* the chain to tail is cut */
-    tail->next = NULL;
+    cvm_store_field(head, offsetof(Node, next), middle);
+    cvm_store_field(middle, offsetof(Node, next), NULL); /* the chain to tail is cut */
+    cvm_store_field(tail, offsetof(Node, next), NULL);
 
     f_roots[0] = head;
 
