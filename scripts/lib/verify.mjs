@@ -35,8 +35,31 @@ function allowedPrefixes(opts) {
      * The defined-symbol set is what does the real work.
      */
     const base = ["cvm_", "rt_"];
-    if (opts.asan) base.push("asan_", "sanitizer_", "sancov_");
-    if (opts.tsan) base.push("tsan_", "sanitizer_", "sancov_");
+
+    /*
+     * A sanitizer build is not freestanding and does not claim to be: the
+     * sanitizer's runtime is linked in, and the compiler writes its entry
+     * points into every object it instruments. *Which* ones it writes
+     * depends on the compiler version. Clang 21, which development uses,
+     * emits only asan_/sanitizer_/sancov_ names; the clang on the CI runner
+     * also references __cxa_atexit and __dso_handle, the pair a sanitizer
+     * uses to register its exit-time teardown.
+     *
+     * Those two are the sanitizer's, not the runtime's, and they are allowed
+     * only in a sanitizer build. In a release object a reference to
+     * __cxa_atexit would be a real libc dependency -- a C runtime has no
+     * static destructors -- and it is still a violation there. That is the
+     * check this list must not hollow out: the reason to scan the release
+     * objects is exactly to catch what the sanitizer's own runtime would
+     * otherwise excuse.
+     */
+    const sanitizerEmitted = ["cxa_atexit", "dso_handle"];
+    if (opts.asan) {
+        base.push("asan_", "sanitizer_", "sancov_", ...sanitizerEmitted);
+    }
+    if (opts.tsan) {
+        base.push("tsan_", "sanitizer_", "sancov_", ...sanitizerEmitted);
+    }
     return base;
 }
 
