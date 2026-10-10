@@ -12,6 +12,7 @@
 #include "base/assert.h"
 #include "base/types.h"
 #include "cvm/gc.h"
+#include "cvm/mutex.h"
 #include "gc/grey_packet.h"
 #include "gc/heap.h"
 #include "gc/marker.h"
@@ -39,7 +40,7 @@ static u32 root_next_free = 0;
 
 /* Guards the arrays. A collection reads the table, and an unmanaged
  * thread may write it at any time. */
-static RtMutex root_lock;
+static CvmMutex root_lock;
 static bool root_ready = false;
 
 #define ROOT_INITIAL_CAPACITY 64u
@@ -48,7 +49,7 @@ bool cvm_root_init(void) {
     if (root_ready) {
         return true;
     }
-    if (!rt_mutex_init(&root_lock)) {
+    if (!cvm_mutex_init(&root_lock)) {
         return false;
     }
 
@@ -173,7 +174,7 @@ CvmRootHandle cvm_root_add(opaque_mut obj) {
         return CVM_ROOT_HANDLE_NONE;
     }
 
-    rt_mutex_lock(&root_lock);
+    cvm_mutex_lock(&root_lock);
 
     /* Find a free slot, starting from where the last search stopped so
      * that filling and emptying alternates in O(1) rather than scanning
@@ -190,7 +191,7 @@ CvmRootHandle cvm_root_add(opaque_mut obj) {
 
     if (slot == root_capacity) {
         if (!root_grow()) {
-            rt_mutex_unlock(&root_lock);
+            cvm_mutex_unlock(&root_lock);
             CVM_LOG_ERROR(m) {
                 fmt_lit(&m.fmt, "root table could not grow past ");
                 fmt_u32(&m.fmt, root_capacity);
@@ -206,7 +207,7 @@ CvmRootHandle cvm_root_add(opaque_mut obj) {
     root_in_use[slot] = 1;
     root_count++;
 
-    rt_mutex_unlock(&root_lock);
+    cvm_mutex_unlock(&root_lock);
 
     /* Outside the lock: marking takes locks of its own. */
     mark_if_collecting(obj);
@@ -220,12 +221,12 @@ opaque_mut cvm_root_get(CvmRootHandle handle) {
     }
 
     u32 slot = handle - 1;
-    rt_mutex_lock(&root_lock);
+    cvm_mutex_lock(&root_lock);
     opaque_mut obj = NULL;
     if (slot < root_capacity && root_in_use[slot]) {
         obj = root_objects[slot];
     }
-    rt_mutex_unlock(&root_lock);
+    cvm_mutex_unlock(&root_lock);
     return obj;
 }
 
@@ -235,11 +236,11 @@ void cvm_root_set(CvmRootHandle handle, opaque_mut obj) {
     }
 
     u32 slot = handle - 1;
-    rt_mutex_lock(&root_lock);
+    cvm_mutex_lock(&root_lock);
     if (slot < root_capacity && root_in_use[slot]) {
         root_objects[slot] = obj;
     }
-    rt_mutex_unlock(&root_lock);
+    cvm_mutex_unlock(&root_lock);
 
     mark_if_collecting(obj);
 }
@@ -250,7 +251,7 @@ void cvm_root_remove(CvmRootHandle handle) {
     }
 
     u32 slot = handle - 1;
-    rt_mutex_lock(&root_lock);
+    cvm_mutex_lock(&root_lock);
     if (slot < root_capacity && root_in_use[slot]) {
         root_objects[slot] = NULL;
         root_in_use[slot] = 0;
@@ -259,16 +260,16 @@ void cvm_root_remove(CvmRootHandle handle) {
             root_next_free = slot;
         }
     }
-    rt_mutex_unlock(&root_lock);
+    cvm_mutex_unlock(&root_lock);
 }
 
 u32 cvm_root_count(void) {
     if (!root_ready) {
         return 0;
     }
-    rt_mutex_lock(&root_lock);
+    cvm_mutex_lock(&root_lock);
     u32 n = root_count;
-    rt_mutex_unlock(&root_lock);
+    cvm_mutex_unlock(&root_lock);
     return n;
 }
 
@@ -276,9 +277,9 @@ u32 cvm_root_capacity(void) {
     if (!root_ready) {
         return 0;
     }
-    rt_mutex_lock(&root_lock);
+    cvm_mutex_lock(&root_lock);
     u32 n = root_capacity;
-    rt_mutex_unlock(&root_lock);
+    cvm_mutex_unlock(&root_lock);
     return n;
 }
 
@@ -287,11 +288,16 @@ void cvm_root_mark_all(CvmHeap* heap, CvmGreyPacket** out, CvmGreyPacket** out_w
         return;
     }
 
-    rt_mutex_lock(&root_lock);
+    /*
+     * Raw: this runs on the collecting thread, which must stay visible to the
+     * collector. Declaring the wait here would tell the collection this thread is
+     * running not to wait for it.
+     */
+    cvm_mutex_lock_raw(&root_lock);
     for (u32 i = 0; i < root_capacity; i++) {
         if (root_in_use[i] && root_objects[i] != NULL) {
             cvm_mark_field(heap, root_objects[i], out, out_weak);
         }
     }
-    rt_mutex_unlock(&root_lock);
+    cvm_mutex_unlock(&root_lock);
 }

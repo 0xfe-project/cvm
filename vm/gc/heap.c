@@ -351,6 +351,9 @@ bool cvm_heap_extend(CvmHeap* heap, u32 blocks, u32* out_first_block) {
         return true;
     }
 
+    /* Raw: the critical section contains no safepoint, so there is no wait to
+     * hide, and a mutator that declared itself unmanaged here could extend the
+     * heap while a collection was walking it. */
     rt_mutex_lock(&heap->grow_lock);
 
     if (heap->block_count + blocks > heap->max_block_count) {

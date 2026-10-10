@@ -17,10 +17,12 @@
  *   - the shard. A shard is one intern table and one mutex. A string's content
  *     hash picks the shard, and everything that writes takes that shard's lock.
  *
- *   - the lock-free read. cvm_atom_lookup takes no lock; see the argument under
- *     cvm_map_slot_shared, which is the whole of why that is safe. What it buys is
- *     that the common operation — turning text into the canonical string — does
- *     not write to a shared cache line.
+ *   - the read. Both operations take the shard's lock today, and the plan is that
+ *     the lookup will not: see the note in vm/atom.c for why it does not yet, and
+ *     for the two shapes the fix can take. The kernel is already prepared for it —
+ *     the occupancy bitmap and the key slots are published atomically, and a probe
+ *     takes one snapshot of the arrays — so what is missing is the lifetime
+ *     argument, not the mechanism.
  *
  *   - the insert, which does take the lock, and looks again after it has it. That
  *     second look is what keeps two entries for one text from existing: a lookup
@@ -80,11 +82,11 @@ CvmAtomTable* cvm_atom_table_new(usize shards);
 CvmString* cvm_atom_intern(CvmAtomTable* t, CvmString* text);
 
 /*
- * The canonical string for `text`, or NULL. Takes no lock.
+ * The canonical string for `text`, or NULL.
  *
  * A string this returns is one that was in the table when the lookup ran; the
  * caller has to root it before its next allocation, like any other value that
- * comes back from a call.
+ * comes back from a call. Does not insert.
  */
 CvmString* cvm_atom_lookup(CvmAtomTable const* t, CvmString* text);
 
@@ -104,5 +106,10 @@ usize cvm_atom_prune(CvmAtomTable* t);
 usize cvm_atom_count(CvmAtomTable* t);
 
 usize cvm_atom_shards(CvmAtomTable const* t);
+
+/* Buckets across the shards. What a table costs, as opposed to what it holds:
+ * a table that has been busy and then pruned has to come back down to the buckets
+ * its entries need, and this is the number that says whether it did. */
+usize cvm_atom_buckets(CvmAtomTable* t);
 
 #endif /* CVM_ATOM_H */

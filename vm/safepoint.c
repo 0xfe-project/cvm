@@ -223,6 +223,9 @@ bool cvm_safepoint_acquire(void) {
 
     CvmThreadNode* self = cvm_thread_node();
 
+    /* Raw: a thread parking for a collection must stay visible to it -- that
+     * is what parking is for -- and this lock is held while waiting on the
+     * condition, with the wait releasing it. */
     rt_mutex_lock(&stw_mutex);
 
     if (atomic_load_explicit(&cvm_safepoint_requested, memory_order_acquire)) {
@@ -302,6 +305,9 @@ void cvm_safepoint_release(void) {
 
     atomic_store_explicit(&stw_owner, 0, memory_order_release);
 
+    /* Raw: a thread parking for a collection must stay visible to it -- that
+     * is what parking is for -- and this lock is held while waiting on the
+     * condition, with the wait releasing it. */
     rt_mutex_lock(&stw_mutex);
 
     /* Disarm before clearing the flag: a thread that faulted and has not
@@ -323,6 +329,9 @@ void cvm_safepoint_arm_page_if_collecting(void) {
         return;
     }
 
+    /* Raw: a thread parking for a collection must stay visible to it -- that
+     * is what parking is for -- and this lock is held while waiting on the
+     * condition, with the wait releasing it. */
     rt_mutex_lock(&stw_mutex);
     if (atomic_load_explicit(&cvm_safepoint_requested, memory_order_acquire)) {
         rt_trap_page_arm(node->trap);
@@ -362,6 +371,9 @@ void cvm_safepoint_park(void) {
 
     cvm_thread_set_activity(CVM_ACT_PARKING);
 
+    /* Raw: a thread parking for a collection must stay visible to it -- that
+     * is what parking is for -- and this lock is held while waiting on the
+     * condition, with the wait releasing it. */
     rt_mutex_lock(&stw_mutex);
 
     /* Re-check under the lock: the collection may have ended between the
@@ -389,6 +401,9 @@ void cvm_safepoint_notify_thread_changed(void) {
     if (!atomic_load(&stw_ready)) {
         return;
     }
+    /* Raw: a thread parking for a collection must stay visible to it -- that
+     * is what parking is for -- and this lock is held while waiting on the
+     * condition, with the wait releasing it. */
     rt_mutex_lock(&stw_mutex);
     rt_cond_broadcast(&stw_cond);
     rt_mutex_unlock(&stw_mutex);
