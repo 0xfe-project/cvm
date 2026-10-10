@@ -697,11 +697,26 @@ TEST the_block_and_lines_of_a_marked_object_are_marked(void) {
 
     ASSERT(block_meta_is_marked(block));
 
+    /*
+     * And the lines, deliberately, are *not*.
+     *
+     * The marker used to compute each object's extent -- through the header,
+     * the descriptor, and for an array the length out of the payload -- and
+     * mark every line it covered, so the sweeper would keep them. The sweeper
+     * does that itself now, from the metadata table (sweeper.c,
+     * mark_survivors_lines), which is work moved out of the pause and into
+     * the sweep. What the marker owes the sweep is the object's mark and its
+     * block's; the fixtures in this file check the rest.
+     */
     u32 block_index = block_index_of(heap()->heap_start, (u8*)cvm_header_of(leaf));
     LineMeta* lines = cvm_heap_line_meta(heap(), block_index);
     u32 line = block_line_index_of(block_start_of((u8*)cvm_header_of(leaf)),
                                    (u8*)cvm_header_of(leaf));
-    ASSERT(line_meta_is_marked(&lines[line]));
+    ASSERT_FALSE(line_meta_is_marked(&lines[line]));
+
+    /* The object's own slot, and its extent, are what the sweep reads. */
+    ObjectMeta* slot = bytemap_get(heap()->bytemap, (u8 const*)cvm_header_of(leaf));
+    ASSERT(object_meta_is_marked(slot));
 
     FRAME_END();
     fixture_leave();

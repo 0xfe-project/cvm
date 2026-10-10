@@ -150,6 +150,23 @@ typedef enum ObjectFlag {
     CVM_OM_ALLOCATED = 0x2,
     CVM_OM_MARKED = 0x3,
 
+    /*
+     * The object's *last* slot, written when it is allocated.
+     *
+     * The object's extent, in the table rather than in the object: the
+     * marker needs to know which lines a survivor reaches so the sweeper
+     * keeps them, and the sweeper needs to step over objects without
+     * reading them -- both of which used to go through the object header,
+     * the descriptor, and for an array the length out of the payload.
+     * Whippet's mark byte records the object end for exactly this reason:
+     * "finding holes in a block can just read the mark table and can avoid
+     * looking at object memory" (doc/collector-mmc.md).
+     *
+     * One slot, not a bit: the state is masked and compared, so a bit in
+     * the state field would collide with the states themselves.
+     */
+    CVM_OM_END = 0x4,
+
     CVM_OM_FLAG_WEAK = 0x8,
     CVM_OM_FLAG_FINALIZER = 0x10,
 } ObjectFlag;
@@ -194,6 +211,13 @@ CVM_INLINE bool object_meta_is_marked(ObjectMeta const* m) {
     return object_meta_state(m) == (u8)CVM_OM_MARKED;
 }
 
+/* The last slot of an object, as opposed to a slot inside it: an object's
+ * interior slots read free, which is what makes a start slot the only place
+ * an object can be found. */
+CVM_INLINE bool object_meta_is_end(ObjectMeta const* m) {
+    return object_meta_state(m) == (u8)CVM_OM_END;
+}
+
 /* True for anything that is not free: allocated, marked, or placeholder. */
 CVM_INLINE bool object_meta_is_occupied(ObjectMeta const* m) {
     return object_meta_state(m) != (u8)CVM_OM_FREE;
@@ -231,6 +255,26 @@ CVM_INLINE void object_meta_set_placeholder(ObjectMeta* m) {
 
 CVM_INLINE void object_meta_set_allocated(ObjectMeta* m) {
     object_meta_set_state(m, CVM_OM_ALLOCATED);
+}
+
+CVM_INLINE void object_meta_set_end(ObjectMeta* m) {
+    object_meta_set_state(m, CVM_OM_END);
+}
+
+/*
+ * Sweep decision for one slot, for a slot that is *not* an object's end.
+ *
+ * A marked object survives as allocated, anything else without an object
+ * starting at it becomes free. An end slot is neither: it belongs to the
+ * object that starts earlier, so the walk that sweeps an object decides its
+ * fate with the rest of the object's slots. See the sweeper.
+ */
+CVM_INLINE void object_meta_sweep_inside(ObjectMeta* m) {
+    if (object_meta_is_marked(m)) {
+        object_meta_set_allocated(m);
+    } else if (!object_meta_is_end(m)) {
+        object_meta_set_free(m);
+    }
 }
 
 CVM_INLINE void object_meta_set_marked(ObjectMeta* m) {

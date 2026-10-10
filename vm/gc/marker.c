@@ -192,33 +192,22 @@ static void mark_metadata(CvmHeap* heap, u8* start, ObjectMeta* meta, u8 was) {
         block_meta_mark(block);
     }
 
-    usize size = cvm_object_size((CvmGcHeader const*)start);
-    u8* last = start + size - 1;
-
     /*
-     * An object never spans blocks: the largest object the line-based
-     * allocator produces is smaller than a block. The assertion is here
-     * rather than assumed because the line walk below would silently
-     * touch the wrong block's line table if it ever became false.
+     * And no line marks.
+     *
+     * This used to compute the object's extent -- through the header, the
+     * descriptor, and for an array the length out of the payload -- and mark
+     * every line the object covers, so that the sweeper would keep them. The
+     * sweeper can work that out itself, from the metadata table: it walks the
+     * block's slots, finds the survivors, and reads each one's end out of the
+     * table (see CVM_OM_END). That is whippet's division of labour -- its
+     * marker writes the object's own byte and its block's, and its sweeper
+     * derives the rest "without looking at object memory" -- and it moves
+     * work out of the pause, where the marker runs, into the sweep, where
+     * there is time.
+     *
+     * What is left here is what only the marker knows: this object survived.
      */
-    cvm_assert(block_index_of(heap->heap_start, start) ==
-               block_index_of(heap->heap_start, last));
-
-    u32 block_index = block_index_of(heap->heap_start, start);
-    LineMeta* lines = cvm_heap_line_meta(heap, block_index);
-
-    u32 first_line = block_line_index_of(block_start_of(start), start);
-    u32 last_line = block_line_index_of(block_start_of(last), last);
-
-    /*
-     * Same argument as the block mark, one level finer: a 256-byte line holds
-     * about ten of these objects, so nine writes in ten would be redundant.
-     */
-    for (u32 line = first_line; line <= last_line; line++) {
-        if (!line_meta_is_marked(&lines[line])) {
-            line_meta_mark(&lines[line]);
-        }
-    }
 }
 
 static void mark_object(CvmHeap* heap, u8* start, ObjectMeta* meta, u8 was,

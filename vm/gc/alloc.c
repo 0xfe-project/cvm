@@ -144,6 +144,10 @@ static opaque_mut publish(CvmAllocator* alloc, u8* start, usize size,
     ObjectMeta* meta = bytemap_get(alloc->bytemap, start);
     object_meta_set_allocated(meta);
 
+    /* The object's extent, in the table: see the note on CVM_OM_END. The
+     * inlined path writes this itself; this is the slow path's half. */
+    object_meta_set_end(meta + size / CVM_ALLOC_ALIGNMENT - 1);
+
     return (opaque_mut)(header + 1); /* the payload */
 }
 

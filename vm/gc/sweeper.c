@@ -126,6 +126,15 @@ static void sweep_line_with_finalizers(ObjectMeta* line_cursor, u8* line_start) 
             object_meta_set_free(slot);
         } else if (object_meta_is_marked(slot)) {
             object_meta_set_allocated(slot);
+        } else if (object_meta_is_end(slot)) {
+            /*
+             * The end of an object that reached into this line, and the line
+             * survived because of it: it stays, because the next sweep reads
+             * extents out of these. A dead object's end marker inside a kept
+             * line is left where it is -- the allocator never bumps into a
+             * kept line, so nothing can be allocated over it, and the line's
+             * slots are cleared in bulk when the line itself is freed.
+             */
         } else {
             /* Already free, or a placeholder for a large object's
              * interior. Both become free, which is what
@@ -175,6 +184,114 @@ static void sweep_line_with_finalizers(ObjectMeta* line_cursor, u8* line_start) 
  * same mistake: the block stays described as in use, and the symptom is a
  * collection that reclaims nothing.
  */
+/*
+ * How many slots the object starting at `index` covers.
+ *
+ * Read out of the metadata table, which is the point: the marker does not
+ * need it any more (it marks the object and its block and nothing else) and
+ * the sweeper must not read the object -- it runs while the program does, and
+ * the object and its descriptor are the coldest lines it could touch. Whippet
+ * records the same thing in its mark byte for the same reason: "finding holes
+ * in a block can just read the mark table and can avoid looking at object
+ * memory" (doc/collector-mmc.md).
+ *
+ * The fallback is the descriptor, for an object whose end marker is not
+ * there. That should not happen -- every line-managed allocation writes one
+ * -- but a wrong extent here frees a live object's tail, so the slow path is
+ * preferred to a guess. The scan is bounded by the block because an object
+ * never spans one.
+ */
+static u32 object_slots_at(u8* block_start, ObjectMeta* slots, u32 index) {
+    for (u32 i = index + 1; i < CVM_SLOTS_PER_BLOCK; i++) {
+        if (object_meta_is_end(&slots[i])) {
+            return i - index + 1;
+        }
+    }
+
+    u8* addr = block_start + (usize)index * CVM_ALLOC_ALIGNMENT;
+    return (u32)(cvm_object_size((CvmGcHeader const*)addr) / CVM_ALLOC_ALIGNMENT);
+}
+
+/*
+ * Which lines the survivors in this block reach.
+ *
+ * This is what the marker used to do, and moving it here is the point of the
+ * exercise: it is a pass over the block's metadata, which the sweep has time
+ * for and the pause does not. A line is kept because some object that
+ * survived covers part of it -- including the lines after the first, which is
+ * why the object's end has to be readable from the table rather than assumed
+ * from a mark on its first line.
+ */
+/*
+ * Whether a line's slots are all zero, which means nothing is in it: no
+ * object starts there and no object's extent reaches it.
+ *
+ * Two loads and two compares, because that is all it takes -- a word is zero
+ * exactly when all of its bytes are. (The tempting SWAR idiom is for the
+ * other question, "does any byte equal X", and using it here answers a
+ * different question badly: eight slots of zeroes and one holding a mark
+ * would read as empty.)
+ *
+ * This is what keeps the pass from costing more than the marking it
+ * replaced: it runs over *every* slot of every block being swept, where the
+ * marker only saw the objects that survived.
+ */
+/*
+ * Whether the slots from `index` to the end of its group of eight are empty.
+ *
+ * From the *current* slot, not from an aligned one: an object's start is
+ * wherever it is, and requiring alignment would make this test fail to apply
+ * for the rest of the group every time an object interrupted it. That is
+ * what the first version of this did, and it is why the pass stayed
+ * expensive.
+ */
+CVM_INLINE bool slots_to_group_end_are_empty(ObjectMeta* slots, u32 index) {
+    u32 in_group = index % 8;
+    u64 word;
+    __builtin_memcpy(&word, &slots[index - in_group], sizeof(word));
+    return (word >> (in_group * 8)) == 0;
+}
+
+static void mark_survivors_lines(u8* block_start, ObjectMeta* slots,
+                                 LineMeta* line_metas) {
+    for (u32 i = 0; i < CVM_SLOTS_PER_BLOCK;) {
+        /*
+         * Eight slots with nothing in them, skipped in one load. Most of a
+         * heap is empty, and this pass runs over every slot of every block
+         * being swept -- where the marker only ever saw the objects that
+         * survived -- so the skipping is what keeps it from costing more
+         * than the marking it replaced.
+         */
+        if (slots_to_group_end_are_empty(slots, i)) {
+            i += 8 - (i % 8);
+            continue;
+        }
+
+        u8 state = object_meta_state(&slots[i]);
+
+        if (state == CVM_OM_MARKED) {
+            u32 count = object_slots_at(block_start, slots, i);
+            cvm_assert(count > 0);
+            cvm_assert(i + count <= CVM_SLOTS_PER_BLOCK);
+
+            for (u32 slot = i; slot < i + count; slot++) {
+                LineMeta* line = &line_metas[slot / CVM_SLOTS_PER_LINE];
+                if (!line_meta_is_marked(line)) {
+                    line_meta_mark(line);
+                }
+            }
+            i += count;
+        } else if (state == CVM_OM_PLACEHOLDER) {
+            /* The interior of a large object: its extent is the chunk's, at
+             * large-object granularity, and nothing here is line-managed. */
+            i += CVM_LARGE_OBJECT_MIN_SIZE / CVM_ALLOC_ALIGNMENT;
+        } else {
+            /* Free, or the end of an object that did not survive. */
+            i++;
+        }
+    }
+}
+
 static u32 cvm_sweep_simple_block(CvmHeap* heap, CvmThreadNode* target,
                                   BlockMeta* block_meta, u8* block_start,
                                   LineMeta* line_metas, CvmSweepResult* result) {
@@ -214,6 +331,8 @@ static u32 cvm_sweep_simple_block(CvmHeap* heap, CvmThreadNode* target,
 
     cvm_assert(block_meta_is_marked(block_meta));
     block_meta_unmark(block_meta);
+
+    mark_survivors_lines(block_start, bytemap_get(bytemap, block_start), line_metas);
 
     /* Three cursors advancing together: line index, line metadata, and the
      * bytemap entry for the line's first slot. */
