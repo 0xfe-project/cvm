@@ -180,7 +180,8 @@ TEST a_strongly_reachable_target_survives(void) {
 
     Leaf* leaf = cvm_alloc(&leaf_desc);
     Node* holder = cvm_alloc(&node_desc);
-    holder->next = leaf; /* a strong path to the same object */
+    cvm_store_field(holder, offsetof(Node, next),
+                    leaf); /* a strong path to the same object */
 
     void* weak = cvm_weak_ref_new(leaf);
 
@@ -248,7 +249,7 @@ TEST many_weak_refs_are_all_handled(void) {
 
     /* one extra weak reference whose target is also strongly reachable */
     Node* holder = cvm_alloc(&node_desc);
-    holder->next = alive_target;
+    cvm_store_field(holder, offsetof(Node, next), alive_target);
     void* survivor = cvm_weak_ref_new(alive_target);
 
     /* a second frame for the holder and the survivor */

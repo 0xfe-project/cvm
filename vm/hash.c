@@ -13,6 +13,7 @@
  */
 
 #include "cvm/hash.h"
+#include "cvm/retire.h"
 
 #include <stdatomic.h>
 
@@ -101,13 +102,36 @@ CVM_INLINE void bit_clear(u32* words, usize i) {
                               memory_order_release);
 }
 
-/* The key in a bucket, on the same terms as the bit above. */
+/*
+ * The key in a bucket, on the same terms as the bit above.
+ *
+ * The store is atomic because the load is: a lock-free reader takes a snapshot
+ * of the arrays and then walks them, and mixing atomic and non-atomic access to
+ * one address is a data race whichever way round it is. That is why the barrier
+ * is a separate call here rather than being the store itself.
+ */
 CVM_INLINE opaque_mut slot_key(opaque_mut const* items, usize i) {
     return atomic_load_explicit((opaque_mut const _Atomic*)(items + i),
                                 memory_order_relaxed);
 }
 
+/* Key store into an array the map is already publishing: the barrier goes with
+ * it. */
 CVM_INLINE void slot_key_set(opaque_mut* items, usize i, opaque_mut key) {
+    atomic_store_explicit((opaque_mut _Atomic*)(items + i), key, memory_order_relaxed);
+    cvm_store_barrier(key);
+}
+
+/*
+ * Key store into an array nothing can reach yet.
+ *
+ * The exemption in the barrier's contract, named so that it is a decision
+ * rather than an omission: a rehash fills a fresh array and publishes it at the
+ * end, so the marker cannot see these slots while they are being written, and
+ * the keys being copied stay reachable from the old array, which is in a frame
+ * slot for the whole rehash.
+ */
+CVM_INLINE void slot_key_set_fresh(opaque_mut* items, usize i, opaque_mut key) {
     atomic_store_explicit((opaque_mut _Atomic*)(items + i), key, memory_order_relaxed);
 }
 
@@ -139,6 +163,30 @@ CVM_INLINE u32 map_bits_load(CvmHashMap const* m) {
 
 static void map_publish(CvmHashMap* m, CvmRefArray* keys, CvmRefArray* values,
                         opaque_mut used, u32 bits) {
+    /*
+     * The arrays being replaced stay readable for one more collection. A
+     * lock-free reader holds a snapshot of the old ones (map_view) and walks
+     * them after this publication; the sweep would reclaim them the moment
+     * they become unreachable, which is a use-after-free under a reader that
+     * started a moment earlier. Retiring is what makes the lock-free read
+     * safe -- see cvm/retire.h for the argument that one collection of grace
+     * is enough.
+     *
+     * Before the stores, so a reader that sees the new arrays is guaranteed
+     * the old ones are already on the retire list.
+     */
+    if (m->ops->lock_free_readers) {
+        if (m->keys != keys) {
+            cvm_retire((opaque_mut)m->keys);
+        }
+        if (m->values != values) {
+            cvm_retire((opaque_mut)m->values);
+        }
+        if (m->used != used) {
+            cvm_retire(m->used);
+        }
+    }
+
     atomic_store_explicit((opaque_mut _Atomic*)&m->used, used, memory_order_release);
     atomic_store_explicit((u32 _Atomic*)&m->bits, bits, memory_order_release);
     /* Last: this is the field a reader checks to know the snapshot still stands. */
@@ -443,7 +491,8 @@ static bool map_rehash(CvmHashMap* m, usize buckets) {
                 slot = (slot + 1u) & (buckets - 1u);
             }
             bit_set(used->bits, slot);
-            slot_key_set(keys->items, slot, key);
+            slot_key_set_fresh(keys->items, slot, key);
+            /* Fresh array, same exemption as the key above. */
             values->items[slot] = m->values->items[i];
         }
     }
@@ -539,7 +588,8 @@ usize cvm_map_compact(CvmHashMap* m) {
             slot = (slot + 1u) & mask;
         }
         bit_set(used->bits, slot);
-        slot_key_set(keys->items, slot, key);
+        slot_key_set_fresh(keys->items, slot, key);
+        /* Fresh array, same exemption as the key above. */
         values->items[slot] = m->values->items[i];
     }
 
@@ -597,7 +647,7 @@ opaque_mut cvm_map_put(CvmHashMap* m, opaque_mut key, opaque_mut value, bool* ab
 
     if (found) {
         opaque_mut previous = map->values->items[slot];
-        map->values->items[slot] = f_roots[2];
+        cvm_store_ptr(&map->values->items[slot], f_roots[2]);
         if (absent != NULL) {
             *absent = false;
         }
@@ -606,7 +656,7 @@ opaque_mut cvm_map_put(CvmHashMap* m, opaque_mut key, opaque_mut value, bool* ab
     }
 
     slot_key_set(map->keys->items, slot, map->ops->store(f_roots[1]));
-    map->values->items[slot] = f_roots[2];
+    cvm_store_ptr(&map->values->items[slot], f_roots[2]);
     bit_set(bit_words_mut(map), slot);
     map->count++;
 
@@ -654,15 +704,38 @@ static void map_vacate(CvmHashMap* m, usize i) {
         bool movable = (j > i) ? (home <= i || home > j) : (home <= i && home > j);
         if (movable) {
             slot_key_set(m->keys->items, i, slot_key(m->keys->items, j));
-            m->values->items[i] = m->values->items[j];
+            cvm_store_ptr(&m->values->items[i], m->values->items[j]);
             i = j;
         }
     }
 
     bit_clear(used, i);
     slot_key_set(m->keys->items, i, NULL);
-    m->values->items[i] = NULL;
+    cvm_store_ptr(&m->values->items[i], NULL);
     m->count--;
+}
+
+/*
+ * The bucket holding `key` and the key stored there, from one snapshot.
+ *
+ * For a caller that takes no lock. Reading the slot and then the key with two
+ * separate calls is a race with a resize between them: the slot belongs to the
+ * old array's bounds, the key read would index the new one. One view, one
+ * answer.
+ */
+bool cvm_map_find_key(CvmHashMap const* m, opaque_mut key, opaque_mut* stored_out) {
+    MapView v = map_view(m);
+    usize slot = map_find_view(&v, m->ops, m->ops->hash(key), key);
+    if (slot == CVM_MAP_NO_SLOT) {
+        if (stored_out != NULL) {
+            *stored_out = NULL;
+        }
+        return false;
+    }
+    if (stored_out != NULL) {
+        *stored_out = slot_key(v.keys, slot);
+    }
+    return true;
 }
 
 usize cvm_map_slot(CvmHashMap const* m, opaque_mut key) {

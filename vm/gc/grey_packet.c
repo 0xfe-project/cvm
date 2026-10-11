@@ -89,7 +89,7 @@ bool cvm_grey_list_init(CvmGreyList* list) {
     if (!rt_mutex_init(&list->lock)) {
         return false;
     }
-    list->head = cvm_grey_list_empty();
+    atomic_store_explicit(&list->head, cvm_grey_list_empty(), memory_order_relaxed);
     list->ready = true;
     return true;
 }
@@ -100,14 +100,16 @@ u32 cvm_grey_list_size(CvmGreyList const* list) {
         return 0;
     }
 
-    /* Raw: the collector's own threads, and a packet list is pushed to from the
-     * marker and the barrier alike. */
-    rt_mutex_lock(&mutable_list->lock);
+    /*
+     * No lock: this is the termination check's read, and it ran twice a
+     * round against the same lock every push and pop contends for. A stale
+     * count is harmless -- it makes the check look again, and the answer it
+     * trusts comes from the workers being idle, which is waited on
+     * separately. Writers still hold the lock; this reads the one word.
+     */
     CvmGreyPacketRef ref;
-    ref.atom = mutable_list->head;
-    u32 count = u24_to_u32(ref.sep.size);
-    rt_mutex_unlock(&mutable_list->lock);
-    return count;
+    ref.atom = atomic_load_explicit(&mutable_list->head, memory_order_relaxed);
+    return u24_to_u32(ref.sep.size);
 }
 
 void cvm_grey_list_push(CvmGreyList* list, CvmGreyPacket* packets_start,
@@ -119,7 +121,7 @@ void cvm_grey_list_push(CvmGreyList* list, CvmGreyPacket* packets_start,
     rt_mutex_lock(&list->lock);
 
     CvmGreyPacketRef head;
-    head.atom = list->head;
+    head.atom = atomic_load_explicit(&list->head, memory_order_relaxed);
 
     CvmGreyPacketRef next;
     next.sep.idx = u24_from_u32(index);
@@ -137,7 +139,7 @@ void cvm_grey_list_push(CvmGreyList* list, CvmGreyPacket* packets_start,
         packet->next.atom = head.atom;
     }
 
-    list->head = next.atom;
+    atomic_store_explicit(&list->head, next.atom, memory_order_relaxed);
     rt_mutex_unlock(&list->lock);
 }
 
@@ -153,7 +155,7 @@ void cvm_grey_list_push_all(CvmGreyList* list, CvmGreyPacket* packets_start,
     rt_mutex_lock(&list->lock);
 
     CvmGreyPacketRef head;
-    head.atom = list->head;
+    head.atom = atomic_load_explicit(&list->head, memory_order_relaxed);
 
     CvmGreyPacketRef next;
     next.sep.idx = u24_from_u32(index);
@@ -171,7 +173,7 @@ void cvm_grey_list_push_all(CvmGreyList* list, CvmGreyPacket* packets_start,
         last->next.atom = head.atom;
     }
 
-    list->head = next.atom;
+    atomic_store_explicit(&list->head, next.atom, memory_order_relaxed);
     rt_mutex_unlock(&list->lock);
 }
 
@@ -181,7 +183,7 @@ CvmGreyPacket* cvm_grey_list_pop(CvmGreyList* list, CvmGreyPacket* packets_start
     rt_mutex_lock(&list->lock);
 
     CvmGreyPacketRef head;
-    head.atom = list->head;
+    head.atom = atomic_load_explicit(&list->head, memory_order_relaxed);
 
     u32 index = u24_to_u32(head.sep.idx);
 
@@ -198,7 +200,7 @@ CvmGreyPacket* cvm_grey_list_pop(CvmGreyList* list, CvmGreyPacket* packets_start
 
     if (next != 0) {
         /* The packet holds the rest of the list. */
-        list->head = next;
+        atomic_store_explicit(&list->head, next, memory_order_relaxed);
     } else {
         /* No link means the next packet is the adjacent one, and the count
          * drops by one. */
@@ -206,7 +208,7 @@ CvmGreyPacket* cvm_grey_list_pop(CvmGreyList* list, CvmGreyPacket* packets_start
         n.sep.idx = u24_add(head.sep.idx, 1);
         n.sep.size = u24_add(head.sep.size, -1);
         n.sep._reserved = 0;
-        list->head = n.atom;
+        atomic_store_explicit(&list->head, n.atom, memory_order_relaxed);
     }
 
     rt_mutex_unlock(&list->lock);

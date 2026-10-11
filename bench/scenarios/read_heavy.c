@@ -43,8 +43,8 @@ static void read_heavy(unsigned iteration) {
             break;
         }
         Node *n = p;
-        n->next = BENCH_ROOT(f, 0);
-        n->other = BENCH_ROOT(f, 1);
+        BENCH_STORE(n, offsetof(Node, next), BENCH_ROOT(f, 0));
+        BENCH_STORE(n, offsetof(Node, other), BENCH_ROOT(f, 1));
         n->value = i;
         BENCH_ROOT(f, 1) = BENCH_ROOT(f, 0);
         BENCH_ROOT(f, 0) = p;

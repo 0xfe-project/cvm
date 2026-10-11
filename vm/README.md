@@ -75,10 +75,20 @@ design claim rather than a tuning result.
 slots a frame declares and nothing else; a conservative collector reads the
 whole stack, word by word, on every collection.
 
-**Good at not taxing the program.** There is no write barrier and no read
-barrier, so a pointer store is a store. This is the trade against a
-concurrent collector, which buys short pauses with barrier cost on every
-store.
+**Good at not taxing the program.** There is no read barrier, and the write
+barrier is conditional rather than unconditional: it acts only while a mark
+phase is running, so a pointer store outside marking is a load of a shared
+flag, a branch the predictor gets right, and the store. Under the
+stop-the-world marking this collector does today, the only threads that can
+store during a mark are the ones a collection does not stop — the unmanaged
+ones, inside a foreign call or blocked in a wait — which is the same window
+the root table's barrier has always existed for.
+
+Measured on one tree with the barrier on and off, every row is within noise of
+every other, including `write-heavy`, which is nothing but pointer stores into
+live objects and exists to price exactly this. The trade against a concurrent
+collector is therefore not "a barrier or no barrier": it is that this one pays
+the barrier only while it is marking, and pays for it in pause length instead.
 
 **It pays in pause length.** Marking is stop-the-world, so the pause scales
 with the live set. A collector that marks concurrently has a pause that does
@@ -111,7 +121,11 @@ void walk(void) {
     CVM_FRAME_DECL(f, 2);           /* two root slots, on this stack frame */
     cvm_frame_push(&f_frame, f_roots, 2);
     f_roots[0] = cvm_alloc(&node_type);
-    f_roots[1] = cvm_alloc_array(&node_type, 100, sizeof(void *));
+    f_roots[1] = cvm_alloc(&node_type);
+
+    /* A pointer into an object's field. */
+    cvm_store_field(f_roots[0], node_fields[0].offset, f_roots[1]);
+
     cvm_frame_pop(&f_frame);
 }
 
@@ -122,12 +136,22 @@ int main(void) {
 }
 ```
 
-Three things to get right, and none of them is optional:
+Four things to get right, and none of them is optional:
 
 - **Every function that can allocate pushes a frame first**, and pops it
   before returning. The push is also where the safepoint poll lives, so a
   function that skips it is not merely missing roots — it has opted out of
   being stopped.
+- **A pointer store goes through `cvm_store_field`**, not through a bare
+  `obj->field = value`. Marking is a graph traversal and a traversal needs the
+  graph to hold still: the marker marks an object, traces its fields and never
+  looks at it again, so a store into an object it has already finished with
+  would leave the object it now points at unmarked, collected, and the field
+  pointing at freed memory — with nothing reporting it. The store is the only
+  moment a program can make an unmarked object reachable from a marked one, so
+  the store is where the barrier lives. See the contract on `cvm_store_field`
+  in `cvm/gc.h` for what it costs and for the one case that is exempt (filling
+  an object nothing can reach yet).
 - **Descriptor offsets are relative to the payload**, not to the object's
   start. `cvm_header_of` converts between the two, and the header is one
   step back from what generated code holds.
@@ -136,8 +160,18 @@ Three things to get right, and none of them is optional:
   how far the object reaches.
 
 `cvm_init`'s options cover the heap's minimum and maximum, how many GC
-workers to run, whether finalizers get their own thread, where the event log
-goes, and the log level. `cvm_vm_stats` reports collections, time spent,
+workers to run, whether marking runs alongside the program
+(`concurrent_mark` — off by default; on, the stop-the-world window stops
+being where the marking happens, and a pointer store's barrier earns its
+keep), whether finalizers get their own thread, where the event log goes,
+and the log level.
+
+A container that replaces a structure a lock-free reader may still be
+walking retires it rather than dropping it: `cvm_retire` keeps the old object
+alive through one more collection, which is long enough that every reader
+who entered before the replacement has passed a safepoint. See
+`cvm/retire.h` for the contract and the argument; the hash table and the
+atom table are the users. `cvm_vm_stats` reports collections, time spent,
 live objects and heap size; `cvm_collect` forces a collection, which is what
 the benchmark's fixed-cadence mode calls.
 

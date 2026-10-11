@@ -45,14 +45,14 @@ static void write_heavy(unsigned iteration) {
         }
         Node *n = p;
         for (unsigned s = 0; s < 8; s++) {
-            n->slots[s] = NULL;
+            BENCH_STORE(n, offsetof(Node, slots) + s * sizeof(void *), NULL);
         }
         n->tag = i;
         if (BENCH_ROOT(f, 0) == NULL) {
             BENCH_ROOT(f, 0) = p; /* head */
         } else {
             Node *prev = BENCH_ROOT(f, 1);
-            prev->slots[0] = p;
+            BENCH_STORE(prev, offsetof(Node, slots), p);
         }
         BENCH_ROOT(f, 1) = p;
     }
@@ -60,7 +60,7 @@ static void write_heavy(unsigned iteration) {
     /* Close the ring so the traversal never ends early. */
     if (BENCH_ROOT(f, 1) != NULL) {
         Node *last = BENCH_ROOT(f, 1);
-        last->slots[0] = BENCH_ROOT(f, 0);
+        BENCH_STORE(last, offsetof(Node, slots), BENCH_ROOT(f, 0));
     }
 
     /*
@@ -79,7 +79,7 @@ static void write_heavy(unsigned iteration) {
          */
         Node *next = n->slots[0];
         for (unsigned s = 0; s < 8; s++) {
-            n->slots[s] = next;
+            BENCH_STORE(n, offsetof(Node, slots) + s * sizeof(void *), next);
         }
         n->tag = round;
         n = next;

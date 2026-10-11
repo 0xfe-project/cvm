@@ -28,6 +28,7 @@
  * heap's live-object count and size, which cvm does maintain.
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "cvm/gc.h"
@@ -127,6 +128,17 @@ static bool init_ok = false;
 static bool cvm_backend_init(size_t heap_hint, bool alloc_only) {
     CvmOptions opts = {0};
     opts.gc_workers = CVM_GC_WORKERS_DEFAULT;
+
+    /*
+     * A fixed worker count, for measuring the marker's scaling rather than
+     * the default policy. Unset is the default, and every recorded row uses
+     * the default: this exists to answer "how many workers is right", not to
+     * produce numbers.
+     */
+    char const *workers = getenv("CVM_BENCH_GC_WORKERS");
+    if (workers != NULL && workers[0] != '\0') {
+        opts.gc_workers = (u32)strtoul(workers, NULL, 10);
+    }
     opts.max_heap_size = heap_hint; /* in auto/fixed this is auto_heap_bytes */
 
     /*

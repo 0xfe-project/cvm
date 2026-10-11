@@ -27,6 +27,12 @@ static str const event_names[CVM_EVENT_TYPE_COUNT] = {
     [CVM_EVENT_MARK] = {.ptr = (u8 const*)"mark", .len = 4},
     [CVM_EVENT_NULLIFY] = {.ptr = (u8 const*)"nullify", .len = 7},
     [CVM_EVENT_SWEEP] = {.ptr = (u8 const*)"sweep", .len = 5},
+    /* "concmark" is the pool workers' mark loop, and what it measures depends
+     * on the collector: alongside the program when concurrent marking chose
+     * this collection, and inside the stop-the-world window otherwise, where
+     * it is parallel rather than concurrent. The name is the worker's role,
+     * not the mode; the mode is in the collection's own event shape (two
+     * short pauses rather than one long one). */
     [CVM_EVENT_CONCURRENT_MARK] = {.ptr = (u8 const*)"concmark", .len = 8},
     [CVM_EVENT_CONCURRENT_NULLIFY] = {.ptr = (u8 const*)"concnullify", .len = 11},
     [CVM_EVENT_CONCURRENT_SWEEP] = {.ptr = (u8 const*)"concsweep", .len = 9},
@@ -184,6 +190,46 @@ void cvm_gc_counters_record_collection(u64 start_ns, u64 end_ns) {
                                   &gc_counters.pause_max_ns, &seen, duration,
                                   memory_order_relaxed, memory_order_relaxed)) {
     }
+}
+
+/*
+ * Record one stop-the-world window's length, without counting a collection.
+ *
+ * Concurrent marking stops the world twice per collection, and the pause a
+ * program feels is each window, not the span between the first stop and the
+ * second -- that span is marking time, spent alongside the program. The
+ * collection counter and the total keep their meaning; only the maximum is
+ * maintained here.
+ */
+void cvm_gc_counters_record_pause(u64 start_ns, u64 end_ns) {
+    if (start_ns == 0) {
+        return;
+    }
+    u64 duration = end_ns - start_ns;
+    u64 seen = atomic_load_explicit(&gc_counters.pause_max_ns, memory_order_relaxed);
+    while (duration > seen && !atomic_compare_exchange_weak_explicit(
+                                  &gc_counters.pause_max_ns, &seen, duration,
+                                  memory_order_relaxed, memory_order_relaxed)) {
+    }
+}
+
+/*
+ * Count a collection and add its stop-the-world time to the total, without
+ * touching the pause maximum -- for a collection whose windows are recorded
+ * separately, one per window.
+ *
+ * The amount added is the pauses, not the span between the first stop and the
+ * second, because the span is marking time spent alongside the program and
+ * the total this feeds is "how long was the world stopped". The
+ * stop-the-world collector adds the same thing by a different route: its
+ * span and its pause are the same interval. The full span is in the event
+ * log, which is where a question about collection duration rather than
+ * program delay belongs.
+ */
+void cvm_gc_counters_record_span(u64 pause_ns) {
+    atomic_fetch_add_explicit(&gc_counters.collections, 1u, memory_order_relaxed);
+    atomic_fetch_add_explicit(&gc_counters.collection_ns, pause_ns,
+                              memory_order_relaxed);
 }
 
 u64 cvm_gc_counters_collections(void) {

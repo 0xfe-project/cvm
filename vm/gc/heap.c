@@ -295,6 +295,15 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
                            heap->mark.packet_count);
 
     /*
+     * The collector's own deque, sized like the workers', for when marking
+     * runs without a pool. Initialized here, after packet_count is set.
+     */
+    if (!cvm_worklist_init(&heap->mark.work, heap->mark.packet_count)) {
+        cvm_heap_destroy(heap);
+        return false;
+    }
+
+    /*
      * Marking bookkeeping. `has_history` false means the growth decision
      * has no previous collection to read, which is correct for a fresh
      * heap — and setting it explicitly matters because the heap struct may
@@ -308,6 +317,20 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     heap->mark.last_mark_ns = 0;
     heap->mark.last_period_ns = 0;
     heap->mark.has_history = false;
+    heap->mark.busy = false;
+    heap->mark.concurrent_enabled = false;
+    heap->mark.last_was_concurrent = false;
+
+    heap->retired.previous = NULL;
+    heap->retired.previous_count = 0;
+    heap->retired.previous_cap = 0;
+    heap->retired.current = NULL;
+    heap->retired.current_count = 0;
+    heap->retired.current_cap = 0;
+    if (!rt_mutex_init(&heap->retired.lock)) {
+        cvm_heap_destroy(heap);
+        return false;
+    }
 
     CVM_LOG_INFO(m) {
         fmt_lit(&m.fmt, "heap: ");
@@ -324,6 +347,14 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
 }
 
 void cvm_heap_destroy(CvmHeap* heap) {
+    if (heap->retired.current != NULL || heap->retired.previous != NULL) {
+        rt_mutex_destroy(&heap->retired.lock);
+    }
+    rt_mem_free((opaque_mut)heap->retired.previous);
+    rt_mem_free((opaque_mut)heap->retired.current);
+    heap->retired.previous = NULL;
+    heap->retired.current = NULL;
+    cvm_worklist_destroy(&heap->mark.work);
     cvm_region_release(&heap->blocks);
     cvm_region_release(&heap->grey_packets_region);
     cvm_region_release(&heap->block_meta_region);

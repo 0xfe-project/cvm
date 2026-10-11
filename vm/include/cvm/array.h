@@ -93,7 +93,8 @@ CVM_INLINE opaque_mut cvm_ref_array_get(CvmRefArray const* a, usize i) {
  */
 CVM_INLINE void cvm_ref_array_set(CvmRefArray* a, usize i, opaque_mut item) {
     cvm_assert(i < a->capacity);
-    a->items[i] = item;
+    /* A slot of a live array, so the store goes through the barrier. */
+    cvm_store_ptr(&a->items[i], item);
 }
 
 /*

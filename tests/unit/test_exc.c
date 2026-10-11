@@ -818,8 +818,8 @@ TEST a_parked_value_survives_only_if_the_descriptor_names_it(void) {
     root_roots[0] = listed;
     root_roots[1] = unlisted;
 
-    listed->pending = held_by_listed;
-    unlisted->pending = held_by_unlisted;
+    cvm_store_field(listed, offsetof(SuspendedActivation, pending), held_by_listed);
+    cvm_store_field(unlisted, offsetof(SuspendedActivation, pending), held_by_unlisted);
 
     mark_now();
 

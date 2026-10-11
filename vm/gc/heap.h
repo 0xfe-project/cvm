@@ -51,6 +51,7 @@
 #include "gc/grey_packet.h"
 #include "gc/layout.h"
 #include "gc/meta.h"
+#include "gc/worklist.h"
 #include "rt.h"
 
 /* ------------------------------------------------------------------ */
@@ -170,6 +171,34 @@ typedef struct CvmHeap {
         u32 packet_count;
         CvmGreyPacket* packets;
 
+        /*
+         * The deque for the thread that is collecting without a pool -- the
+         * single-threaded case, where marking runs on the caller. A worker has
+         * its own in CvmGcThread; the collecting thread has no CvmGcThread,
+         * and it still fills and drains packets like a marker, so it needs
+         * somewhere to stack them.
+         */
+        CvmWorklist work;
+
+        /*
+         * Whether this heap collects with concurrent marking, and whether a
+         * collection is in progress right now. See CvmOptions.concurrent_mark
+         * for the first; the second exists because a concurrent collection
+         * releases the stop-the-world window before it finishes, so the flag
+         * that guards the window no longer says "a collection is running" --
+         * a thread that arrives mid-marking has to find that out some other
+         * way, or it would start a second collection into the first.
+         */
+        bool concurrent_enabled;
+        _Atomic bool busy;
+
+        /*
+         * Whether the last collection ran concurrent, for the hysteresis
+         * between the two thresholds in layout.h: a marking job between them
+         * stays in whatever mode handled it last.
+         */
+        bool last_was_concurrent;
+
         u64 current_start_ns;
         u64 current_end_ns;
         u64 last_end_ns;
@@ -190,6 +219,28 @@ typedef struct CvmHeap {
         u64 last_period_ns;
         bool has_history;
     } mark;
+
+    /*
+     * Objects kept alive for one more collection after their replacement.
+     * See cvm/retire.h for the contract and the argument.
+     *
+     * Two lists rather than a per-entry generation: `current` collects what is
+     * retired while a collection runs or between collections, and moves to
+     * `previous` at the next collection's reset -- by which time one full
+     * marking has kept every entry alive, and the marking after that is what
+     * reclaims them. The lock is for the concurrent window, where an
+     * unmanaged thread can retire (a resize under a container's lock) while
+     * the collector marks; it is a leaf, taken by nothing else.
+     */
+    struct {
+        RtMutex lock;
+        opaque_mut* previous;
+        u32 previous_count;
+        u32 previous_cap;
+        opaque_mut* current;
+        u32 current_count;
+        u32 current_cap;
+    } retired;
 
     /* --- sweeping --- */
     struct {
@@ -292,6 +343,10 @@ typedef struct CvmHeap {
  * allocated and the heap must not be used.
  */
 bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size);
+
+/* The retire list's collector-side halves. See gc/retire.c and cvm/retire.h. */
+void cvm_retire_begin_collection(CvmHeap* heap);
+void cvm_retire_mark_all(CvmHeap* heap, CvmGreyPacket** out, CvmGreyPacket** out_weak);
 
 void cvm_heap_destroy(CvmHeap* heap);
 

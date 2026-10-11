@@ -234,6 +234,25 @@ void cvm_thread_restore_unmanaged_depth(u32 depth);
  */
 extern _Atomic bool cvm_safepoint_requested;
 
+/*
+ * Whether a mark phase is running, which is what the write barrier asks.
+ *
+ * Not the same question as cvm_safepoint_requested, and the difference is a
+ * bug this was changed to fix. The safepoint flag is set for the whole
+ * stop-the-world window, which includes the sweep; a barrier that acts during
+ * the sweep re-marks a block the sweeper has already finished with, and the
+ * sweeper's consistency check catches it as "a block is still marked after
+ * sweeping".
+ *
+ * Acting during the sweep would also be pointless. What the barrier prevents
+ * is the marker missing an object, and by the time the sweep runs the live set
+ * is already decided: a store into a live object during the sweep either
+ * stores a live object, which needs nothing, or stores one that was already
+ * unreachable at mark time, which is the program holding a pointer the
+ * collector could not see.
+ */
+extern _Atomic bool cvm_marking_active;
+
 /* Out-of-line slow path: park until the collection finishes. */
 void cvm_safepoint_park(void);
 
@@ -601,6 +620,9 @@ CVM_INLINE void cvm_frame_pop(CvmFrameHandle* frame) {
 opaque_mut cvm_alloc_slow(CvmTypeDescriptor const* type, usize size);
 opaque_mut cvm_alloc_large(CvmTypeDescriptor const* type, usize size);
 
+/* Mark a just-allocated object as surviving, while marking runs. */
+void cvm_alloc_black(opaque_mut payload);
+
 /*
  * Fast path: bump within the current region. The limit check and
  * slow-path call are the only branches.
@@ -651,6 +673,28 @@ CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
     atomic_store_explicit((_Atomic u8*)&ctx->object_meta[(usize)(p - ctx->heap_base) /
                                                          CVM_ALLOC_ALIGNMENT],
                           CVM_OBJECT_SLOT_ALLOCATED, memory_order_relaxed);
+
+    /*
+     * Allocate black while a mark phase is running.
+     *
+     * An object born during concurrent marking is unreachable when the
+     * sweeper comes to decide what survived -- nothing can point to it yet,
+     * so no marker has a reason to visit it -- and without this it would be
+     * reclaimed while its owner is still filling it. Marking it here costs
+     * the sweeper one cycle of floating garbage at worst, and it means the
+     * object survives on its own, without needing a frame slot or a root,
+     * which is the same mitigation the frame discipline note in this header
+     * describes for a pointer held only in a C local.
+     *
+     * Black, not grey: the object is not traced, because the write barrier
+     * marks every value stored into it and nothing else reaches it. Out of
+     * line because the marking it triggers -- the slot's byte, the block's
+     * mark, the lines' marks -- touches three tables the fast path has no
+     * other reason to visit, and this branch is taken only while marking.
+     */
+    if (CVM_UNLIKELY(atomic_load_explicit(&cvm_marking_active, memory_order_acquire))) {
+        cvm_alloc_black((opaque_mut)(hdr + 1));
+    }
 
     return (opaque_mut)(hdr + 1); /* payload follows the header */
 }
@@ -747,6 +791,127 @@ CVM_INLINE usize cvm_object_size(CvmGcHeader const* header) {
     }
 
     return cvm_align_up(size, CVM_ALLOC_ALIGNMENT);
+}
+
+/* ------------------------------------------------------------------ */
+/* The write barrier                                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Slow path: what to do about a store that may have opened a window. Out of
+ * line, because the fast path is on every pointer store the program makes.
+ */
+void cvm_store_barrier_slow(opaque_mut value);
+
+/*
+ * Store a pointer into an object's field.
+ *
+ * This is the only way to write a pointer into an object. Generated code
+ * emits it for every pointer field store -- assignment, property write,
+ * array write, closure capture, initialisation -- and the runtime uses it
+ * for its own containers.
+ *
+ * ---------------------------------------------------------------------
+ * Why it exists
+ * ---------------------------------------------------------------------
+ *
+ * Marking is a graph traversal, and a traversal needs the graph to hold
+ * still. Stopping the world is what makes it hold still today: no thread
+ * that could change the graph is running while the marker walks it.
+ *
+ * When marking runs alongside the program instead, the graph does not hold
+ * still. The failure is specific and silent. The marker marks an object,
+ * traces its fields, and moves on -- an object it has finished with is
+ * never looked at again. If the program then stores a pointer into that
+ * object, the object it now points to was never marked, is collected, and
+ * the field is left pointing at freed memory. Nothing reports it: the
+ * store was legal, the object was live, and the symptom appears later
+ * somewhere else, as a read of whatever the collector put there.
+ *
+ * A store is what has to close the window, because it is the only moment
+ * the program can make an unmarked object reachable from a marked one. So
+ * the store marks what it is about to publish. Marking is idempotent and
+ * the packet lists are lock-free, so this is safe from any thread,
+ * including one the collector is not waiting for.
+ *
+ * ---------------------------------------------------------------------
+ * What it costs, and when
+ * ---------------------------------------------------------------------
+ *
+ * One load of a flag that is shared and in cache, plus a branch the
+ * predictor gets right. The load is skipped entirely when the value is
+ * NULL, because emptying a field cannot make anything reachable.
+ *
+ * Outside marking the branch is not taken and the store is the store it
+ * would have been. The flag is set only for the mark phase itself -- not for
+ * the whole stop-the-world window, which would include the sweep -- so under
+ * the stop-the-world marking this runtime does today, the barrier fires only
+ * for the threads a collection does not stop, which are the unmanaged ones
+ * (inside a foreign call, or blocked in a wait). That is the same window the
+ * root table's barrier exists for.
+ *
+ * ---------------------------------------------------------------------
+ * The contract
+ * ---------------------------------------------------------------------
+ *
+ * Writing a pointer field directly -- `obj->field = value` -- is correct
+ * only while marking is stop-the-world. It is not correct with concurrent
+ * marking, and nothing will catch it: see the failure above.
+ *
+ * Two cases are exempt, and they are worth naming because they are most of
+ * the stores in allocation-heavy code:
+ *
+ *   - Filling an object that nothing can reach yet. A fresh object is
+ *     unreachable while it is being filled, so the marker cannot see it and
+ *     there is nothing to miss. The store that *publishes* it -- into a live
+ *     object, or into a frame slot -- is the one that needs the barrier.
+ *   - Bulk copying pointers into a fresh object, for the same reason. This is
+ *     the case with no entry point here: a range copy is not a field store,
+ *     and the runtime has no copy into an existing object today. If one
+ *     appears it needs a range form, because a per-field barrier cannot see
+ *     a memcpy.
+ */
+/*
+ * The barrier itself: mark a value that a running thread has just published.
+ *
+ * Call it after the store, not before. A marker that reads the slot between
+ * the two sees the new value unmarked and marks it a moment later, so the
+ * object is still traced. The other order has a window in which the field is
+ * not yet published and nothing marks the value if the marker has already
+ * finished with the object holding it.
+ *
+ * Separate from the two functions below rather than fused with them, because
+ * not every pointer store is a plain store. A container whose slots a lock-free
+ * reader loads atomically has to store them atomically too -- mixing atomic and
+ * non-atomic access to one address is a data race whichever way round it is --
+ * and such a store has to keep its own ordering and then call this.
+ */
+CVM_INLINE void cvm_store_barrier(opaque_mut value) {
+    if (CVM_UNLIKELY(value != NULL &&
+                     atomic_load_explicit(&cvm_marking_active, memory_order_acquire))) {
+        cvm_store_barrier_slow(value);
+    }
+}
+
+/*
+ * Store a pointer into a slot, with the barrier.
+ *
+ * The form for a container that owns the slot: `&a->items[i]`, say.
+ */
+CVM_INLINE void cvm_store_ptr(opaque_mut* slot, opaque_mut value) {
+    *slot = value;
+    cvm_store_barrier(value);
+}
+
+/*
+ * Store a pointer into a field of `obj`, `offset` bytes from the payload.
+ *
+ * The offset form, which is what generated code has: a descriptor names its
+ * pointer fields by offset (see CvmPtrField), and those offsets are from the
+ * payload -- the pointer the program holds -- not from the object header.
+ */
+CVM_INLINE void cvm_store_field(opaque_mut obj, usize offset, opaque_mut value) {
+    cvm_store_ptr((opaque_mut*)((u8*)obj + offset), value);
 }
 
 /*

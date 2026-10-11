@@ -53,6 +53,7 @@
 
 #include "base/types.h"
 #include "gc/heap.h"
+#include "gc/worklist.h"
 #include "rt.h"
 #include "stats.h"
 
@@ -93,6 +94,13 @@ typedef struct CvmGcThread {
      * not registered, so they carry their own.
      */
     _Atomic bool sweeping;
+
+    /*
+     * This worker's own deque of grey packets. It pushes the packets it fills
+     * and pops them back, with no lock; other workers steal from the far end
+     * when they run out. See gc/worklist.h.
+     */
+    CvmWorklist work;
 
     RtThread handle;
 

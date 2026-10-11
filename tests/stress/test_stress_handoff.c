@@ -85,7 +85,7 @@ static bool build_chain(opaque_mut* head, u32 length) {
         if (node == NULL) {
             return false;
         }
-        node->next = *head;
+        cvm_store_field(node, offsetof(Node, next), *head);
         node->canary = oracle_field_canary(node);
         *head = node;
     }
@@ -168,12 +168,12 @@ TEST replacing_a_root_keeps_the_new_object_and_releases_the_old(void) {
 
     Node* first = cvm_alloc(&node_desc);
     ASSERT(first != NULL);
-    first->next = NULL;
+    cvm_store_field(first, offsetof(Node, next), NULL);
     first->canary = oracle_field_canary(first);
 
     Node* second = cvm_alloc(&node_desc);
     ASSERT(second != NULL);
-    second->next = NULL;
+    cvm_store_field(second, offsetof(Node, next), NULL);
     second->canary = oracle_field_canary(second);
 
     CvmRootHandle handle = cvm_root_add(first);
@@ -226,7 +226,7 @@ TEST slots_are_reused_without_resurrecting_anything(void) {
     for (u32 i = 0; i < SLOTS; i++) {
         Node* node = cvm_alloc(&node_desc);
         ASSERT(node != NULL);
-        node->next = NULL;
+        cvm_store_field(node, offsetof(Node, next), NULL);
         node->canary = oracle_field_canary(node);
 
         handles[i] = cvm_root_add(node);
@@ -255,7 +255,7 @@ TEST slots_are_reused_without_resurrecting_anything(void) {
     for (u32 i = 0; i < SLOTS; i++) {
         Node* node = cvm_alloc(&node_desc);
         ASSERT(node != NULL);
-        node->next = NULL;
+        cvm_store_field(node, offsetof(Node, next), NULL);
         node->canary = oracle_field_canary(node);
 
         handles[i] = cvm_root_add(node);
@@ -348,7 +348,7 @@ static opaque_mut leaving_worker(opaque_mut raw) {
             atomic_fetch_add(&arg->corrupt, 1);
             break;
         }
-        node->next = NULL;
+        cvm_store_field(node, offsetof(Node, next), NULL);
         node->canary = oracle_field_canary(node);
 
         f_roots[0] = node;

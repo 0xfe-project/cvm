@@ -226,6 +226,12 @@ typedef struct CvmGcCounters {
 
 void cvm_gc_counters_record_collection(u64 start_ns, u64 end_ns);
 
+/* Count a collection and add its stop-the-world time to the total. */
+void cvm_gc_counters_record_span(u64 pause_ns);
+
+/* Record one stop-the-world window, without counting a collection. */
+void cvm_gc_counters_record_pause(u64 start_ns, u64 end_ns);
+
 /* Convenience for tests and for the exit path. */
 u64 cvm_gc_counters_collections(void);
 u64 cvm_gc_counters_collection_ns(void);

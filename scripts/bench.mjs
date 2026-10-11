@@ -217,7 +217,8 @@ function main() {
         "scenario,backend,mode,runs," +
             "wall_ns_min,wall_ns_median,wall_ns_max," +
             "allocations_median,allocations_min,collections_median," +
-            "pause_max_ns_median,pause_max_ns_max,live_objects,heap_bytes\n",
+            "pause_max_ns_median,pause_max_ns_max,pause_total_ns_median," +
+            "live_objects,heap_bytes\n",
     );
 
     console.log("");

@@ -136,6 +136,14 @@ void rt_thread_yield(void) {
     sched_yield();
 }
 
+void rt_thread_sleep_us(u32 us) {
+    struct timespec ts = {
+        .tv_sec = 0,
+        .tv_nsec = (long)us * 1000,
+    };
+    nanosleep(&ts, NULL);
+}
+
 void rt_cpu_relax(void) {
     /*
      * The architecture's spin hint: a few cycles of "I am waiting, give the

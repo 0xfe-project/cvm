@@ -340,9 +340,9 @@ TEST a_pointer_chain_is_followed(void) {
     Node* b = cvm_alloc(&node_desc);
     Node* c = cvm_alloc(&node_desc);
 
-    a->next = b;
-    b->next = c;
-    c->next = NULL;
+    cvm_store_field(a, offsetof(Node, next), b);
+    cvm_store_field(b, offsetof(Node, next), c);
+    cvm_store_field(c, offsetof(Node, next), NULL);
     f_roots[0] = a;
 
     mark_all();
@@ -364,8 +364,8 @@ TEST a_cycle_terminates(void) {
 
     Node* a = cvm_alloc(&node_desc);
     Node* b = cvm_alloc(&node_desc);
-    a->next = b;
-    b->next = a; /* back to the start */
+    cvm_store_field(a, offsetof(Node, next), b);
+    cvm_store_field(b, offsetof(Node, next), a); /* back to the start */
     f_roots[0] = a;
 
     mark_all();
@@ -388,9 +388,9 @@ TEST an_unreachable_tail_is_left_alone(void) {
     Node* reachable = cvm_alloc(&node_desc);
     Node* detached = cvm_alloc(&node_desc);
 
-    head->next = reachable;
-    reachable->next = NULL;
-    detached->next = NULL;
+    cvm_store_field(head, offsetof(Node, next), reachable);
+    cvm_store_field(reachable, offsetof(Node, next), NULL);
+    cvm_store_field(detached, offsetof(Node, next), NULL);
     f_roots[0] = head;
 
     mark_all();
@@ -443,7 +443,7 @@ TEST a_field_outside_the_heap_is_ignored(void) {
     Node* node = cvm_alloc(&node_desc);
     int stack_value = 42;
     /* not a heap pointer at all */
-    node->next = &stack_value;
+    cvm_store_field(node, offsetof(Node, next), &stack_value);
     f_roots[0] = node;
 
     mark_all();
@@ -465,9 +465,10 @@ TEST a_pointer_to_an_already_marked_object_stops(void) {
     Node* a = cvm_alloc(&node_desc);
     Node* b = cvm_alloc(&node_desc);
 
-    shared->next = NULL;
-    a->next = shared;
-    b->next = shared; /* both point at the same object */
+    cvm_store_field(shared, offsetof(Node, next), NULL);
+    cvm_store_field(a, offsetof(Node, next), shared);
+    cvm_store_field(b, offsetof(Node, next),
+                    shared); /* both point at the same object */
 
     f_roots[0] = a;
     f_roots[1] = b;
@@ -494,12 +495,12 @@ TEST an_embedded_aggregate_is_walked(void) {
     FRAME(1);
 
     Node* inner_target = cvm_alloc(&node_desc);
-    inner_target->next = NULL;
+    cvm_store_field(inner_target, offsetof(Node, next), NULL);
     void* other_target = cvm_alloc(&leaf_desc);
 
     Outer* outer = cvm_alloc(&outer_desc);
     outer->inner.next = inner_target;
-    outer->other = other_target;
+    cvm_store_field(outer, offsetof(Outer, other), other_target);
     f_roots[0] = outer;
 
     mark_all();
@@ -530,7 +531,8 @@ TEST a_pointer_array_marks_every_element(void) {
     PtrArray* array =
         cvm_alloc_array(&ptr_array_desc, N, cvm_array_stride(&ptr_array_desc));
     for (int i = 0; i < N; i++) {
-        array->items[i] = elements[i];
+        cvm_store_field(array, offsetof(PtrArray, items) + i * sizeof(void*),
+                        elements[i]);
     }
     f_roots[0] = array;
 
@@ -576,7 +578,7 @@ TEST an_array_of_aggregates_walks_each_element(void) {
     Node* targets[N];
     for (int i = 0; i < N; i++) {
         targets[i] = cvm_alloc(&node_desc);
-        targets[i]->next = NULL;
+        cvm_store_field(targets[i], offsetof(Node, next), NULL);
     }
 
     NodeArray* array =
@@ -615,8 +617,8 @@ TEST an_array_only_marks_up_to_its_length(void) {
     enum { N = 2 };
     PtrArray* array =
         cvm_alloc_array(&ptr_array_desc, N, cvm_array_stride(&ptr_array_desc));
-    array->items[0] = inside;
-    array->items[1] = NULL;
+    cvm_store_field(array, offsetof(PtrArray, items) + 0 * sizeof(void*), inside);
+    cvm_store_field(array, offsetof(PtrArray, items) + 1 * sizeof(void*), NULL);
     f_roots[0] = array;
 
     mark_all();
@@ -642,8 +644,8 @@ TEST marking_is_idempotent(void) {
 
     Node* a = cvm_alloc(&node_desc);
     Node* b = cvm_alloc(&node_desc);
-    a->next = b;
-    b->next = NULL;
+    cvm_store_field(a, offsetof(Node, next), b);
+    cvm_store_field(b, offsetof(Node, next), NULL);
     f_roots[0] = a;
 
     mark_all();

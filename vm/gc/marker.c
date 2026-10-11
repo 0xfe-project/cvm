@@ -29,8 +29,10 @@
 #include "gc/meta.h"
 #include "cvm/roots.h"
 #include "gc/pool.h"
+#include "gc/worklist.h"
 #include "log.h"
 #include "rt.h"
+#include "base/spin.h"
 
 /* ------------------------------------------------------------------ */
 /* packet plumbing                                                     */
@@ -72,12 +74,62 @@ static CvmGreyPacket* take_empty_packet(CvmHeap* heap) {
             }
         }
 
-        rt_thread_yield();
+        rt_spin_backoff(spin);
     }
 }
 
 static CvmGreyPacket* try_take_full_packet(CvmHeap* heap) {
-    return cvm_grey_list_pop(&heap->mark.full, heap->mark.packets);
+    /*
+     * Our own deque first: no lock, and the packets on it are the ones this
+     * thread just filled, so their objects are the most likely to be in this
+     * core's cache. Then the global list, which is where the roots and every
+     * mutator's barrier put their packets. Then other workers' deques, from
+     * the far end -- the oldest packets, which are the ones their owner is
+     * least likely to want back soon.
+     */
+    CvmWorklist* mine = cvm_tls_worklist;
+    if (mine != NULL) {
+        CvmGreyPacket* own = cvm_worklist_pop(mine);
+        if (own != NULL) {
+            return own;
+        }
+    }
+
+    CvmGreyPacket* global = cvm_grey_list_pop(&heap->mark.full, heap->mark.packets);
+    if (global != NULL) {
+        return global;
+    }
+
+    CvmGcPool* pool = heap->pool;
+    if (pool == NULL) {
+        return NULL;
+    }
+    for (u32 i = 0; i < pool->count; i++) {
+        CvmWorklist* other = &pool->threads[i].work;
+        if (other == mine) {
+            continue;
+        }
+        CvmGreyPacket* stolen = cvm_worklist_steal(other);
+        if (stolen != NULL) {
+            return stolen;
+        }
+    }
+
+    /*
+     * The collecting thread's deque last. It fills its deque with the roots'
+     * packets, and without this look a worker never sees them: the collector
+     * pops its own deque before the global list, so the packets it produces
+     * reach the workers only by being stolen. That ordering -- own, then
+     * global, then everyone's deques -- is also why the collector does not
+     * starve: it always takes its own newest first.
+     */
+    if (&heap->mark.work != mine) {
+        CvmGreyPacket* stolen = cvm_worklist_steal(&heap->mark.work);
+        if (stolen != NULL) {
+            return stolen;
+        }
+    }
+    return NULL;
 }
 
 static void give_empty_packet(CvmHeap* heap, CvmGreyPacket* packet) {
@@ -109,6 +161,18 @@ static void give_full_packet(CvmHeap* heap, CvmGreyPacket* packet) {
         return;
     }
     cvm_assert(packet->type == CVM_GREY_PACKET_REFRANGE || packet->size > 0);
+
+    /*
+     * A worker keeps what it fills: no lock, and the next packet it traces is
+     * the one it just filled. Anyone else -- the collecting thread marking
+     * roots, a mutator in its write barrier -- has no deque and hands the
+     * packet to the global list, where every worker looks.
+     */
+    CvmWorklist* mine = cvm_tls_worklist;
+    if (mine != NULL) {
+        cvm_worklist_push(mine, packet);
+        return;
+    }
     cvm_grey_list_push(&heap->mark.full, heap->mark.packets, packet);
 }
 
@@ -126,6 +190,53 @@ static void give_weak_packet(CvmHeap* heap, CvmGreyPacket* packet) {
 }
 
 /* Put a value into a packet, taking a fresh one when it is full. */
+/*
+ * How many packets of marking work are waiting, wherever they are waiting.
+ *
+ * Used to be the global full list's size and nothing else, which was right
+ * when that list was the only place work waited. Now a marker keeps what it
+ * fills in its own deque, so the global list alone answers "nothing" while
+ * nine deques are full -- and the scaling decision, reading only the list,
+ * stopped waking workers. That was a regression, not a slowdown: one thread
+ * marked alone and read-heavy went 25% slower.
+ *
+ * The deques are read without their owners' participation, which is what
+ * cvm_worklist_size is for: an upper bound on occupancy that anyone may
+ * ask for. It is racy, and harmlessly so -- the decision it feeds is "wake
+ * more workers", and a stale answer wakes either one too many or one too
+ * few, both of which the next round corrects.
+ */
+/*
+ * How much marking work is waiting for someone to take it.
+ *
+ * The global full list, plus the workers' own deques. The list alone was the
+ * answer when it was the only place work waited; with per-worker deques the
+ * workers keep what they fill, so a long list says only what the collector
+ * and the barriers produced. The deques say whether the workers themselves
+ * are loaded, which is the other half of "should more of them run".
+ *
+ * The deques are read without their owners' participation, which is what
+ * cvm_worklist_size is for: an upper bound on occupancy that anyone may ask
+ * for. It is racy, and harmlessly so -- the decision it feeds is "wake more
+ * workers", and a stale answer wakes either one too many or one too few,
+ * both of which the next round corrects.
+ *
+ * A packet a worker holds and is tracing is on neither: it is in the
+ * worker's hands. So this counts waiting work, not work in progress, which
+ * is the quantity the decision wants.
+ */
+static u32 backlog(CvmHeap* heap) {
+    u32 n = cvm_grey_list_size(&heap->mark.full);
+    n += (u32)cvm_worklist_size(&heap->mark.work);
+    CvmGcPool* pool = heap->pool;
+    if (pool != NULL) {
+        for (u32 i = 0; i < pool->count; i++) {
+            n += (u32)cvm_worklist_size(&pool->threads[i].work);
+        }
+    }
+    return n;
+}
+
 static void packet_push(CvmHeap* heap, CvmGreyPacket** holder, opaque_mut value) {
     if (!cvm_grey_packet_push(*holder, value)) {
         give_full_packet(heap, *holder);
@@ -407,6 +518,30 @@ static void trace_type(CvmHeap* heap, u8* base, CvmTypeDescriptor const* type,
     }
 }
 
+/*
+ * Mark an object black without queuing it for tracing.
+ *
+ * This is allocate-black: the object counts as surviving this collection and
+ * is never traced, so nothing it points to is marked on its account. That is
+ * the correct treatment for an object allocated while a mark phase is
+ * running -- the write barrier marks whatever is stored into it, field by
+ * field, and the object itself needs only to outlive the sweeper.
+ *
+ * Everything mark_metadata does travels with this: the slot's byte, the
+ * block's mark, and the lines' marks. All three are load-bearing for the
+ * sweeper -- a marked object in unmarked lines is freed by the line, and a
+ * marked object in an unmarked block is freed with the block.
+ */
+void cvm_mark_object_black(CvmHeap* heap, opaque_mut payload) {
+    u8* start = (u8*)cvm_header_of(payload);
+    ObjectMeta* meta = bytemap_get(heap->bytemap, start);
+    u8 was = cvm_mark_byte_get(meta);
+    if (object_meta_state(meta) == (u8)CVM_OM_MARKED) {
+        return;
+    }
+    mark_metadata(heap, start, meta, was);
+}
+
 void cvm_trace_object(CvmHeap* heap, u8* start, CvmGreyPacket** out,
                       CvmGreyPacket** out_weak) {
     CvmGcHeader const* header = (CvmGcHeader const*)start;
@@ -485,6 +620,13 @@ void cvm_mark_roots(CvmHeap* heap) {
      */
     cvm_root_mark_all(heap, &out, &out_weak);
 
+    /*
+     * The retire list, marked grey alongside the roots: these are objects a
+     * container replaced and promised to keep alive through this collection.
+     * Grey rather than black because a lock-free reader walks *through* them.
+     */
+    cvm_retire_mark_all(heap, &out, &out_weak);
+
     give_full_packet(heap, out);
     give_weak_packet(heap, out_weak);
 }
@@ -536,12 +678,69 @@ void cvm_mark_batch(CvmHeap* heap, CvmGreyPacket* in, CvmGreyPacket** out,
  * immediately, which under a single marker is most of what it would be
  * doing.
  */
+/*
+ * A marker's own supply of empty packets, so the common case — take a full
+ * packet, trace it, hand the drained packet back — does not touch the global
+ * empty list at all.
+ *
+ * The list is where every marker and the mutators' barriers meet, and it is
+ * the one lock left on the marking path after the full packets moved to the
+ * deques. One spare is enough to break the per-packet round trip: a marker
+ * that has just drained a packet holds it and uses it as its next output
+ * rather than returning it and immediately taking another. Two would cover
+ * the weak holder too, and did not measure different from one, so it is one.
+ */
+#define CVM_MARK_LOCAL_EMPTY 1
+
+typedef struct CvmMarkerLocal {
+    /* The empty packets this marker is holding, up to CVM_MARK_LOCAL_EMPTY. */
+    CvmGreyPacket* empty[CVM_MARK_LOCAL_EMPTY];
+    u32 empty_count;
+} CvmMarkerLocal;
+
+/*
+ * Take an empty packet, from this marker's own supply first and the global
+ * list second. The waiting and the diagnostics are the global list's business
+ * and are unchanged: a local supply cannot wait, because it is replenished
+ * only from packets this marker itself drained.
+ */
+static CvmGreyPacket* local_take_empty(CvmMarkerLocal* local, CvmHeap* heap) {
+    if (local->empty_count > 0) {
+        return local->empty[--local->empty_count];
+    }
+    return take_empty_packet(heap);
+}
+
+/*
+ * Return an empty packet, to this marker's own supply while it has room and
+ * the global list once it does not. The type reset travels with the packet
+ * either way, and give_empty_packet is what does it.
+ */
+static void local_give_empty(CvmMarkerLocal* local, CvmHeap* heap,
+                             CvmGreyPacket* packet) {
+    if (local->empty_count < CVM_MARK_LOCAL_EMPTY) {
+        packet->type = (u16)CVM_GREY_PACKET_REFLIST;
+        local->empty[local->empty_count++] = packet;
+        return;
+    }
+    give_empty_packet(heap, packet);
+}
+
 void cvm_mark(CvmHeap* heap, bool scale) {
+    CvmMarkerLocal local = {.empty_count = 0};
     CvmGreyPacket* in = try_take_full_packet(heap);
     CvmGreyPacket* out = NULL;
     CvmGreyPacket* out_weak = NULL;
 
     while (in != NULL) {
+        /*
+         * The out holders are taken from the local supply, which is what
+         * keeps a marker that is steadily finding work from touching the
+         * empty list: its drained packets become its next output packets.
+         */
+        if (out == NULL) {
+            out = local_take_empty(&local, heap);
+        }
         cvm_mark_batch(heap, in, &out, &out_weak);
 
         cvm_assert(out != NULL);
@@ -550,28 +749,23 @@ void cvm_mark(CvmHeap* heap, bool scale) {
         CvmGreyPacket* next = try_take_full_packet(heap);
 
         if (next != NULL) {
-            give_empty_packet(heap, in);
+            local_give_empty(&local, heap, in);
             if (scale) {
-                /*
-                 * A backlog means marking is falling behind, so more
-                 * workers are worth waking. They stop themselves when the
-                 * list runs dry, so over-waking costs a check rather than
-                 * a busy thread.
-                 */
-                cvm_pool_scale_markers(heap->pool,
-                                       cvm_grey_list_size(&heap->mark.full));
+                cvm_pool_scale_markers(heap->pool, backlog(heap));
             }
         } else if (!cvm_grey_packet_is_empty(out)) {
-            /*
-             * Nothing left to take, but this trace produced more. Reuse
-             * the packets already in hand rather than returning them and
-             * immediately taking others: the in packet becomes the out
-             * packet and vice versa.
-             */
             next = out;
             out = in;
         } else {
-            /* Nothing left and nothing produced: this marker is done. */
+            /*
+             * Done. The local supply goes back too: these are the global
+             * pool's packets, and the completion check counts them by the
+             * empty list, so a packet left here would keep marking from
+             * concluding.
+             */
+            while (local.empty_count > 0) {
+                give_empty_packet(heap, local.empty[--local.empty_count]);
+            }
             give_empty_packet(heap, in);
             give_full_packet(heap, out);
             give_weak_packet(heap, out_weak);
@@ -581,11 +775,9 @@ void cvm_mark(CvmHeap* heap, bool scale) {
         in = next;
     }
 
-    /*
-     * The loop is entered with `in == NULL` when there was nothing to do
-     * at all, in which case `out` is still NULL and there is nothing to
-     * hand back. Otherwise the packets were returned above.
-     */
+    while (local.empty_count > 0) {
+        give_empty_packet(heap, local.empty[--local.empty_count]);
+    }
 }
 
 /*
@@ -675,6 +867,7 @@ void cvm_mark_until_done(CvmHeap* heap) {
      */
     u64 last_progress_at = rt_time_millis();
     u32 last_accounted = 0;
+    u64 spins = 0;
 
     while (!cvm_mark_is_done(heap)) {
         cvm_mark(heap, true);
@@ -690,9 +883,31 @@ void cvm_mark_until_done(CvmHeap* heap) {
         }
 
         if (!cvm_mark_is_done(heap)) {
-            /* Other markers have the work in flight; let them finish it
-             * rather than spinning on the packet list. */
-            rt_thread_yield();
+            /*
+             * Other markers have the work in flight; let them finish it
+             * rather than spinning on the packet list.
+             *
+             * And while they do, this loop does not so much as read the
+             * lists -- the protocol whippet's tracer uses (trace_worker_
+             * should_continue), and for the same reason: a marker that is
+             * mid-batch holds packets on no list, so the count cannot say
+             * "done" until every marker has put them back, and asking twice
+             * a round while they work is load on the very writers the count
+             * waits for. The active count is one atomic load on the pool;
+             * zero means no worker is between waking and finishing, which is
+             * the moment the list counts are worth reading.
+             */
+            if (heap->pool != NULL) {
+                while (cvm_pool_active_count(heap->pool) > 0) {
+                    rt_spin_backoff(spins++);
+                    if (cvm_mark_is_done(heap)) {
+                        break;
+                    }
+                }
+            }
+            rt_spin_backoff(spins++);
+        } else {
+            spins = 0;
         }
     }
 }

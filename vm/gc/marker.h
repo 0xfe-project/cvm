@@ -111,6 +111,13 @@ CvmGreyPacket* cvm_mark_take_packet(CvmHeap* heap);
  * one to the full list, or to the weak list when `weak` is set. */
 void cvm_mark_give_packet(CvmHeap* heap, CvmGreyPacket* packet, bool weak);
 
+/*
+ * Mark one object as surviving without tracing it. For allocation while a
+ * mark phase is running: the object outlives the sweeper, and the write
+ * barrier is what keeps its fields' targets alive.
+ */
+void cvm_mark_object_black(CvmHeap* heap, opaque_mut payload);
+
 /* Trace one object's fields through its type descriptor. */
 void cvm_trace_object(CvmHeap* heap, u8* start, CvmGreyPacket** out,
                       CvmGreyPacket** out_weak);
