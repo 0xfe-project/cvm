@@ -883,8 +883,28 @@ void cvm_mark_until_done(CvmHeap* heap) {
         }
 
         if (!cvm_mark_is_done(heap)) {
-            /* Other markers have the work in flight; let them finish it
-             * rather than spinning on the packet list. */
+            /*
+             * Other markers have the work in flight; let them finish it
+             * rather than spinning on the packet list.
+             *
+             * And while they do, this loop does not so much as read the
+             * lists -- the protocol whippet's tracer uses (trace_worker_
+             * should_continue), and for the same reason: a marker that is
+             * mid-batch holds packets on no list, so the count cannot say
+             * "done" until every marker has put them back, and asking twice
+             * a round while they work is load on the very writers the count
+             * waits for. The active count is one atomic load on the pool;
+             * zero means no worker is between waking and finishing, which is
+             * the moment the list counts are worth reading.
+             */
+            if (heap->pool != NULL) {
+                while (cvm_pool_active_count(heap->pool) > 0) {
+                    rt_spin_backoff(spins++);
+                    if (cvm_mark_is_done(heap)) {
+                        break;
+                    }
+                }
+            }
             rt_spin_backoff(spins++);
         } else {
             spins = 0;

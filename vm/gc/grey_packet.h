@@ -170,7 +170,17 @@ typedef struct CvmGreyPacket {
  */
 typedef struct CvmGreyList {
     RtMutex lock;
-    u64 head; /* a CvmGreyPacketRef */
+    /*
+     * Atomic so the size can be read without the lock. Every write happens
+     * under `lock` (relaxed stores; the mutex orders writers against each
+     * other), and the readers that matter are advisory: marking's completion
+     * check asks "are all packets accounted for", and a stale answer only
+     * makes it look once more -- the guarantee it relies on comes from the
+     * workers being idle, which is waited on separately. Before this field
+     * was atomic, that check took this lock twice a round, against the same
+     * lock every push and pop was already contending for.
+     */
+    _Atomic u64 head; /* a CvmGreyPacketRef */
     bool ready;
 } CvmGreyList;
 
