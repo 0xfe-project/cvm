@@ -518,6 +518,30 @@ static void trace_type(CvmHeap* heap, u8* base, CvmTypeDescriptor const* type,
     }
 }
 
+/*
+ * Mark an object black without queuing it for tracing.
+ *
+ * This is allocate-black: the object counts as surviving this collection and
+ * is never traced, so nothing it points to is marked on its account. That is
+ * the correct treatment for an object allocated while a mark phase is
+ * running -- the write barrier marks whatever is stored into it, field by
+ * field, and the object itself needs only to outlive the sweeper.
+ *
+ * Everything mark_metadata does travels with this: the slot's byte, the
+ * block's mark, and the lines' marks. All three are load-bearing for the
+ * sweeper -- a marked object in unmarked lines is freed by the line, and a
+ * marked object in an unmarked block is freed with the block.
+ */
+void cvm_mark_object_black(CvmHeap* heap, opaque_mut payload) {
+    u8* start = (u8*)cvm_header_of(payload);
+    ObjectMeta* meta = bytemap_get(heap->bytemap, start);
+    u8 was = cvm_mark_byte_get(meta);
+    if (object_meta_state(meta) == (u8)CVM_OM_MARKED) {
+        return;
+    }
+    mark_metadata(heap, start, meta, was);
+}
+
 void cvm_trace_object(CvmHeap* heap, u8* start, CvmGreyPacket** out,
                       CvmGreyPacket** out_weak) {
     CvmGcHeader const* header = (CvmGcHeader const*)start;

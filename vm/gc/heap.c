@@ -317,6 +317,8 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     heap->mark.last_mark_ns = 0;
     heap->mark.last_period_ns = 0;
     heap->mark.has_history = false;
+    heap->mark.busy = false;
+    heap->mark.concurrent_enabled = false;
 
     CVM_LOG_INFO(m) {
         fmt_lit(&m.fmt, "heap: ");

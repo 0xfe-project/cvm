@@ -186,6 +186,39 @@ void cvm_gc_counters_record_collection(u64 start_ns, u64 end_ns) {
     }
 }
 
+/*
+ * Record one stop-the-world window's length, without counting a collection.
+ *
+ * Concurrent marking stops the world twice per collection, and the pause a
+ * program feels is each window, not the span between the first stop and the
+ * second -- that span is marking time, spent alongside the program. The
+ * collection counter and the total keep their meaning; only the maximum is
+ * maintained here.
+ */
+void cvm_gc_counters_record_pause(u64 start_ns, u64 end_ns) {
+    if (start_ns == 0) {
+        return;
+    }
+    u64 duration = end_ns - start_ns;
+    u64 seen = atomic_load_explicit(&gc_counters.pause_max_ns, memory_order_relaxed);
+    while (duration > seen && !atomic_compare_exchange_weak_explicit(
+                                  &gc_counters.pause_max_ns, &seen, duration,
+                                  memory_order_relaxed, memory_order_relaxed)) {
+    }
+}
+
+/* Count a collection and add its span to the total, without touching the
+ * pause maximum -- for a collection whose stop-the-world windows are recorded
+ * separately, one per window. */
+void cvm_gc_counters_record_span(u64 start_ns, u64 end_ns) {
+    if (start_ns == 0) {
+        return;
+    }
+    atomic_fetch_add_explicit(&gc_counters.collections, 1u, memory_order_relaxed);
+    atomic_fetch_add_explicit(&gc_counters.collection_ns, end_ns - start_ns,
+                              memory_order_relaxed);
+}
+
 u64 cvm_gc_counters_collections(void) {
     return atomic_load_explicit(&gc_counters.collections, memory_order_relaxed);
 }

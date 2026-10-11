@@ -34,6 +34,7 @@
 #include "gc/collect.h"
 #include "gc/sweeper.h"
 #include "gc/heap.h"
+#include "gc/marker.h"
 #include "gc/meta.h"
 #include "context.h"
 #include "log.h"
@@ -144,7 +145,32 @@ static opaque_mut publish(CvmAllocator* alloc, u8* start, usize size,
     ObjectMeta* meta = bytemap_get(alloc->bytemap, start);
     object_meta_set_allocated(meta);
 
+    /*
+     * Black before it is ever white, when a mark phase is running. Same
+     * reason as the fast path in cvm/gc.h, and the slow path sees large
+     * objects the fast path never does -- mark_metadata handles those by
+     * marking the slot only, which is what the large-object sweeper reads.
+     */
+    if (atomic_load_explicit(&cvm_marking_active, memory_order_acquire)) {
+        cvm_mark_object_black(alloc->heap, (opaque_mut)(header + 1));
+    }
+
     return (opaque_mut)(header + 1); /* the payload */
+}
+
+/*
+ * The out-of-line half of allocate-black, called by the inlined allocation
+ * path when a mark phase is running. In alloc.c rather than marker.c because
+ * it needs the heap of the allocating thread, which the slow path carries and
+ * the fast path does not -- this entry finds it through the thread registry,
+ * the same way every other allocator slow path does.
+ */
+void cvm_alloc_black(opaque_mut payload) {
+    CvmThreadNode* node = cvm_thread_node();
+    if (node == NULL) {
+        return; /* never attached: no heap, nothing to mark */
+    }
+    cvm_mark_object_black(node->allocator.heap, payload);
 }
 
 /* ------------------------------------------------------------------ */

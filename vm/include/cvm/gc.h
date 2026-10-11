@@ -620,6 +620,9 @@ CVM_INLINE void cvm_frame_pop(CvmFrameHandle* frame) {
 opaque_mut cvm_alloc_slow(CvmTypeDescriptor const* type, usize size);
 opaque_mut cvm_alloc_large(CvmTypeDescriptor const* type, usize size);
 
+/* Mark a just-allocated object as surviving, while marking runs. */
+void cvm_alloc_black(opaque_mut payload);
+
 /*
  * Fast path: bump within the current region. The limit check and
  * slow-path call are the only branches.
@@ -670,6 +673,28 @@ CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
     atomic_store_explicit((_Atomic u8*)&ctx->object_meta[(usize)(p - ctx->heap_base) /
                                                          CVM_ALLOC_ALIGNMENT],
                           CVM_OBJECT_SLOT_ALLOCATED, memory_order_relaxed);
+
+    /*
+     * Allocate black while a mark phase is running.
+     *
+     * An object born during concurrent marking is unreachable when the
+     * sweeper comes to decide what survived -- nothing can point to it yet,
+     * so no marker has a reason to visit it -- and without this it would be
+     * reclaimed while its owner is still filling it. Marking it here costs
+     * the sweeper one cycle of floating garbage at worst, and it means the
+     * object survives on its own, without needing a frame slot or a root,
+     * which is the same mitigation the frame discipline note in this header
+     * describes for a pointer held only in a C local.
+     *
+     * Black, not grey: the object is not traced, because the write barrier
+     * marks every value stored into it and nothing else reaches it. Out of
+     * line because the marking it triggers -- the slot's byte, the block's
+     * mark, the lines' marks -- touches three tables the fast path has no
+     * other reason to visit, and this branch is taken only while marking.
+     */
+    if (CVM_UNLIKELY(atomic_load_explicit(&cvm_marking_active, memory_order_acquire))) {
+        cvm_alloc_black((opaque_mut)(hdr + 1));
+    }
 
     return (opaque_mut)(hdr + 1); /* payload follows the header */
 }

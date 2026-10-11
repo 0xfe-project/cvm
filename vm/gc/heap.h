@@ -180,6 +180,18 @@ typedef struct CvmHeap {
          */
         CvmWorklist work;
 
+        /*
+         * Whether this heap collects with concurrent marking, and whether a
+         * collection is in progress right now. See CvmOptions.concurrent_mark
+         * for the first; the second exists because a concurrent collection
+         * releases the stop-the-world window before it finishes, so the flag
+         * that guards the window no longer says "a collection is running" --
+         * a thread that arrives mid-marking has to find that out some other
+         * way, or it would start a second collection into the first.
+         */
+        bool concurrent_enabled;
+        _Atomic bool busy;
+
         u64 current_start_ns;
         u64 current_end_ns;
         u64 last_end_ns;
