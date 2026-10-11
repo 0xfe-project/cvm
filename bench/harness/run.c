@@ -261,6 +261,7 @@ int main(int argc, char **argv) {
 
     uint64_t wall[BENCH_MAX_REPS], allocs[BENCH_MAX_REPS];
     uint64_t colls[BENCH_MAX_REPS], pauses[BENCH_MAX_REPS];
+    uint64_t pause_totals[BENCH_MAX_REPS];
 
     for (unsigned r = 0; r < reps; r++) {
         BenchStats before;
@@ -278,6 +279,12 @@ int main(int argc, char **argv) {
         allocs[r] = after.allocations - before.allocations;
         colls[r] = after.collections - before.collections;
         pauses[r] = after.pause_max_ns;
+        /*
+         * The total, differenced like the others: a backend that keeps a
+         * process-wide counter (cvm does) would otherwise carry the warm-up
+         * and every earlier repetition into this row.
+         */
+        pause_totals[r] = after.pause_total_ns - before.pause_total_ns;
 
         if (alloc_only && r + 1 < reps) {
             /*
@@ -333,7 +340,8 @@ int main(int argc, char **argv) {
     }
 
     bench_print_row(sc->name, bench_collector.name, mode_name(mode), reps, wall,
-                    allocs, colls, pauses, final.live_objects, final.heap_bytes);
+                    allocs, colls, pauses, pause_totals, final.live_objects,
+                    final.heap_bytes);
 
     if (out_path != NULL) {
         FILE *out = fopen(out_path, "a");
@@ -343,8 +351,8 @@ int main(int argc, char **argv) {
             return 1;
         }
         bench_csv_row(out, sc->name, bench_collector.name, mode_name(mode), reps,
-                      wall, allocs, colls, pauses, final.live_objects,
-                      final.heap_bytes);
+                      wall, allocs, colls, pauses, pause_totals,
+                      final.live_objects, final.heap_bytes);
         fclose(out);
     }
 

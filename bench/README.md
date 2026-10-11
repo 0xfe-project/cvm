@@ -24,6 +24,19 @@ an experimental condition and rows from two of them are not comparable.**
 alloc-only never collects, so it measures the allocator; auto lets each
 collector choose, so it measures the policy.
 
+The printed line and the CSV also carry the stop-the-world share of the run:
+`pause_all` on the line, `pause_total_ns_median` in the CSV. It is the sum of
+a backend's pauses divided by its wall, and it says what `pause_max` cannot —
+a collector can stop the world for a millisecond a hundred times (pause_all
+80%, pause_max 1ms) or once for fifty (pause_all 20%, pause_max 50ms), and
+which of those a program can live with is a different question from how long
+the worst one was.
+
+**The column is comparable for cvm and go only.** bdwgc and tgc do not expose
+a pause total, so their backends report zero and their `pause_all` reads 0.0%
+regardless of what they actually did; a zero in that column means "unknown"
+for those two, not "non-stop".
+
 **alloc-only**
 
 | scenario | cvm | go | bdwgc | tgc |

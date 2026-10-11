@@ -43,13 +43,14 @@ void bench_csv_header(FILE *out);
 void bench_csv_row(FILE *out, char const *scenario, char const *backend,
                    char const *mode, unsigned runs, uint64_t *wall_ns,
                    uint64_t *allocations, uint64_t *collections,
-                   uint64_t *pause_max_ns, uint64_t live_objects,
-                   uint64_t heap_bytes);
+                   uint64_t *pause_max_ns, uint64_t *pause_total_ns,
+                   uint64_t live_objects, uint64_t heap_bytes);
 
 /* The same numbers, for a human, on stdout. */
 void bench_print_row(char const *scenario, char const *backend, char const *mode,
                      unsigned runs, uint64_t *wall_ns, uint64_t *allocations,
                      uint64_t *collections, uint64_t *pause_max_ns,
-                     uint64_t live_objects, uint64_t heap_bytes);
+                     uint64_t *pause_total_ns, uint64_t live_objects,
+                     uint64_t heap_bytes);
 
 #endif /* BENCH_REPORT_H */

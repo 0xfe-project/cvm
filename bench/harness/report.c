@@ -80,6 +80,7 @@ void bench_csv_header(FILE *out) {
             "allocations_median,allocations_min,"
             "collections_median,"
             "pause_max_ns_median,pause_max_ns_max,"
+            "pause_total_ns_median,"
             "live_objects,heap_bytes\n");
 }
 
@@ -89,15 +90,17 @@ void bench_csv_header(FILE *out) {
  */
 static void summarise(unsigned runs, uint64_t *wall_ns, uint64_t *allocations,
                       uint64_t *collections, uint64_t *pause_max_ns,
-                      uint64_t *wall_med, uint64_t *wall_min, uint64_t *wall_max,
+                      uint64_t *pause_total_ns, uint64_t *wall_med,
+                      uint64_t *wall_min, uint64_t *wall_max,
                       uint64_t *alloc_med, uint64_t *alloc_min,
-                      uint64_t *coll_med, uint64_t *pause_med, uint64_t *pause_max) {
+                      uint64_t *coll_med, uint64_t *pause_med,
+                      uint64_t *pause_max, uint64_t *pause_total_med) {
     /*
      * Copied before sorting: the caller's arrays are reused for the next
      * mode, and a function that silently reorders its input is a trap for
      * whoever calls it next.
      */
-    uint64_t wall[64], alloc[64], coll[64], pause[64];
+    uint64_t wall[64], alloc[64], coll[64], pause[64], pause_total[64];
     if (runs > 64) {
         runs = 64;
     }
@@ -105,6 +108,7 @@ static void summarise(unsigned runs, uint64_t *wall_ns, uint64_t *allocations,
     memcpy(alloc, allocations, runs * sizeof(uint64_t));
     memcpy(coll, collections, runs * sizeof(uint64_t));
     memcpy(pause, pause_max_ns, runs * sizeof(uint64_t));
+    memcpy(pause_total, pause_total_ns, runs * sizeof(uint64_t));
 
     *wall_min = bench_min(wall, runs);
     *wall_med = bench_median(wall, runs);
@@ -114,44 +118,57 @@ static void summarise(unsigned runs, uint64_t *wall_ns, uint64_t *allocations,
     *coll_med = bench_median(coll, runs);
     *pause_med = bench_median(pause, runs);
     *pause_max = bench_max(pause, runs);
+    *pause_total_med = bench_median(pause_total, runs);
 }
 
 void bench_csv_row(FILE *out, char const *scenario, char const *backend,
                    char const *mode, unsigned runs, uint64_t *wall_ns,
                    uint64_t *allocations, uint64_t *collections,
-                   uint64_t *pause_max_ns, uint64_t live_objects,
-                   uint64_t heap_bytes) {
-    uint64_t wmin, wmed, wmax, amin, amed, cmed, pmed, pmax;
-    summarise(runs, wall_ns, allocations, collections, pause_max_ns, &wmed, &wmin,
-              &wmax, &amed, &amin, &cmed, &pmed, &pmax);
+                   uint64_t *pause_max_ns, uint64_t *pause_total_ns,
+                   uint64_t live_objects, uint64_t heap_bytes) {
+    uint64_t wmin, wmed, wmax, amin, amed, cmed, pmed, pmax, ptot;
+    summarise(runs, wall_ns, allocations, collections, pause_max_ns,
+              pause_total_ns, &wmed, &wmin, &wmax, &amed, &amin, &cmed, &pmed,
+              &pmax, &ptot);
 
-    fprintf(out, "%s,%s,%s,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+    fprintf(out, "%s,%s,%s,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
             scenario, backend, mode, runs, (unsigned long long)wmin,
             (unsigned long long)wmed, (unsigned long long)wmax,
             (unsigned long long)amed, (unsigned long long)amin,
             (unsigned long long)cmed, (unsigned long long)pmed,
-            (unsigned long long)pmax, (unsigned long long)live_objects,
-            (unsigned long long)heap_bytes);
+            (unsigned long long)pmax, (unsigned long long)ptot,
+            (unsigned long long)live_objects, (unsigned long long)heap_bytes);
 }
 
 void bench_print_row(char const *scenario, char const *backend, char const *mode,
                      unsigned runs, uint64_t *wall_ns, uint64_t *allocations,
                      uint64_t *collections, uint64_t *pause_max_ns,
-                     uint64_t live_objects, uint64_t heap_bytes) {
-    uint64_t wmin, wmed, wmax, amin, amed, cmed, pmed, pmax;
-    summarise(runs, wall_ns, allocations, collections, pause_max_ns, &wmed, &wmin,
-              &wmax, &amed, &amin, &cmed, &pmed, &pmax);
+                     uint64_t *pause_total_ns, uint64_t live_objects,
+                     uint64_t heap_bytes) {
+    uint64_t wmin, wmed, wmax, amin, amed, cmed, pmed, pmax, ptot;
+    summarise(runs, wall_ns, allocations, collections, pause_max_ns,
+              pause_total_ns, &wmed, &wmin, &wmax, &amed, &amin, &cmed, &pmed,
+              &pmax, &ptot);
 
     /*
      * Wall time in milliseconds with the spread in the same units, because
      * that is the number a reader compares; the raw nanoseconds are in the
      * CSV for anyone who wants them.
      */
+    /*
+     * pause_all is the stop-the-world share of the run's wall time, said as
+     * a percentage so the column is comparable across rows whose walls
+     * differ by three orders of magnitude. cvm can also report a total of
+     * zero (its mode chose no stop-the-world collections); zero prints as
+     * 0.0% rather than dividing by it.
+     */
     printf("%-14s %-8s %-8s  wall %8.2f ms [%.2f..%.2f]  alloc %10llu"
-           "  gc %6llu  pause_max %8.3f ms  live %9llu  heap %7.1f MiB\n",
+           "  gc %6llu  pause_max %8.3f ms  pause_all %5.1f%%  live %9llu"
+           "  heap %7.1f MiB\n",
            scenario, backend, mode, (double)wmed / 1e6, (double)wmin / 1e6,
            (double)wmax / 1e6, (unsigned long long)amed,
            (unsigned long long)cmed, (double)pmax / 1e6,
+           wmed > 0 ? 100.0 * (double)ptot / (double)wmed : 0.0,
            (unsigned long long)live_objects,
            (double)heap_bytes / (1024.0 * 1024.0));
 }

@@ -380,7 +380,8 @@ static bool cvm_gc_collect_concurrent(CvmHeap* heap) {
     }
 
     cvm_safepoint_release();
-    cvm_gc_counters_record_pause(pause1_start, rt_time_nanos());
+    u64 pause1_end = rt_time_nanos();
+    cvm_gc_counters_record_pause(pause1_start, pause1_end);
 
     /* ---- the window: marking runs alongside the program ---- */
     cvm_tls_worklist = &heap->mark.work;
@@ -492,9 +493,14 @@ static bool cvm_gc_collect_concurrent(CvmHeap* heap) {
         .grew = false,
     };
 
-    /* One collection, one span; the pauses were recorded per window. */
+    /*
+     * One collection. The counters get the two stops -- the program's delay,
+     * which is what collection_ns means -- and the event log gets the span,
+     * which is the collection's duration and overlaps the program's own
+     * running.
+     */
     cvm_stats_record(stats, CVM_EVENT_COLLECTION, event_start, end_ns);
-    cvm_gc_counters_record_span(start_ns, end_ns);
+    cvm_gc_counters_record_span((pause1_end - pause1_start) + (end_ns - pause2_start));
 
     CVM_LOG_INFO(m) {
         fmt_lit(&m.fmt, "collected (concurrent): weak cleared ");

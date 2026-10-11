@@ -213,15 +213,22 @@ void cvm_gc_counters_record_pause(u64 start_ns, u64 end_ns) {
     }
 }
 
-/* Count a collection and add its span to the total, without touching the
- * pause maximum -- for a collection whose stop-the-world windows are recorded
- * separately, one per window. */
-void cvm_gc_counters_record_span(u64 start_ns, u64 end_ns) {
-    if (start_ns == 0) {
-        return;
-    }
+/*
+ * Count a collection and add its stop-the-world time to the total, without
+ * touching the pause maximum -- for a collection whose windows are recorded
+ * separately, one per window.
+ *
+ * The amount added is the pauses, not the span between the first stop and the
+ * second, because the span is marking time spent alongside the program and
+ * the total this feeds is "how long was the world stopped". The
+ * stop-the-world collector adds the same thing by a different route: its
+ * span and its pause are the same interval. The full span is in the event
+ * log, which is where a question about collection duration rather than
+ * program delay belongs.
+ */
+void cvm_gc_counters_record_span(u64 pause_ns) {
     atomic_fetch_add_explicit(&gc_counters.collections, 1u, memory_order_relaxed);
-    atomic_fetch_add_explicit(&gc_counters.collection_ns, end_ns - start_ns,
+    atomic_fetch_add_explicit(&gc_counters.collection_ns, pause_ns,
                               memory_order_relaxed);
 }
 
