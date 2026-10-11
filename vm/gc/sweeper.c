@@ -15,6 +15,7 @@
 
 #include "base/assert.h"
 #include "base/math.h"
+#include "base/swar.h"
 #include "base/types.h"
 #include "context.h"
 #include "cvm/gc.h"
@@ -223,53 +224,35 @@ static u32 object_slots_at(u8* block_start, ObjectMeta* slots, u32 index) {
  * from a mark on its first line.
  */
 /*
- * Whether a line's slots are all zero, which means nothing is in it: no
- * object starts there and no object's extent reaches it.
+ * Which slots this pass does work at.
  *
- * Two loads and two compares, because that is all it takes -- a word is zero
- * exactly when all of its bytes are. (The tempting SWAR idiom is for the
- * other question, "does any byte equal X", and using it here answers a
- * different question badly: eight slots of zeroes and one holding a mark
- * would read as empty.)
+ * A live object's start is MARKED (0x3) or, for a large object, PLACEHOLDER
+ * (0x1) -- both carry bit 0. A dead object's start is ALLOCATED (0x2), which
+ * does not, and an END marker (0x4) does not either. So bit 0 is "the start
+ * of something that survives", and a scan for it skips everything else --
+ * the dead, and the interior slots of every object, live or dead -- eight at
+ * a time.
  *
- * This is what keeps the pass from costing more than the marking it
- * replaced: it runs over *every* slot of every block being swept, where the
- * marker only saw the objects that survived.
+ * This is whippet's usage of the same table: finding object boundaries and
+ * live slots by bits in the mark table, not an emptiness test. The first
+ * version of this pass tried the emptiness test and got it wrong (the
+ * any-byte-zero idiom reads a group holding one mark and seven empties as
+ * empty), and the second tried skipping empty groups by alignment and
+ * measured nothing, because a dense block has no empty groups to skip. The
+ * third scanned from every slot and lost 20% on the dense-all-live block,
+ * because the scan's fixed work is several times a byte compare and a live
+ * object has nothing to skip past. This one scans only out of dead runs,
+ * where there is something to skip, and walks live objects byte-wise.
  */
-/*
- * Whether the slots from `index` to the end of its group of eight are empty.
- *
- * From the *current* slot, not from an aligned one: an object's start is
- * wherever it is, and requiring alignment would make this test fail to apply
- * for the rest of the group every time an object interrupted it. That is
- * what the first version of this did, and it is why the pass stayed
- * expensive.
- */
-CVM_INLINE bool slots_to_group_end_are_empty(ObjectMeta* slots, u32 index) {
-    u32 in_group = index % 8;
-    u64 word;
-    __builtin_memcpy(&word, &slots[index - in_group], sizeof(word));
-    return (word >> (in_group * 8)) == 0;
-}
+#define CVM_SLOT_LIVE_START ((u8)0x1)
 
 static void mark_survivors_lines(u8* block_start, ObjectMeta* slots,
                                  LineMeta* line_metas) {
-    for (u32 i = 0; i < CVM_SLOTS_PER_BLOCK;) {
-        /*
-         * Eight slots with nothing in them, skipped in one load. Most of a
-         * heap is empty, and this pass runs over every slot of every block
-         * being swept -- where the marker only ever saw the objects that
-         * survived -- so the skipping is what keeps it from costing more
-         * than the marking it replaced.
-         */
-        if (slots_to_group_end_are_empty(slots, i)) {
-            i += 8 - (i % 8);
-            continue;
-        }
-
+    u32 i = 0;
+    while (i < CVM_SLOTS_PER_BLOCK) {
         u8 state = object_meta_state(&slots[i]);
 
-        if (state == CVM_OM_MARKED) {
+        if (state == (u8)CVM_OM_MARKED) {
             u32 count = object_slots_at(block_start, slots, i);
             cvm_assert(count > 0);
             cvm_assert(i + count <= CVM_SLOTS_PER_BLOCK);
@@ -281,13 +264,42 @@ static void mark_survivors_lines(u8* block_start, ObjectMeta* slots,
                 }
             }
             i += count;
-        } else if (state == CVM_OM_PLACEHOLDER) {
+        } else if (state == (u8)CVM_OM_PLACEHOLDER) {
             /* The interior of a large object: its extent is the chunk's, at
              * large-object granularity, and nothing here is line-managed. */
             i += CVM_LARGE_OBJECT_MIN_SIZE / CVM_ALLOC_ALIGNMENT;
-        } else {
-            /* Free, or the end of an object that did not survive. */
+        } else if (state == (u8)CVM_OM_END) {
+            /*
+             * The last slot of an object. What follows it is the next slot in
+             * the block -- a start, or free -- and one byte of walking is
+             * cheaper than asking the scan to skip it: the second version of
+             * this pass scanned from here too, and a dense-all-live block
+             * (read-heavy, an END under every survivor) paid the scan's fixed
+             * work two hundred thousand times a collection for a one-byte
+             * answer.
+             */
             i++;
+        } else {
+            /*
+             * Dead territory: the start of an object that did not survive
+             * (ALLOCATED), or a free slot. The next slot that is the start of
+             * anything live has bit 0, and the scan finds it eight bytes at a
+             * time -- which is the whole point of doing this at all. A block
+             * that is mostly dead -- the shape a heap about to be
+             * half-reclaimed has -- walks its dead runs at a load per eight
+             * slots instead of a load per slot.
+             *
+             * A dense block of survivors never takes this branch: live starts
+             * are handled above and ENDs one byte at a time above that, so
+             * nothing pays for the scan existing except the runs it exists to
+             * skip.
+             *
+             * The scan cannot return 0 from here: this slot has no bit 0, so
+             * byte i never matches, and progress is guaranteed.
+             */
+            usize left = CVM_SLOTS_PER_BLOCK - (usize)i;
+            i += (u32)rt_swar_scan_for_byte_with_bits((u8 const*)&slots[i], left,
+                                                      CVM_SLOT_LIVE_START);
         }
     }
 }
