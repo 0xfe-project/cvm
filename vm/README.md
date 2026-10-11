@@ -160,8 +160,18 @@ Four things to get right, and none of them is optional:
   how far the object reaches.
 
 `cvm_init`'s options cover the heap's minimum and maximum, how many GC
-workers to run, whether finalizers get their own thread, where the event log
-goes, and the log level. `cvm_vm_stats` reports collections, time spent,
+workers to run, whether marking runs alongside the program
+(`concurrent_mark` — off by default; on, the stop-the-world window stops
+being where the marking happens, and a pointer store's barrier earns its
+keep), whether finalizers get their own thread, where the event log goes,
+and the log level.
+
+A container that replaces a structure a lock-free reader may still be
+walking retires it rather than dropping it: `cvm_retire` keeps the old object
+alive through one more collection, which is long enough that every reader
+who entered before the replacement has passed a safepoint. See
+`cvm/retire.h` for the contract and the argument; the hash table and the
+atom table are the users. `cvm_vm_stats` reports collections, time spent,
 live objects and heap size; `cvm_collect` forces a collection, which is what
 the benchmark's fixed-cadence mode calls.
 
