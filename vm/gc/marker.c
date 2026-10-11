@@ -646,12 +646,69 @@ void cvm_mark_batch(CvmHeap* heap, CvmGreyPacket* in, CvmGreyPacket** out,
  * immediately, which under a single marker is most of what it would be
  * doing.
  */
+/*
+ * A marker's own supply of empty packets, so the common case — take a full
+ * packet, trace it, hand the drained packet back — does not touch the global
+ * empty list at all.
+ *
+ * The list is where every marker and the mutators' barriers meet, and it is
+ * the one lock left on the marking path after the full packets moved to the
+ * deques. One spare is enough to break the per-packet round trip: a marker
+ * that has just drained a packet holds it and uses it as its next output
+ * rather than returning it and immediately taking another. Two would cover
+ * the weak holder too, and did not measure different from one, so it is one.
+ */
+#define CVM_MARK_LOCAL_EMPTY 1
+
+typedef struct CvmMarkerLocal {
+    /* The empty packets this marker is holding, up to CVM_MARK_LOCAL_EMPTY. */
+    CvmGreyPacket* empty[CVM_MARK_LOCAL_EMPTY];
+    u32 empty_count;
+} CvmMarkerLocal;
+
+/*
+ * Take an empty packet, from this marker's own supply first and the global
+ * list second. The waiting and the diagnostics are the global list's business
+ * and are unchanged: a local supply cannot wait, because it is replenished
+ * only from packets this marker itself drained.
+ */
+static CvmGreyPacket* local_take_empty(CvmMarkerLocal* local, CvmHeap* heap) {
+    if (local->empty_count > 0) {
+        return local->empty[--local->empty_count];
+    }
+    return take_empty_packet(heap);
+}
+
+/*
+ * Return an empty packet, to this marker's own supply while it has room and
+ * the global list once it does not. The type reset travels with the packet
+ * either way, and give_empty_packet is what does it.
+ */
+static void local_give_empty(CvmMarkerLocal* local, CvmHeap* heap,
+                             CvmGreyPacket* packet) {
+    if (local->empty_count < CVM_MARK_LOCAL_EMPTY) {
+        packet->type = (u16)CVM_GREY_PACKET_REFLIST;
+        local->empty[local->empty_count++] = packet;
+        return;
+    }
+    give_empty_packet(heap, packet);
+}
+
 void cvm_mark(CvmHeap* heap, bool scale) {
+    CvmMarkerLocal local = {.empty_count = 0};
     CvmGreyPacket* in = try_take_full_packet(heap);
     CvmGreyPacket* out = NULL;
     CvmGreyPacket* out_weak = NULL;
 
     while (in != NULL) {
+        /*
+         * The out holders are taken from the local supply, which is what
+         * keeps a marker that is steadily finding work from touching the
+         * empty list: its drained packets become its next output packets.
+         */
+        if (out == NULL) {
+            out = local_take_empty(&local, heap);
+        }
         cvm_mark_batch(heap, in, &out, &out_weak);
 
         cvm_assert(out != NULL);
@@ -660,27 +717,23 @@ void cvm_mark(CvmHeap* heap, bool scale) {
         CvmGreyPacket* next = try_take_full_packet(heap);
 
         if (next != NULL) {
-            give_empty_packet(heap, in);
+            local_give_empty(&local, heap, in);
             if (scale) {
-                /*
-                 * A backlog means marking is falling behind, so more
-                 * workers are worth waking. They stop themselves when the
-                 * list runs dry, so over-waking costs a check rather than
-                 * a busy thread.
-                 */
                 cvm_pool_scale_markers(heap->pool, backlog(heap));
             }
         } else if (!cvm_grey_packet_is_empty(out)) {
-            /*
-             * Nothing left to take, but this trace produced more. Reuse
-             * the packets already in hand rather than returning them and
-             * immediately taking others: the in packet becomes the out
-             * packet and vice versa.
-             */
             next = out;
             out = in;
         } else {
-            /* Nothing left and nothing produced: this marker is done. */
+            /*
+             * Done. The local supply goes back too: these are the global
+             * pool's packets, and the completion check counts them by the
+             * empty list, so a packet left here would keep marking from
+             * concluding.
+             */
+            while (local.empty_count > 0) {
+                give_empty_packet(heap, local.empty[--local.empty_count]);
+            }
             give_empty_packet(heap, in);
             give_full_packet(heap, out);
             give_weak_packet(heap, out_weak);
@@ -690,11 +743,9 @@ void cvm_mark(CvmHeap* heap, bool scale) {
         in = next;
     }
 
-    /*
-     * The loop is entered with `in == NULL` when there was nothing to do
-     * at all, in which case `out` is still NULL and there is nothing to
-     * hand back. Otherwise the packets were returned above.
-     */
+    while (local.empty_count > 0) {
+        give_empty_packet(heap, local.empty[--local.empty_count]);
+    }
 }
 
 /*
