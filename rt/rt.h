@@ -259,6 +259,13 @@ bool rt_thread_is_alive(RtThread thread);
 void rt_thread_yield(void);
 
 /*
+ * Sleep for at least `us` microseconds. For a spin loop's last resort --
+ * see rt/base/spin.h -- where the alternative is a syscall per iteration
+ * and the wait is genuinely long.
+ */
+void rt_thread_sleep_us(u32 us);
+
+/*
  * A hint that this thread is spinning, cheap enough to call in a tight poll
  * loop. Not a scheduling point — see the note on the implementation.
  */

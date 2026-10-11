@@ -32,6 +32,7 @@
 #include "gc/worklist.h"
 #include "log.h"
 #include "rt.h"
+#include "base/spin.h"
 
 /* ------------------------------------------------------------------ */
 /* packet plumbing                                                     */
@@ -73,7 +74,7 @@ static CvmGreyPacket* take_empty_packet(CvmHeap* heap) {
             }
         }
 
-        rt_thread_yield();
+        rt_spin_backoff(spin);
     }
 }
 
@@ -835,6 +836,7 @@ void cvm_mark_until_done(CvmHeap* heap) {
      */
     u64 last_progress_at = rt_time_millis();
     u32 last_accounted = 0;
+    u64 spins = 0;
 
     while (!cvm_mark_is_done(heap)) {
         cvm_mark(heap, true);
@@ -852,7 +854,9 @@ void cvm_mark_until_done(CvmHeap* heap) {
         if (!cvm_mark_is_done(heap)) {
             /* Other markers have the work in flight; let them finish it
              * rather than spinning on the packet list. */
-            rt_thread_yield();
+            rt_spin_backoff(spins++);
+        } else {
+            spins = 0;
         }
     }
 }

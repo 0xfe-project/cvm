@@ -24,6 +24,7 @@
 #include "gc/sweeper.h"
 #include "log.h"
 #include "rt.h"
+#include "base/spin.h"
 #include "stats.h"
 
 /* ------------------------------------------------------------------ */
@@ -504,15 +505,9 @@ void cvm_pool_wait_idle(CvmGcPool* pool) {
      * first, then yield, keeps the CPU from being wasted while still giving
      * the scheduler a chance when the wait is genuinely long.
      */
-    u32 spins = 0;
+    u64 spins = 0;
     while (cvm_pool_any_active(pool)) {
-        if (spins < 256) {
-            rt_cpu_relax();
-            spins++;
-        } else {
-            rt_thread_yield();
-            spins = 0;
-        }
+        rt_spin_backoff(spins++);
     }
 }
 

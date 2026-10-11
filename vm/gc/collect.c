@@ -53,6 +53,7 @@
 #include "cvm/weak.h"
 #include "log.h"
 #include "rt.h"
+#include "base/spin.h"
 #include "safepoint.h"
 #include "stats.h"
 
@@ -120,10 +121,13 @@ static void mark_all(CvmHeap* heap) {
 
 /* Clear every weak reference whose target did not survive. */
 static void nullify_all(CvmHeap* heap) {
+    u64 spins = 0;
     while (!cvm_weak_is_done(heap)) {
         cvm_weak_nullify(heap);
         if (!cvm_weak_is_done(heap)) {
-            rt_thread_yield();
+            rt_spin_backoff(spins++);
+        } else {
+            spins = 0;
         }
     }
 }
