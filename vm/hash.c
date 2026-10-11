@@ -724,18 +724,34 @@ static void map_vacate(CvmHashMap* m, usize i) {
  * answer.
  */
 bool cvm_map_find_key(CvmHashMap const* m, opaque_mut key, opaque_mut* stored_out) {
-    MapView v = map_view(m);
-    usize slot = map_find_view(&v, m->ops, m->ops->hash(key), key);
-    if (slot == CVM_MAP_NO_SLOT) {
-        if (stored_out != NULL) {
-            *stored_out = NULL;
+    /*
+     * Optimistic, with a re-check: the snapshot is several reads, and a resize
+     * between them can pair one generation's key array with another's occupancy
+     * bitmap and bucket count -- a table that never was, and a lookup that misses
+     * an entry that is there. The publication order makes that pairing possible
+     * in exactly one direction (a reader that saw the new keys may still be
+     * holding the old used/bits), so the walk is validated rather than assumed:
+     * every replacement installs a fresh key array, so the pointer is the
+     * generation. If it changed, the answer is about a table that no longer
+     * exists, and the walk starts again -- rare, because a replacement is rare.
+     */
+    for (;;) {
+        MapView v = map_view(m);
+        usize slot = map_find_view(&v, m->ops, m->ops->hash(key), key);
+        if (map_keys_load(m) != v.array) {
+            continue;
         }
-        return false;
+        if (slot == CVM_MAP_NO_SLOT) {
+            if (stored_out != NULL) {
+                *stored_out = NULL;
+            }
+            return false;
+        }
+        if (stored_out != NULL) {
+            *stored_out = slot_key(v.keys, slot);
+        }
+        return true;
     }
-    if (stored_out != NULL) {
-        *stored_out = slot_key(v.keys, slot);
-    }
-    return true;
 }
 
 usize cvm_map_slot(CvmHashMap const* m, opaque_mut key) {
