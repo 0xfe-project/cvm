@@ -320,6 +320,17 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
     heap->mark.busy = false;
     heap->mark.concurrent_enabled = false;
 
+    heap->retired.previous = NULL;
+    heap->retired.previous_count = 0;
+    heap->retired.previous_cap = 0;
+    heap->retired.current = NULL;
+    heap->retired.current_count = 0;
+    heap->retired.current_cap = 0;
+    if (!rt_mutex_init(&heap->retired.lock)) {
+        cvm_heap_destroy(heap);
+        return false;
+    }
+
     CVM_LOG_INFO(m) {
         fmt_lit(&m.fmt, "heap: ");
         fmt_u32(&m.fmt, heap->block_count);
@@ -335,6 +346,13 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
 }
 
 void cvm_heap_destroy(CvmHeap* heap) {
+    if (heap->retired.current != NULL || heap->retired.previous != NULL) {
+        rt_mutex_destroy(&heap->retired.lock);
+    }
+    rt_mem_free((opaque_mut)heap->retired.previous);
+    rt_mem_free((opaque_mut)heap->retired.current);
+    heap->retired.previous = NULL;
+    heap->retired.current = NULL;
     cvm_worklist_destroy(&heap->mark.work);
     cvm_region_release(&heap->blocks);
     cvm_region_release(&heap->grey_packets_region);

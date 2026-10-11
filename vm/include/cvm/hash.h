@@ -110,6 +110,18 @@ typedef struct CvmMapOps {
      */
     bool (*valid)(opaque_mut stored_key);
     opaque_mut (*store)(opaque_mut key);
+
+    /*
+     * Whether this table is read without a lock while it is being written.
+     *
+     * A table that is asks the map to keep its replaced arrays alive for one
+     * more collection (cvm/retire.h), because a reader that snapshotted the
+     * old arrays is still walking them after the swap. A table that is not --
+     * the ordinary case, a table used from one thread or under a lock taken
+     * for every access -- pays nothing and reclaims exactly when it did,
+     * which is what the tests that clear and prune pin down.
+     */
+    bool lock_free_readers;
 } CvmMapOps;
 
 /*
@@ -190,6 +202,8 @@ bool cvm_map_del(CvmHashMap* m, opaque_mut key);
  * canonical string is reachable only through the stored key's wrapper, and
  * asking for a value would ask the wrong question.
  */
+bool cvm_map_find_key(CvmHashMap const* m, opaque_mut key, opaque_mut* stored_out);
+
 usize cvm_map_slot(CvmHashMap const* m, opaque_mut key);
 
 /*

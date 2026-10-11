@@ -148,6 +148,9 @@ static void nullify_all(CvmHeap* heap) {
 static void reset_marking(CvmHeap* heap) {
     CvmGreyPacket* packet;
 
+    /* The retired lists' turn of the generation: see gc/retire.c. */
+    cvm_retire_begin_collection(heap);
+
     while ((packet = cvm_grey_list_pop(&heap->mark.found_weak_refs,
                                        heap->mark.packets)) != NULL) {
         cvm_grey_list_push(&heap->mark.empty, heap->mark.packets, packet);

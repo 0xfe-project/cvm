@@ -119,34 +119,33 @@ CvmString* cvm_atom_lookup(CvmAtomTable const* t, CvmString* text) {
     CvmHashMap* m = shard_map(t, shard);
 
     /*
-     * Under the shard's lock, and not yet lock-free.
+     * Lock-free, and this is the second version of it.
      *
-     * A lock-free lookup walks the shard's key array, and a resize or a
-     * compaction replaces that array and leaves the old one unreachable. The
-     * collector's sweep runs concurrently with mutators, so it can free that
-     * array while a reader is still walking it — which is a use-after-free, and
-     * it was one: the concurrency test crashed inside a key comparison.
+     * The first version's argument was "a lookup allocates nothing, so it
+     * contains no safepoint, so no collection can begin inside it" -- true,
+     * and not enough: it says nothing about a sweep that is already running.
+     * A resize replaces the key array this walks, the array becomes
+     * unreachable, and the sweep reclaimed it under the reader. The
+     * concurrency test crashed inside a key comparison.
      *
-     * The argument for the lock-free read used to be "a lookup allocates nothing,
-     * so it contains no safepoint, so no collection can begin inside it". That is
-     * true and it is not enough: it keeps a collection from *starting*, and says
-     * nothing about a sweep that is already running.
+     * What makes it safe now is the map retiring its replaced arrays
+     * (cvm/retire.h): they stay alive through one full collection after the
+     * replacement, and a lock-free reader is a managed thread, so the
+     * collection after the replacement has already waited for every reader
+     * that was inside to reach a safepoint -- which for a reader is *after*
+     * its read. The slot and the stored key come from one snapshot
+     * (cvm_map_find_key), so a resize between the two reads cannot pair an
+     * old slot with a new array.
      *
-     * Making it safe again needs the replaced arrays to be kept alive until no
-     * reader can still be inside them, which is a grace period, and there are two
-     * shapes for it: retire the arrays in the map and drop them in the next
-     * mutator phase after a collection (every reader has passed a safepoint by
-     * then, since the collector waited for it), or take the lock for the lookup
-     * and be done. Until one of them is in, the lock is the answer.
+     * The insert keeps the shard lock: it is the one place an entry can
+     * appear, and a lock-free miss just means "not found yet".
      */
-    cvm_mutex_lock(shard_lock(t, shard));
-    usize slot = cvm_map_slot(m, text);
-    CvmString* canonical = NULL;
-    if (slot != CVM_MAP_NO_SLOT) {
-        canonical = (CvmString*)cvm_weak_ref_target(cvm_map_key_at(m, slot));
+    opaque_mut stored = NULL;
+    (void)cvm_map_find_key(m, text, &stored);
+    if (stored == NULL) {
+        return NULL;
     }
-    cvm_mutex_unlock(shard_lock(t, shard));
-    return canonical;
+    return (CvmString*)cvm_weak_ref_target(stored);
 }
 
 CvmString* cvm_atom_intern(CvmAtomTable* t, CvmString* text) {

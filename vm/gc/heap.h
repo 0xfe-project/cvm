@@ -213,6 +213,28 @@ typedef struct CvmHeap {
         bool has_history;
     } mark;
 
+    /*
+     * Objects kept alive for one more collection after their replacement.
+     * See cvm/retire.h for the contract and the argument.
+     *
+     * Two lists rather than a per-entry generation: `current` collects what is
+     * retired while a collection runs or between collections, and moves to
+     * `previous` at the next collection's reset -- by which time one full
+     * marking has kept every entry alive, and the marking after that is what
+     * reclaims them. The lock is for the concurrent window, where an
+     * unmanaged thread can retire (a resize under a container's lock) while
+     * the collector marks; it is a leaf, taken by nothing else.
+     */
+    struct {
+        RtMutex lock;
+        opaque_mut* previous;
+        u32 previous_count;
+        u32 previous_cap;
+        opaque_mut* current;
+        u32 current_count;
+        u32 current_cap;
+    } retired;
+
     /* --- sweeping --- */
     struct {
         /*
@@ -314,6 +336,10 @@ typedef struct CvmHeap {
  * allocated and the heap must not be used.
  */
 bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size);
+
+/* The retire list's collector-side halves. See gc/retire.c and cvm/retire.h. */
+void cvm_retire_begin_collection(CvmHeap* heap);
+void cvm_retire_mark_all(CvmHeap* heap, CvmGreyPacket** out, CvmGreyPacket** out_weak);
 
 void cvm_heap_destroy(CvmHeap* heap);
 

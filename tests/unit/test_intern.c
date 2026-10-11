@@ -191,7 +191,17 @@ TEST the_wrapper_object_is_released_with_the_entry(void) {
 
     ASSERT_EQ_FMT((usize)1, cvm_intern_prune(t), "%zu");
     collect();
-    /* and now nothing points at it */
+    /*
+     * Not yet, and this is the retire list, not a leak. A prune rebuilds the
+     * table, and this table is read without a lock -- so the map keeps the
+     * arrays it replaced alive for one more collection, because a reader that
+     * snapshotted them is still entitled to be walking them (see
+     * cvm/retire.h). The wrapper is in those arrays, so it outlives the prune
+     * by exactly that grace period.
+     */
+    ASSERT(cvm_weak_ref_target(weak_wrapper) == wrapper);
+    collect();
+    /* and now the grace period is over and nothing points at it */
     ASSERT(cvm_weak_ref_target(weak_wrapper) == NULL);
 
     FRAME_END();

@@ -81,6 +81,7 @@ static CvmMapOps const weak_string_ops = {
     .matches = weak_key_matches,
     .valid = weak_key_valid,
     .store = weak_key_store,
+    .lock_free_readers = true,
 };
 
 /* ------------------------------------------------------------------ */

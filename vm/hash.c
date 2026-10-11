@@ -13,6 +13,7 @@
  */
 
 #include "cvm/hash.h"
+#include "cvm/retire.h"
 
 #include <stdatomic.h>
 
@@ -162,6 +163,30 @@ CVM_INLINE u32 map_bits_load(CvmHashMap const* m) {
 
 static void map_publish(CvmHashMap* m, CvmRefArray* keys, CvmRefArray* values,
                         opaque_mut used, u32 bits) {
+    /*
+     * The arrays being replaced stay readable for one more collection. A
+     * lock-free reader holds a snapshot of the old ones (map_view) and walks
+     * them after this publication; the sweep would reclaim them the moment
+     * they become unreachable, which is a use-after-free under a reader that
+     * started a moment earlier. Retiring is what makes the lock-free read
+     * safe -- see cvm/retire.h for the argument that one collection of grace
+     * is enough.
+     *
+     * Before the stores, so a reader that sees the new arrays is guaranteed
+     * the old ones are already on the retire list.
+     */
+    if (m->ops->lock_free_readers) {
+        if (m->keys != keys) {
+            cvm_retire((opaque_mut)m->keys);
+        }
+        if (m->values != values) {
+            cvm_retire((opaque_mut)m->values);
+        }
+        if (m->used != used) {
+            cvm_retire(m->used);
+        }
+    }
+
     atomic_store_explicit((opaque_mut _Atomic*)&m->used, used, memory_order_release);
     atomic_store_explicit((u32 _Atomic*)&m->bits, bits, memory_order_release);
     /* Last: this is the field a reader checks to know the snapshot still stands. */
@@ -688,6 +713,29 @@ static void map_vacate(CvmHashMap* m, usize i) {
     slot_key_set(m->keys->items, i, NULL);
     cvm_store_ptr(&m->values->items[i], NULL);
     m->count--;
+}
+
+/*
+ * The bucket holding `key` and the key stored there, from one snapshot.
+ *
+ * For a caller that takes no lock. Reading the slot and then the key with two
+ * separate calls is a race with a resize between them: the slot belongs to the
+ * old array's bounds, the key read would index the new one. One view, one
+ * answer.
+ */
+bool cvm_map_find_key(CvmHashMap const* m, opaque_mut key, opaque_mut* stored_out) {
+    MapView v = map_view(m);
+    usize slot = map_find_view(&v, m->ops, m->ops->hash(key), key);
+    if (slot == CVM_MAP_NO_SLOT) {
+        if (stored_out != NULL) {
+            *stored_out = NULL;
+        }
+        return false;
+    }
+    if (stored_out != NULL) {
+        *stored_out = slot_key(v.keys, slot);
+    }
+    return true;
 }
 
 usize cvm_map_slot(CvmHashMap const* m, opaque_mut key) {

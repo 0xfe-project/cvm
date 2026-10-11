@@ -620,6 +620,13 @@ void cvm_mark_roots(CvmHeap* heap) {
      */
     cvm_root_mark_all(heap, &out, &out_weak);
 
+    /*
+     * The retire list, marked grey alongside the roots: these are objects a
+     * container replaced and promised to keep alive through this collection.
+     * Grey rather than black because a lock-free reader walks *through* them.
+     */
+    cvm_retire_mark_all(heap, &out, &out_weak);
+
     give_full_packet(heap, out);
     give_weak_packet(heap, out_weak);
 }
