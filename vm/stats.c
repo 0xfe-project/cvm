@@ -27,6 +27,12 @@ static str const event_names[CVM_EVENT_TYPE_COUNT] = {
     [CVM_EVENT_MARK] = {.ptr = (u8 const*)"mark", .len = 4},
     [CVM_EVENT_NULLIFY] = {.ptr = (u8 const*)"nullify", .len = 7},
     [CVM_EVENT_SWEEP] = {.ptr = (u8 const*)"sweep", .len = 5},
+    /* "concmark" is the pool workers' mark loop, and what it measures depends
+     * on the collector: alongside the program when concurrent marking chose
+     * this collection, and inside the stop-the-world window otherwise, where
+     * it is parallel rather than concurrent. The name is the worker's role,
+     * not the mode; the mode is in the collection's own event shape (two
+     * short pauses rather than one long one). */
     [CVM_EVENT_CONCURRENT_MARK] = {.ptr = (u8 const*)"concmark", .len = 8},
     [CVM_EVENT_CONCURRENT_NULLIFY] = {.ptr = (u8 const*)"concnullify", .len = 11},
     [CVM_EVENT_CONCURRENT_SWEEP] = {.ptr = (u8 const*)"concsweep", .len = 9},

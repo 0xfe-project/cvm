@@ -147,6 +147,53 @@
  */
 #define CVM_MARK_INITIAL_WORKERS 2u
 
+/*
+ * How long the last mark phase has to have taken before a concurrent
+ * collection is worth having.
+ *
+ * A concurrent collection stops the world twice instead of once, and its
+ * second stop rescans the roots. That is overhead a small collection pays for
+ * nothing: measured on the benchmark's small-heap rows, whose mark phases run
+ * two to three microseconds, going concurrent cost forty to a hundred and
+ * seventy microseconds of extra pause -- and saved nothing, because there was
+ * no pause to save. The rows that benefit start at hundreds of microseconds
+ * of mark (growth: 290us, pause 529us -> 24us) and run to milliseconds
+ * (read-heavy: 2ms, pause 2365us -> 19us).
+ *
+ * The last mark's duration is the signal, because it is the measured size of
+ * the marking job rather than a proxy for it, and because both collectors
+ * record it: the stop-the-world one as the pause it paid, the concurrent one
+ * as the span of its window.
+ *
+ * A collection with no history takes the concurrent path, which is the
+ * optimistic side and the deliberate one. Pessimism -- stopping the world
+ * until proven otherwise -- has the first collection of a big-heap program pay
+ * a full stop-the-world mark, and that pause is the maximum the benchmark
+ * reports for the whole run, which is the number this mode exists to improve.
+ * Optimism costs a small-heap program the two-stop overhead once: its first
+ * collection runs concurrent, records a mark of a few microseconds, and every
+ * collection after it takes the single-stop path.
+ */
+#define CVM_CONCURRENT_MARK_MIN_MARK_NS ((u64)100 * 1000)
+
+/*
+ * And the way back. A heap whose live set sits at the threshold alternates
+ * otherwise: a collection just under it records a small mark and sends the
+ * next collection stop-the-world, which is exactly when a growing heap has
+ * crossed the line -- growth-1.5 grows its live set by half each round, and
+ * the collection after the small one paid a 425us stop-the-world pause while
+ * the threshold said 100us.
+ *
+ * The margin has to clear the small rows' actual marking time -- two to three
+ * microseconds on the benchmark -- while sitting under the dips a big-heap
+ * workload takes between rounds (growth-1.5 hit 10us mid-run with a
+ * half-megabyte live set behind it). Five microseconds is between the two,
+ * closer to the small rows, because the cost of wrongly staying concurrent is
+ * one hundred-microsecond collection while the cost of wrongly leaving is a
+ * full stop-the-world mark.
+ */
+#define CVM_CONCURRENT_MARK_MAX_MARK_NS ((u64)5 * 1000)
+
 /* ------------------------------------------------------------------ */
 /* heap growth policy                                                  */
 /* ------------------------------------------------------------------ */

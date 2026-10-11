@@ -509,13 +509,18 @@ static bool cvm_gc_collect_concurrent(CvmHeap* heap) {
     }
 
     atomic_store_explicit(&heap->mark.busy, false, memory_order_release);
+    heap->mark.last_was_concurrent = true;
 
     cvm_thread_set_activity(CVM_ACT_IDLE);
     return true;
 }
 
 bool cvm_gc_collect(CvmHeap* heap) {
-    if (heap->mark.concurrent_enabled) {
+    if (heap->mark.concurrent_enabled &&
+        (!heap->mark.has_history ||
+         heap->mark.last_mark_ns >= CVM_CONCURRENT_MARK_MIN_MARK_NS ||
+         (heap->mark.last_was_concurrent &&
+          heap->mark.last_mark_ns >= CVM_CONCURRENT_MARK_MAX_MARK_NS))) {
         return cvm_gc_collect_concurrent(heap);
     }
     cvm_thread_set_activity(CVM_ACT_COLLECTING);
@@ -726,6 +731,7 @@ bool cvm_gc_collect(CvmHeap* heap) {
     };
 
     cvm_stats_record(stats, CVM_EVENT_COLLECTION, event_start, end_ns);
+    heap->mark.last_was_concurrent = false;
     cvm_gc_counters_record_collection(start_ns, end_ns);
 
     CVM_LOG_INFO(m) {

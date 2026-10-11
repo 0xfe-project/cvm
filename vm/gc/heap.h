@@ -192,6 +192,13 @@ typedef struct CvmHeap {
         bool concurrent_enabled;
         _Atomic bool busy;
 
+        /*
+         * Whether the last collection ran concurrent, for the hysteresis
+         * between the two thresholds in layout.h: a marking job between them
+         * stays in whatever mode handled it last.
+         */
+        bool last_was_concurrent;
+
         u64 current_start_ns;
         u64 current_end_ns;
         u64 last_end_ns;
