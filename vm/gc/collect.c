@@ -95,7 +95,27 @@ static void phase_run(CvmHeap* heap, CvmGcPhase phase, u32 workers,
 
 /* Mark until nothing is left to trace. */
 static void mark_all(CvmHeap* heap) {
+    /*
+     * The collector marks with a deque, and that is deliberate rather than
+     * incidental. Its other option is to hand the packets it fills to the
+     * global list, and the first version of this change did exactly that --
+     * with a consequence that took a while to see. The collector takes from
+     * that same list, one line above where it pushes, so a packet it had
+     * just pushed it took straight back. The list never grew, the scaling
+     * decision that reads it never fired, and read-heavy -- a chain whose
+     * only width is its forward edges -- ran on one thread while the workers
+     * slept. Fourteen percent slower, and the profile said every mark event
+     * was on the collecting thread.
+     *
+     * With a deque the collector's packets wait where it does not look first:
+     * it pops its own newest, and what it does not get to waits behind it,
+     * counted by backlog(), and the workers steal it. Both halves are
+     * load-bearing -- the waiting must be visible, and the collector must
+     * not consume it itself.
+     */
+    cvm_tls_worklist = &heap->mark.work;
     cvm_mark_until_done(heap);
+    cvm_tls_worklist = NULL;
 }
 
 /* Clear every weak reference whose target did not survive. */
@@ -112,17 +132,38 @@ static void nullify_all(CvmHeap* heap) {
  * Reset the marking state so a collection starts from a known place.
  *
  * Every packet goes back on the empty list. That is the invariant the
- * completion check reads: marking is done when the packets on the empty
- * and weak lists account for all of them, so a packet left elsewhere
- * would make marking either finish early or never.
+ * completion check reads: marking is done when the packets on the empty and
+ * weak lists account for all of them, so a packet left elsewhere would make
+ * marking either finish early or never.
+ *
+ * This drains the global full list, every worker's deque, and the collector's
+ * deque. Packets on the weak list are pushed back onto empty by the completion
+ * checks for nullifying and sweeping, which both test against "all packets on
+ * the empty list".
  */
 static void reset_marking(CvmHeap* heap) {
     CvmGreyPacket* packet;
+
     while ((packet = cvm_grey_list_pop(&heap->mark.found_weak_refs,
                                        heap->mark.packets)) != NULL) {
         cvm_grey_list_push(&heap->mark.empty, heap->mark.packets, packet);
     }
     while ((packet = cvm_grey_list_pop(&heap->mark.full, heap->mark.packets)) != NULL) {
+        cvm_grey_list_push(&heap->mark.empty, heap->mark.packets, packet);
+    }
+
+    /* Drain the workers' deques. */
+    CvmGcPool* pool = heap->pool;
+    if (pool != NULL) {
+        for (u32 i = 0; i < pool->count; i++) {
+            while ((packet = cvm_worklist_pop(&pool->threads[i].work)) != NULL) {
+                cvm_grey_list_push(&heap->mark.empty, heap->mark.packets, packet);
+            }
+        }
+    }
+
+    /* Drain the collector's own deque. */
+    while ((packet = cvm_worklist_pop(&heap->mark.work)) != NULL) {
         cvm_grey_list_push(&heap->mark.empty, heap->mark.packets, packet);
     }
 }

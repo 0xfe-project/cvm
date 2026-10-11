@@ -51,6 +51,7 @@
 #include "gc/grey_packet.h"
 #include "gc/layout.h"
 #include "gc/meta.h"
+#include "gc/worklist.h"
 #include "rt.h"
 
 /* ------------------------------------------------------------------ */
@@ -169,6 +170,15 @@ typedef struct CvmHeap {
          * accounts for all of them. */
         u32 packet_count;
         CvmGreyPacket* packets;
+
+        /*
+         * The deque for the thread that is collecting without a pool -- the
+         * single-threaded case, where marking runs on the caller. A worker has
+         * its own in CvmGcThread; the collecting thread has no CvmGcThread,
+         * and it still fills and drains packets like a marker, so it needs
+         * somewhere to stack them.
+         */
+        CvmWorklist work;
 
         u64 current_start_ns;
         u64 current_end_ns;

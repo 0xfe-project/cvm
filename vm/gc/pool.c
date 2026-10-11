@@ -34,11 +34,31 @@ u32 cvm_pool_default_count(CvmHeap const* heap) {
     u32 hardware = rt_hardware_threads();
 
     /*
-     * One worker per hardware thread except the one the program is using,
-     * since a worker that shares a core with a mutator makes the mutator
-     * slower at exactly the wrong moment.
+     * (8 + (N - 8) * 5/8) / 4, where N is the hardware thread count.
+     *
+     * A deliberate under-subscription, and the shape of it carries the
+     * reasoning: eight threads buy two workers, and every eight after that
+     * buy five more. On this machine's ten -- four performance cores and six
+     * efficiency cores -- that is two workers for marking, where the previous
+     * rule ("one per hardware thread minus the mutator's") said nine.
+     *
+     * Nine was measured, not reasoned: with 2, 3, 4, 6 and 9 workers the
+     * wall time of tree-keep and read-heavy moved by less than the row's
+     * own spread (tree-keep 39.5-43.4ms, read-heavy 26.5-27.8ms), so the
+     * extra workers bought nothing. What they did buy was contention: a
+     * sampler profile showed 30% of the marker's time waiting on the grey
+     * list's mutex, and a worker parked on an efficiency core holds that
+     * mutex for a whole scheduling round.
+     *
+     * The floor and the ceiling are as before: never zero, never more than
+     * the pool's array, and never more markers than there are packets to
+     * divide.
      */
-    u32 count = (hardware > 1) ? hardware - 1 : 1;
+    f64 scaled = (8.0 + ((f64)hardware - 8.0) * (5.0 / 8.0)) / 4.0;
+    u32 count = (u32)scaled;
+    if (count < 1) {
+        count = 1;
+    }
     if (count > CVM_MAX_GC_WORKERS) {
         count = CVM_MAX_GC_WORKERS;
     }
@@ -64,12 +84,14 @@ u32 cvm_pool_default_count(CvmHeap const* heap) {
 /* one thread's loop                                                   */
 /* ------------------------------------------------------------------ */
 
-static void do_mark(CvmHeap* heap, CvmStats* stats) {
+static void do_mark(CvmGcThread* thread, CvmHeap* heap, CvmStats* stats) {
     /* Take packets until there are none left, then stop. The collector
      * will wake this thread again if the backlog grows. */
+    cvm_tls_worklist = &thread->work;
     u64 start = cvm_stats_now(stats);
     cvm_mark(heap, false);
     cvm_stats_record(stats, CVM_EVENT_CONCURRENT_MARK, start, cvm_stats_now(stats));
+    cvm_tls_worklist = NULL;
 }
 
 static void do_nullify(CvmHeap* heap, CvmStats* stats) {
@@ -206,7 +228,7 @@ static opaque_mut gc_thread_main(opaque_mut arg) {
             break;
         }
         case CVM_GC_MARK:
-            do_mark(heap, thread->stats);
+            do_mark(thread, heap, thread->stats);
             break;
         case CVM_GC_NULLIFY:
             do_nullify(heap, thread->stats);
@@ -294,6 +316,30 @@ bool cvm_pool_init(CvmHeap* heap, u32 count) {
     }
 
     /*
+     * Sized by the packet pool, which is an upper bound rather than a guess: a
+     * packet is in exactly one place at a time, so no deque can hold more than
+     * the total. See gc/worklist.h -- this is what makes the ring's growth
+     * path unreachable.
+     *
+     * Before any thread starts, so that the failure path has no workers to
+     * stop, and all of them here rather than inside the thread loop so a
+     * failure halfway leaves nothing half-built.
+     */
+    for (u32 i = 0; i < count; i++) {
+        if (!cvm_worklist_init(&pool->threads[i].work, heap->mark.packet_count)) {
+            while (i > 0) {
+                cvm_worklist_destroy(&pool->threads[--i].work);
+            }
+            for (u32 j = 0; j < count; j++) {
+                cvm_stats_close(pool->threads[j].stats);
+            }
+            rt_sem_destroy(&pool->start);
+            rt_mem_free(pool);
+            return false;
+        }
+    }
+
+    /*
      * Publish the pool before the threads exist. A worker that woke early
      * would look for heap->pool and find NULL. Done before the threads
      * start, and undone if none of them do.
@@ -315,6 +361,10 @@ bool cvm_pool_init(CvmHeap* heap, u32 count) {
 
     if (started == 0) {
         heap->pool = NULL;
+        for (u32 i = 0; i < count; i++) {
+            cvm_stats_close(pool->threads[i].stats);
+            cvm_worklist_destroy(&pool->threads[i].work);
+        }
         rt_sem_destroy(&pool->start);
         rt_mem_free(pool);
         return false;
@@ -349,6 +399,7 @@ void cvm_pool_destroy(CvmHeap* heap) {
     for (u32 i = 0; i < pool->count; i++) {
         cvm_stats_close(pool->threads[i].stats);
         pool->threads[i].stats = NULL;
+        cvm_worklist_destroy(&pool->threads[i].work);
     }
 
     heap->pool = NULL;

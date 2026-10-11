@@ -331,7 +331,13 @@ export function checkNoDeadFunctions({ root, ui }) {
      * becomes a formality.
      */
     const ALLOWED = new Map([
-        // None yet. Add with a reason.
+        // "Whether this deque is empty" is an answer anyone may ask and a
+        // promise nobody can make: the owner or a thief can change it the
+        // moment it is read. Its caller is the concurrent-mark termination
+        // check (t41), which does not exist yet; it is kept now because it
+        // is the one lock-free half of that check and is exercised by the
+        // worklist tests alongside the halves that do have callers.
+        ["cvm_worklist_empty", "t41: termination check reads it"],
     ]);
 
     const runtimeSrcs = [

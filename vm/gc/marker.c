@@ -29,6 +29,7 @@
 #include "gc/meta.h"
 #include "cvm/roots.h"
 #include "gc/pool.h"
+#include "gc/worklist.h"
 #include "log.h"
 #include "rt.h"
 
@@ -77,7 +78,57 @@ static CvmGreyPacket* take_empty_packet(CvmHeap* heap) {
 }
 
 static CvmGreyPacket* try_take_full_packet(CvmHeap* heap) {
-    return cvm_grey_list_pop(&heap->mark.full, heap->mark.packets);
+    /*
+     * Our own deque first: no lock, and the packets on it are the ones this
+     * thread just filled, so their objects are the most likely to be in this
+     * core's cache. Then the global list, which is where the roots and every
+     * mutator's barrier put their packets. Then other workers' deques, from
+     * the far end -- the oldest packets, which are the ones their owner is
+     * least likely to want back soon.
+     */
+    CvmWorklist* mine = cvm_tls_worklist;
+    if (mine != NULL) {
+        CvmGreyPacket* own = cvm_worklist_pop(mine);
+        if (own != NULL) {
+            return own;
+        }
+    }
+
+    CvmGreyPacket* global = cvm_grey_list_pop(&heap->mark.full, heap->mark.packets);
+    if (global != NULL) {
+        return global;
+    }
+
+    CvmGcPool* pool = heap->pool;
+    if (pool == NULL) {
+        return NULL;
+    }
+    for (u32 i = 0; i < pool->count; i++) {
+        CvmWorklist* other = &pool->threads[i].work;
+        if (other == mine) {
+            continue;
+        }
+        CvmGreyPacket* stolen = cvm_worklist_steal(other);
+        if (stolen != NULL) {
+            return stolen;
+        }
+    }
+
+    /*
+     * The collecting thread's deque last. It fills its deque with the roots'
+     * packets, and without this look a worker never sees them: the collector
+     * pops its own deque before the global list, so the packets it produces
+     * reach the workers only by being stolen. That ordering -- own, then
+     * global, then everyone's deques -- is also why the collector does not
+     * starve: it always takes its own newest first.
+     */
+    if (&heap->mark.work != mine) {
+        CvmGreyPacket* stolen = cvm_worklist_steal(&heap->mark.work);
+        if (stolen != NULL) {
+            return stolen;
+        }
+    }
+    return NULL;
 }
 
 static void give_empty_packet(CvmHeap* heap, CvmGreyPacket* packet) {
@@ -109,6 +160,18 @@ static void give_full_packet(CvmHeap* heap, CvmGreyPacket* packet) {
         return;
     }
     cvm_assert(packet->type == CVM_GREY_PACKET_REFRANGE || packet->size > 0);
+
+    /*
+     * A worker keeps what it fills: no lock, and the next packet it traces is
+     * the one it just filled. Anyone else -- the collecting thread marking
+     * roots, a mutator in its write barrier -- has no deque and hands the
+     * packet to the global list, where every worker looks.
+     */
+    CvmWorklist* mine = cvm_tls_worklist;
+    if (mine != NULL) {
+        cvm_worklist_push(mine, packet);
+        return;
+    }
     cvm_grey_list_push(&heap->mark.full, heap->mark.packets, packet);
 }
 
@@ -126,6 +189,53 @@ static void give_weak_packet(CvmHeap* heap, CvmGreyPacket* packet) {
 }
 
 /* Put a value into a packet, taking a fresh one when it is full. */
+/*
+ * How many packets of marking work are waiting, wherever they are waiting.
+ *
+ * Used to be the global full list's size and nothing else, which was right
+ * when that list was the only place work waited. Now a marker keeps what it
+ * fills in its own deque, so the global list alone answers "nothing" while
+ * nine deques are full -- and the scaling decision, reading only the list,
+ * stopped waking workers. That was a regression, not a slowdown: one thread
+ * marked alone and read-heavy went 25% slower.
+ *
+ * The deques are read without their owners' participation, which is what
+ * cvm_worklist_size is for: an upper bound on occupancy that anyone may
+ * ask for. It is racy, and harmlessly so -- the decision it feeds is "wake
+ * more workers", and a stale answer wakes either one too many or one too
+ * few, both of which the next round corrects.
+ */
+/*
+ * How much marking work is waiting for someone to take it.
+ *
+ * The global full list, plus the workers' own deques. The list alone was the
+ * answer when it was the only place work waited; with per-worker deques the
+ * workers keep what they fill, so a long list says only what the collector
+ * and the barriers produced. The deques say whether the workers themselves
+ * are loaded, which is the other half of "should more of them run".
+ *
+ * The deques are read without their owners' participation, which is what
+ * cvm_worklist_size is for: an upper bound on occupancy that anyone may ask
+ * for. It is racy, and harmlessly so -- the decision it feeds is "wake more
+ * workers", and a stale answer wakes either one too many or one too few,
+ * both of which the next round corrects.
+ *
+ * A packet a worker holds and is tracing is on neither: it is in the
+ * worker's hands. So this counts waiting work, not work in progress, which
+ * is the quantity the decision wants.
+ */
+static u32 backlog(CvmHeap* heap) {
+    u32 n = cvm_grey_list_size(&heap->mark.full);
+    n += (u32)cvm_worklist_size(&heap->mark.work);
+    CvmGcPool* pool = heap->pool;
+    if (pool != NULL) {
+        for (u32 i = 0; i < pool->count; i++) {
+            n += (u32)cvm_worklist_size(&pool->threads[i].work);
+        }
+    }
+    return n;
+}
+
 static void packet_push(CvmHeap* heap, CvmGreyPacket** holder, opaque_mut value) {
     if (!cvm_grey_packet_push(*holder, value)) {
         give_full_packet(heap, *holder);
@@ -558,8 +668,7 @@ void cvm_mark(CvmHeap* heap, bool scale) {
                  * list runs dry, so over-waking costs a check rather than
                  * a busy thread.
                  */
-                cvm_pool_scale_markers(heap->pool,
-                                       cvm_grey_list_size(&heap->mark.full));
+                cvm_pool_scale_markers(heap->pool, backlog(heap));
             }
         } else if (!cvm_grey_packet_is_empty(out)) {
             /*

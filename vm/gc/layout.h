@@ -136,6 +136,14 @@
  * Small on purpose: the scaling above brings more as packets accumulate, and
  * the measurement behind this is that waking the whole pool buys nothing
  * over waking a few while costing a wake and a context switch per thread.
+ *
+ * Two is the measured answer for a heap with width to divide; a chain-shaped
+ * root graph never accumulates a backlog -- each marker's packet produces at
+ * most one more -- so the scaling threshold is never crossed and the
+ * collecting thread walks the chain alone. Waking more at the start does not
+ * fix that (they find one packet, finish, sleep), and neither does lowering
+ * the threshold (the backlog genuinely is small); what fixes it is concurrent
+ * marking, which is the next change and the reason this one exists.
  */
 #define CVM_MARK_INITIAL_WORKERS 2u
 

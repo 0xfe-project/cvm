@@ -295,6 +295,15 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
                            heap->mark.packet_count);
 
     /*
+     * The collector's own deque, sized like the workers', for when marking
+     * runs without a pool. Initialized here, after packet_count is set.
+     */
+    if (!cvm_worklist_init(&heap->mark.work, heap->mark.packet_count)) {
+        cvm_heap_destroy(heap);
+        return false;
+    }
+
+    /*
      * Marking bookkeeping. `has_history` false means the growth decision
      * has no previous collection to read, which is correct for a fresh
      * heap — and setting it explicitly matters because the heap struct may
@@ -324,6 +333,7 @@ bool cvm_heap_init(CvmHeap* heap, usize min_size, usize max_size) {
 }
 
 void cvm_heap_destroy(CvmHeap* heap) {
+    cvm_worklist_destroy(&heap->mark.work);
     cvm_region_release(&heap->blocks);
     cvm_region_release(&heap->grey_packets_region);
     cvm_region_release(&heap->block_meta_region);
