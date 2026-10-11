@@ -168,6 +168,14 @@ struct CvmTypeDescriptor {
 #define CVM_OBJECT_SLOT_ALLOCATED ((u8)0x2)
 
 /*
+ * The metadata state the inlined path writes on the object's *last* slot:
+ * "an object of this many slots ends here". See the note on CVM_OM_END in
+ * gc/meta.h for what reads it and why it is in the table rather than in the
+ * object.
+ */
+#define CVM_OBJECT_SLOT_END ((u8)0x4)
+
+/*
  * Every GC heap object begins with this header. Allocation returns a
  * pointer to the header; user payload follows immediately after.
  */
@@ -651,6 +659,28 @@ CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
                                       usize payload_size) {
     CvmVMContext* ctx = cvm_ctx();
     usize size = cvm_align_up(sizeof(CvmGcHeader) + payload_size, CVM_ALLOC_ALIGNMENT);
+
+    /*
+     * At least two slots, so that an object's start and its end are different
+     * slots.
+     *
+     * The end of an object is a slot state, and a slot holds one state: an
+     * object that fitted in a single slot could not say both "an object
+     * starts here" and "it ends here". Whippet has the same problem and
+     * solves it with a bit per property, so a one-granule object writes
+     * `begin | end` in one byte; our states are values compared as a whole,
+     * which is what makes them cheap to read and what makes them unable to
+     * overlap.
+     *
+     * So a payload of one word or less costs one slot more than it needs. It
+     * is the smallest possible object -- the header is one word and the
+     * payload rounding is to 16 -- and the alternative is a second state
+     * meaning "starts and ends here", compared alongside the other four
+     * everywhere a state is read.
+     */
+    if (size == CVM_ALLOC_ALIGNMENT) {
+        size += CVM_ALLOC_ALIGNMENT;
+    }
     u8* p = ctx->bump_ptr;
 
     if (CVM_UNLIKELY(size > CVM_INLINE_ALLOC_MAX || p + size > ctx->bump_end)) {
@@ -670,9 +700,19 @@ CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
      * one address is a data race whichever way round it is. A relaxed
      * atomic byte store is the same single instruction.
      */
-    atomic_store_explicit((_Atomic u8*)&ctx->object_meta[(usize)(p - ctx->heap_base) /
-                                                         CVM_ALLOC_ALIGNMENT],
+    usize slot = (usize)(p - ctx->heap_base) / CVM_ALLOC_ALIGNMENT;
+    atomic_store_explicit((_Atomic u8*)&ctx->object_meta[slot],
                           CVM_OBJECT_SLOT_ALLOCATED, memory_order_relaxed);
+
+    /*
+     * And the object's extent: one slot past its first, minus one. `size` is
+     * a multiple of the alignment and at least two slots, because the header
+     * is one word and a payload is at least one more, so the end is never the
+     * same slot as the start.
+     */
+    atomic_store_explicit(
+        (_Atomic u8*)&ctx->object_meta[slot + size / CVM_ALLOC_ALIGNMENT - 1],
+        CVM_OBJECT_SLOT_END, memory_order_relaxed);
 
     /*
      * Allocate black while a mark phase is running.

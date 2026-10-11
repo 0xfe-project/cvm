@@ -15,6 +15,7 @@
 
 #include "base/assert.h"
 #include "base/math.h"
+#include "base/swar.h"
 #include "base/types.h"
 #include "context.h"
 #include "cvm/gc.h"
@@ -126,6 +127,15 @@ static void sweep_line_with_finalizers(ObjectMeta* line_cursor, u8* line_start) 
             object_meta_set_free(slot);
         } else if (object_meta_is_marked(slot)) {
             object_meta_set_allocated(slot);
+        } else if (object_meta_is_end(slot)) {
+            /*
+             * The end of an object that reached into this line, and the line
+             * survived because of it: it stays, because the next sweep reads
+             * extents out of these. A dead object's end marker inside a kept
+             * line is left where it is -- the allocator never bumps into a
+             * kept line, so nothing can be allocated over it, and the line's
+             * slots are cleared in bulk when the line itself is freed.
+             */
         } else {
             /* Already free, or a placeholder for a large object's
              * interior. Both become free, which is what
@@ -175,6 +185,125 @@ static void sweep_line_with_finalizers(ObjectMeta* line_cursor, u8* line_start) 
  * same mistake: the block stays described as in use, and the symptom is a
  * collection that reclaims nothing.
  */
+/*
+ * How many slots the object starting at `index` covers.
+ *
+ * Read out of the metadata table, which is the point: the marker does not
+ * need it any more (it marks the object and its block and nothing else) and
+ * the sweeper must not read the object -- it runs while the program does, and
+ * the object and its descriptor are the coldest lines it could touch. Whippet
+ * records the same thing in its mark byte for the same reason: "finding holes
+ * in a block can just read the mark table and can avoid looking at object
+ * memory" (doc/collector-mmc.md).
+ *
+ * The fallback is the descriptor, for an object whose end marker is not
+ * there. That should not happen -- every line-managed allocation writes one
+ * -- but a wrong extent here frees a live object's tail, so the slow path is
+ * preferred to a guess. The scan is bounded by the block because an object
+ * never spans one.
+ */
+static u32 object_slots_at(u8* block_start, ObjectMeta* slots, u32 index) {
+    for (u32 i = index + 1; i < CVM_SLOTS_PER_BLOCK; i++) {
+        if (object_meta_is_end(&slots[i])) {
+            return i - index + 1;
+        }
+    }
+
+    u8* addr = block_start + (usize)index * CVM_ALLOC_ALIGNMENT;
+    return (u32)(cvm_object_size((CvmGcHeader const*)addr) / CVM_ALLOC_ALIGNMENT);
+}
+
+/*
+ * Which lines the survivors in this block reach.
+ *
+ * This is what the marker used to do, and moving it here is the point of the
+ * exercise: it is a pass over the block's metadata, which the sweep has time
+ * for and the pause does not. A line is kept because some object that
+ * survived covers part of it -- including the lines after the first, which is
+ * why the object's end has to be readable from the table rather than assumed
+ * from a mark on its first line.
+ */
+/*
+ * Which slots this pass does work at.
+ *
+ * A live object's start is MARKED (0x3) or, for a large object, PLACEHOLDER
+ * (0x1) -- both carry bit 0. A dead object's start is ALLOCATED (0x2), which
+ * does not, and an END marker (0x4) does not either. So bit 0 is "the start
+ * of something that survives", and a scan for it skips everything else --
+ * the dead, and the interior slots of every object, live or dead -- eight at
+ * a time.
+ *
+ * This is whippet's usage of the same table: finding object boundaries and
+ * live slots by bits in the mark table, not an emptiness test. The first
+ * version of this pass tried the emptiness test and got it wrong (the
+ * any-byte-zero idiom reads a group holding one mark and seven empties as
+ * empty), and the second tried skipping empty groups by alignment and
+ * measured nothing, because a dense block has no empty groups to skip. The
+ * third scanned from every slot and lost 20% on the dense-all-live block,
+ * because the scan's fixed work is several times a byte compare and a live
+ * object has nothing to skip past. This one scans only out of dead runs,
+ * where there is something to skip, and walks live objects byte-wise.
+ */
+#define CVM_SLOT_LIVE_START ((u8)0x1)
+
+static void mark_survivors_lines(u8* block_start, ObjectMeta* slots,
+                                 LineMeta* line_metas) {
+    u32 i = 0;
+    while (i < CVM_SLOTS_PER_BLOCK) {
+        u8 state = object_meta_state(&slots[i]);
+
+        if (state == (u8)CVM_OM_MARKED) {
+            u32 count = object_slots_at(block_start, slots, i);
+            cvm_assert(count > 0);
+            cvm_assert(i + count <= CVM_SLOTS_PER_BLOCK);
+
+            for (u32 slot = i; slot < i + count; slot++) {
+                LineMeta* line = &line_metas[slot / CVM_SLOTS_PER_LINE];
+                if (!line_meta_is_marked(line)) {
+                    line_meta_mark(line);
+                }
+            }
+            i += count;
+        } else if (state == (u8)CVM_OM_PLACEHOLDER) {
+            /* The interior of a large object: its extent is the chunk's, at
+             * large-object granularity, and nothing here is line-managed. */
+            i += CVM_LARGE_OBJECT_MIN_SIZE / CVM_ALLOC_ALIGNMENT;
+        } else if (state == (u8)CVM_OM_END) {
+            /*
+             * The last slot of an object. What follows it is the next slot in
+             * the block -- a start, or free -- and one byte of walking is
+             * cheaper than asking the scan to skip it: the second version of
+             * this pass scanned from here too, and a dense-all-live block
+             * (read-heavy, an END under every survivor) paid the scan's fixed
+             * work two hundred thousand times a collection for a one-byte
+             * answer.
+             */
+            i++;
+        } else {
+            /*
+             * Dead territory: the start of an object that did not survive
+             * (ALLOCATED), or a free slot. The next slot that is the start of
+             * anything live has bit 0, and the scan finds it eight bytes at a
+             * time -- which is the whole point of doing this at all. A block
+             * that is mostly dead -- the shape a heap about to be
+             * half-reclaimed has -- walks its dead runs at a load per eight
+             * slots instead of a load per slot.
+             *
+             * A dense block of survivors never takes this branch: live starts
+             * are handled above and ENDs one byte at a time above that, so
+             * nothing pays for the scan existing except the runs it exists to
+             * skip.
+             *
+             * The scan cannot return 0 from here: this slot has no bit 0, so
+             * byte i never matches, and progress is guaranteed.
+             */
+            usize left = CVM_SLOTS_PER_BLOCK - (usize)i;
+            i += (u32)rt_swar_scan_for_byte_with_bits((u8 const*)&slots[i], left,
+                                                      CVM_SLOT_LIVE_START);
+        }
+    }
+}
+
 static u32 cvm_sweep_simple_block(CvmHeap* heap, CvmThreadNode* target,
                                   BlockMeta* block_meta, u8* block_start,
                                   LineMeta* line_metas, CvmSweepResult* result) {
@@ -214,6 +343,8 @@ static u32 cvm_sweep_simple_block(CvmHeap* heap, CvmThreadNode* target,
 
     cvm_assert(block_meta_is_marked(block_meta));
     block_meta_unmark(block_meta);
+
+    mark_survivors_lines(block_start, bytemap_get(bytemap, block_start), line_metas);
 
     /* Three cursors advancing together: line index, line metadata, and the
      * bytemap entry for the line's first slot. */
