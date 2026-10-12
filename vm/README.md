@@ -43,21 +43,34 @@ keep an object alive.
 
 ## How a collection runs
 
-    stop the world
+    stop the world (the first stop)
       drive the previous sweep to its end
       decide whether to grow the heap
-      mark: scan the frame chains, then trace, in parallel, with the worker pool
+      scan the frame chains: the root snapshot
+    resume the world
+      mark alongside the program, with the worker pool and the write barrier
+      (a store during marking marks what it publishes; an allocation
+      starts life marked)
+    stop the world (the second stop)
+      rescan the frame chains: the roots changed while the program ran
+      drain whatever the rescan found
       nullify: clear every weak reference whose target did not survive
       prepare the sweep: empty every thread's allocator and the block free lists
       reset the sweep cursors
     resume the world
       hand the sweep to the worker pool, and do not wait for it
 
-The split is the design. **Marking is inside the pause and sweeping is not.**
-A sweep only decides which lines a dead object occupied — no pointer is
-followed and nothing needs a consistent view of the graph — so it can happen
-while the program runs, driven by whoever allocates next and by the pool. The
-pause that a program actually feels is the trace.
+Two stops, not one, and neither is the trace. The first is the root snapshot —
+a frame chain walk, which is per-thread and small — and the second is the
+rescan plus the phases that always needed the world stopped (nullify, sweep
+preparation). The marking itself, which is what scaled with the live set, runs
+alongside the program. The write barrier is what makes that sound: a store
+during marking marks the value it publishes, so the marker cannot miss
+something the program made reachable after the marker had already passed.
+
+The sweep is the same as it has always been: a sweep only decides which lines
+a dead object occupied — no pointer is followed — so it happens while the
+program runs, driven by whoever allocates next and by the pool.
 
 Sweeping is itself batched: a sweeper claims a run of blocks, and a run of
 free lines that crosses a batch boundary is held back with a `coalesce` mark
@@ -76,23 +89,23 @@ slots a frame declares and nothing else; a conservative collector reads the
 whole stack, word by word, on every collection.
 
 **Good at not taxing the program.** There is no read barrier, and the write
-barrier is conditional rather than unconditional: it acts only while a mark
-phase is running, so a pointer store outside marking is a load of a shared
-flag, a branch the predictor gets right, and the store. Under the
-stop-the-world marking this collector does today, the only threads that can
-store during a mark are the ones a collection does not stop — the unmanaged
-ones, inside a foreign call or blocked in a wait — which is the same window
-the root table's barrier has always existed for.
+barrier's fast path is one load of a shared flag, a branch the predictor gets
+right, and the store — it acts only while a mark phase is running, and
+marking runs alongside the program, so the mutator's own time is its own
+except for that check. Measured on one tree with the barrier on and off,
+every benchmark row was within noise, including `write-heavy`, which is
+nothing but pointer stores into live objects.
 
-Measured on one tree with the barrier on and off, every row is within noise of
-every other, including `write-heavy`, which is nothing but pointer stores into
-live objects and exists to price exactly this. The trade against a concurrent
-collector is therefore not "a barrier or no barrier": it is that this one pays
-the barrier only while it is marking, and pays for it in pause length instead.
+The trade against a stop-the-world collector is not "a barrier or no
+barrier": it is that this one pays the barrier on every store, and in return
+the pause is the root snapshot and the tail rather than the whole live set.
 
-**It pays in pause length.** Marking is stop-the-world, so the pause scales
-with the live set. A collector that marks concurrently has a pause that does
-not — and loses on throughput what it gains there.
+**The pause does not scale with the live set.** Marking runs alongside the
+program; the stop-the-world window is the root snapshot at the start and the
+rescan-and-drain at the end. On the benchmark, read-heavy's pause is 0.028ms
+against a stop-the-world collector's 2.4ms on the same live set, and the
+program's throughput is unchanged: the marking work still happens, it just
+overlaps the program instead of stopping it.
 
 **It pays for its side tables in cache footprint.** Per object the marker
 touches the object, its bytemap slot, its line metadata and its block
@@ -160,10 +173,7 @@ Four things to get right, and none of them is optional:
   how far the object reaches.
 
 `cvm_init`'s options cover the heap's minimum and maximum, how many GC
-workers to run, whether marking runs alongside the program
-(`concurrent_mark` — off by default; on, the stop-the-world window stops
-being where the marking happens, and a pointer store's barrier earns its
-keep), whether finalizers get their own thread, where the event log goes,
+workers to run, whether finalizers get their own thread, where the event log goes,
 and the log level.
 
 A container that replaces a structure a lock-free reader may still be

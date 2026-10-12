@@ -8,7 +8,7 @@ CSV. This file says what the numbers are and which of them not to trust.
 
 | | marking | roots | moves objects | built as |
 |---|---|---|---|---|
-| **cvm** | stop-the-world, parallel | exact (frame chain) | no | the project itself |
+| **cvm** | concurrent, write barrier | exact (frame chain) | no | the project itself |
 | **bdwgc** | stop-the-world, conservative | conservative (stack scan) | no | 8.2.12, `-O1` |
 | **tgc** | stop-the-world, conservative | conservative (`setjmp`) | no | 459 lines, `-O1`, three metrics added |
 | **go** | concurrent, write barrier | exact | no | its own toolchain and optimizer |
@@ -32,12 +32,11 @@ a collector can stop the world for a millisecond a hundred times (pause_all
 which of those a program can live with is a different question from how long
 the worst one was.
 
-On the record below, cvm's read-heavy row reads 83.4% -- the program is
-stopped for five sixths of its running time -- and tree-keep 22.2%, while go's
-same rows read 1.1% and 0.9%. That pair of numbers is the whole case for
-concurrent marking, and it is also what `CvmOptions.concurrent_mark` changes:
-with it on, the same two rows' pauses drop from 2.4ms and 2.3ms to 0.013ms and
-0.029ms, and their pause_all with them.
+On the record below, cvm's read-heavy and tree-keep rows read 0.1% --
+concurrent marking is the collector, not a mode, and the stop-the-world window
+is only the root snapshot and the tail drain. go's same rows read 1.5% and
+1.4%, and cvm's pauses (0.028ms, 0.026ms) match or beat go's (0.029ms,
+0.182ms).
 
 **The column is comparable for cvm and go only.** bdwgc and tgc do not expose
 a pause total, so their backends report zero and their `pause_all` reads 0.0%
@@ -48,22 +47,24 @@ for those two, not "non-stop".
 
 | scenario | cvm | go | bdwgc | tgc |
 |---|---|---|---|---|
-| churn-unary | 14.49 | 30.93 | 28.57 | 635.60 |
-| tree-keep | 36.68 | 51.56 | 50.14 | 5122.45 |
-| mixed-sizes | 39.63 | 93.24 | — | 224.77 |
-| flat-fp | 13.43 | 12.26 | 13.77 | 13.67 |
+| churn-unary | 20.83 | 30.91 | 27.57 | 612.18 |
+| tree-keep | 38.06 | 47.13 | 53.25 | 7151.96 |
+| mixed-sizes | 72.02 | 93.78 | — | 227.14 |
+| flat-fp | 12.91 | 13.28 | 13.53 | 13.61 |
+
 
 
 **auto**
 
 | scenario | cvm | go | bdwgc | tgc |
 |---|---|---|---|---|
-| tree-keep | 40.23 | 55.27 | 56.67 | 1742.06 |
-| mixed-sizes | 13.37 | 92.33 | 84.05 | 436.30 |
-| flat-fp | 13.62 | 13.62 | 13.61 | 13.59 |
-| read-heavy | 32.28 | 18.47 | 19.33 | — |
-| write-heavy | 0.12 | 1.03 | 0.24 | 3.58 |
-| growth-1.5 | 0.66 | 3.35 | 1.52 | 37.26 |
+| tree-keep | 42.16 | 54.80 | 56.51 | 1726.80 |
+| mixed-sizes | 14.74 | 74.36 | 86.38 | 224.77 |
+| flat-fp | 13.18 | 12.73 | 12.96 | 13.19 |
+| read-heavy | 30.88 | 13.09 | 20.17 | — |
+| write-heavy | 0.30 | 0.99 | 0.51 | 5.09 |
+| growth-1.5 | 1.48 | 3.55 | 2.83 | 36.09 |
+
 
 
 The full comparison is in `results/`, and the figures below are generated from
