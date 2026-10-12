@@ -54,10 +54,18 @@
 #include "base/types.h"
 #include "cvm/gc.h"
 
-/* Why a string's flags word exists at all: two bits of state that would
- * otherwise cost a wider field or a separate lookup. */
-#define CVM_STRF_WIDE ((u16)1u << 0)   /* 16-bit units rather than 8-bit */
-#define CVM_STRF_HASHED ((u16)1u << 1) /* `hash` holds the computed value */
+/*
+ * The flags word: two bits of state and two for what the string is made of.
+ */
+#define CVM_STRF_WIDE ((u16)1u << 0)
+#define CVM_STRF_HASHED ((u16)1u << 1)
+
+/* What the string is made of: flat (units in data[]), rope (data[] is two
+ * pointers), or slice (data[] is a parent pointer and an offset). */
+#define CVM_STRF_KIND_MASK ((u16)0x000Cu)
+#define CVM_STRF_FLAT ((u16)0u)
+#define CVM_STRF_ROPE ((u16)1u << 2)
+#define CVM_STRF_SLICE ((u16)1u << 3)
 
 /*
  * Field order is the ABI: the collector reads `length` at
@@ -124,19 +132,29 @@ CVM_INLINE bool cvm_string_is_wide(CvmString const* s) {
     return (s->flags & CVM_STRF_WIDE) != 0u;
 }
 
+CVM_INLINE u16 cvm_string_kind(CvmString const* s) {
+    return (u16)(s->flags & CVM_STRF_KIND_MASK);
+}
+
+/* The shape-holding half of cvm_string_unit. Not for calling directly. */
+u32 cvm_string_unit_slow(CvmString const* s, usize i);
+
+/* The same string as a flat one: s itself when flat, a flat copy otherwise. */
+CvmString* cvm_string_flatten(CvmString* s);
+
 /*
- * The code unit at `i`, widened to u32.
+ * The code unit at `i`, whichever shape the string is.
  *
- * A code *unit*, not a code point: on a 16-bit string this can be half of a
- * surrogate pair. Code point access and iteration live above this, where the
- * pairing rules are known.
- *
- * No bounds check: the caller has the length, and the cost of the check is
- * the cost of the operation.
+ * The flat path is inline; a rope or slice goes through cvm_string_unit_slow,
+ * which walks to the leaf. The depth is bounded (see cvm_string_concat), so an
+ * index cannot become a scan.
  */
 CVM_INLINE u32 cvm_string_unit(CvmString const* s, usize i) {
     cvm_assert(i < s->length);
-    return cvm_string_is_wide(s) ? (u32)((u16 const*)s->data)[i] : (u32)s->data[i];
+    if (CVM_LIKELY(cvm_string_kind(s) == CVM_STRF_FLAT)) {
+        return cvm_string_is_wide(s) ? (u32)((u16 const*)s->data)[i] : (u32)s->data[i];
+    }
+    return cvm_string_unit_slow(s, i);
 }
 
 /*
@@ -189,6 +207,8 @@ typedef struct CvmStringView {
 } CvmStringView;
 
 CVM_INLINE CvmStringView cvm_string_view(CvmString const* s) {
+    cvm_assert(cvm_string_kind(s) == CVM_STRF_FLAT &&
+               "view requires a flat string; flatten first");
     CvmStringView v = {
         .units = s->data, .length = s->length, .wide = cvm_string_is_wide(s)};
     return v;
@@ -302,10 +322,9 @@ bool cvm_string_includes(CvmString const* haystack, CvmString const* needle);
 /*
  * The code units in [from, to), as a string of its own.
  *
- * A copy, for now. The slice form that shares the parent's units is not in yet —
- * the rope/slice representation is its own piece of work — and this is the
- * signature it will keep, so a caller written against this does not change when
- * it lands.
+ * A slice: the parent's units at an offset, not a copy. A slice of a slice is
+ * adjusted to point at the grandparent, so a chain of substring calls does
+ * not stack up indirections.
  *
  * Units rather than text: a substring of a wide string stays wide, and splitting
  * a surrogate pair is the caller's business, as it is in every other
@@ -313,8 +332,11 @@ bool cvm_string_includes(CvmString const* haystack, CvmString const* needle);
  */
 CvmString* cvm_string_substring(CvmString const* s, usize from, usize to);
 
-/* The two strings' units, one after the other. A copy, for the same reason: a
- * rope that keeps the pieces is its own piece of work. */
+/* The two strings' units, one after the other. A rope: a node holding both,
+ * not a copy. Past CVM_ROPE_MAX_DEPTH the concatenation flattens rather than
+ * build a tree that would make an index a scan. */
 CvmString* cvm_string_concat(CvmString const* a, CvmString const* b);
+
+#define CVM_ROPE_MAX_DEPTH ((u32)32)
 
 #endif /* CVM_STR_H */

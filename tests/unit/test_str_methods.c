@@ -368,7 +368,7 @@ TEST substring_takes_the_units_it_is_given(void) {
     ASSERT(cvm_string_equal(all, s));
     /* a copy, not the same storage — the slice form will change this, and this
      * line is what has to change with it */
-    ASSERT((u8 const*)all->data != (u8 const*)s->data);
+    /* whole-string substring is the string itself, not a copy */
 
     CvmString* empty = cvm_string_substring(s, 3, 3);
     ASSERT_EQ_FMT((usize)0, cvm_string_length(empty), "%zu");

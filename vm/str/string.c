@@ -69,6 +69,38 @@ static CvmTypeDescriptor const cvm_type_string16 = {
     .array_elem_type = &cvm_type_unit16,
 };
 
+/*
+ * A rope's and a slice's `data` holds pointers, not units, so they are
+ * CVM_TYPE_STRUCT and the collector traces them — that trace is what keeps a
+ * rope's children and a slice's parent alive.
+ */
+static CvmPtrField const rope_fields[] = {
+    {.offset = offsetof(CvmString, data) + 0},
+    {.offset = offsetof(CvmString, data) + sizeof(CvmString*)},
+};
+
+static CvmTypeDescriptor const cvm_type_string_rope = {
+    .size = offsetof(CvmString, data) + 2 * sizeof(CvmString*),
+    .kind = CVM_TYPE_STRUCT,
+    .num_ptr_fields = 2,
+    .num_embed_fields = 0,
+    .ptr_fields = rope_fields,
+    .embed_fields = NULL,
+};
+
+static CvmPtrField const slice_fields[] = {
+    {.offset = offsetof(CvmString, data) + 0},
+};
+
+static CvmTypeDescriptor const cvm_type_string_slice = {
+    .size = offsetof(CvmString, data) + sizeof(CvmString*) + sizeof(usize),
+    .kind = CVM_TYPE_STRUCT,
+    .num_ptr_fields = 1,
+    .num_embed_fields = 0,
+    .ptr_fields = slice_fields,
+    .embed_fields = NULL,
+};
+
 /* ------------------------------------------------------------------ */
 /* allocation                                                          */
 /* ------------------------------------------------------------------ */
@@ -91,9 +123,44 @@ static CvmString* string_alloc(bool wide, usize length) {
     return s;
 }
 
+CVM_INLINE CvmString* rope_left(CvmString const* s) {
+    return *(CvmString**)s->data;
+}
+CVM_INLINE CvmString* rope_right(CvmString const* s) {
+    return *(CvmString**)(s->data + sizeof(CvmString*));
+}
+CVM_INLINE CvmString* slice_parent(CvmString const* s) {
+    return *(CvmString**)s->data;
+}
+CVM_INLINE usize slice_offset(CvmString const* s) {
+    return *(usize const*)(s->data + sizeof(CvmString*));
+}
+CVM_INLINE u32 string_depth(CvmString const* s) {
+    return (cvm_string_kind(s) == CVM_STRF_ROPE || cvm_string_kind(s) == CVM_STRF_SLICE)
+               ? (u32)s->reserved
+               : 0u;
+}
+
 /* The unit stride of a string, in bytes. */
 CVM_INLINE usize string_unit_size(CvmString const* s) {
     return cvm_string_is_wide(s) ? 2u : 1u;
+}
+
+u32 cvm_string_unit_slow(CvmString const* s, usize i) {
+    switch (cvm_string_kind(s)) {
+    case CVM_STRF_ROPE: {
+        CvmString* left = rope_left(s);
+        if (i < left->length) {
+            return cvm_string_unit(left, i);
+        }
+        return cvm_string_unit(rope_right(s), i - left->length);
+    }
+    case CVM_STRF_SLICE:
+        return cvm_string_unit(slice_parent(s), slice_offset(s) + i);
+    default:
+        cvm_assert(false && "unit_slow on a flat string");
+        return 0;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -145,7 +212,10 @@ CvmString* cvm_string_widen(CvmString* s) {
      * string held in a local, the allocation below can collect, and the
      * collector does not scan the machine stack. Without the frame, a
      * collection triggered right here would free the very units being copied.
+     *
+     * A rope or a slice has no contiguous units to widen, so flatten first.
      */
+    s = cvm_string_flatten(s);
     CVM_FRAME_DECL(f, 2);
     cvm_frame_push(&f_frame, f_roots, 2);
     f_roots[0] = s;
@@ -222,7 +292,8 @@ bool cvm_string_equal(CvmString const* a, CvmString const* b) {
     }
 
     usize bytes = a->length * string_unit_size(a);
-    if (cvm_string_is_wide(a) == cvm_string_is_wide(b)) {
+    if (cvm_string_kind(a) == CVM_STRF_FLAT && cvm_string_kind(b) == CVM_STRF_FLAT &&
+        cvm_string_is_wide(a) == cvm_string_is_wide(b)) {
         /* Same representation: the units are contiguous and compared as
          * bytes, which for equal-width units is the same as comparing them as
          * units. */
@@ -256,7 +327,8 @@ i32 cvm_string_compare(CvmString const* a, CvmString const* b) {
      * compares the low byte first and would order 0x0100 below 0x0001. Wide
      * and mixed pairs therefore go through the units.
      */
-    if (!cvm_string_is_wide(a) && !cvm_string_is_wide(b)) {
+    if (cvm_string_kind(a) == CVM_STRF_FLAT && cvm_string_kind(b) == CVM_STRF_FLAT &&
+        !cvm_string_is_wide(a) && !cvm_string_is_wide(b)) {
         i32 c = memcmp(a->data, b->data, shorter);
         if (c != 0) {
             return c < 0 ? -1 : 1;
@@ -276,6 +348,33 @@ i32 cvm_string_compare(CvmString const* a, CvmString const* b) {
         return 0;
     }
     return a->length < b->length ? -1 : 1;
+}
+
+CvmString* cvm_string_flatten(CvmString* s) {
+    if (cvm_string_kind(s) == CVM_STRF_FLAT) {
+        return s;
+    }
+    CVM_FRAME_DECL(f, 1);
+    cvm_frame_push(&f_frame, f_roots, 1);
+    f_roots[0] = s;
+    bool wide = cvm_string_is_wide(s);
+    usize length = s->length;
+    CvmString* flat = string_alloc(wide, length);
+    f_roots[0] = flat;
+    for (usize i = 0; i < length; i++) {
+        u32 unit = cvm_string_unit(s, i);
+        if (wide) {
+            ((u16*)flat->data)[i] = (u16)unit;
+        } else {
+            flat->data[i] = (u8)unit;
+        }
+    }
+    if ((s->flags & CVM_STRF_HASHED) != 0u) {
+        flat->hash = s->hash;
+        flat->flags |= CVM_STRF_HASHED;
+    }
+    cvm_frame_pop(&f_frame);
+    return flat;
 }
 
 /* ------------------------------------------------------------------ */
@@ -519,53 +618,79 @@ CvmString* cvm_string_substring(CvmString const* s, usize from, usize to) {
     cvm_assert(to <= s->length);
 
     usize n = to - from;
-    bool wide = cvm_string_is_wide(s);
-
-    /*
-     * The result is allocated before the source's units are read, so the source
-     * is held across an allocation and goes in a frame. Everything else here
-     * would be fine without one — the copy is plain arithmetic — which is
-     * exactly the kind of exception that is easy to miss.
-     */
-    CVM_FRAME_DECL(f, 1);
-    cvm_frame_push(&f_frame, f_roots, 1);
-    f_roots[0] = (opaque_mut)(CvmString*)s;
-
-    CvmString* out = string_alloc(wide, n);
-
-    CvmString* src = (CvmString*)f_roots[0];
-    for (usize i = 0; i < n; i++) {
-        u32 unit = cvm_string_unit(src, from + i);
-        if (wide) {
-            ((u16*)out->data)[i] = (u16)unit;
-        } else {
-            out->data[i] = (u8)unit;
-        }
+    if (n == 0u) {
+        return cvm_string_new8(NULL, 0u);
+    }
+    if (from == 0u && n == s->length) {
+        return (CvmString*)s;
     }
 
+    /* A slice of a slice points at the grandparent. */
+    usize offset = from;
+    CvmString* parent = (CvmString*)s;
+    if (cvm_string_kind(s) == CVM_STRF_SLICE) {
+        offset = slice_offset(s) + from;
+        parent = slice_parent(s);
+    }
+
+    CVM_FRAME_DECL(f, 1);
+    cvm_frame_push(&f_frame, f_roots, 1);
+    f_roots[0] = parent;
+    CvmString* slice = cvm_alloc(&cvm_type_string_slice);
+    slice->length = n;
+    slice->hash = 0;
+    slice->flags = CVM_STRF_SLICE;
+    if (cvm_string_is_wide(s)) {
+        slice->flags |= CVM_STRF_WIDE;
+    }
+    slice->reserved = (u16)(string_depth(parent) + 1u);
+    *(CvmString**)slice->data = (CvmString*)f_roots[0];
+    *(usize*)(slice->data + sizeof(CvmString*)) = offset;
     cvm_frame_pop(&f_frame);
-    return out;
+    return slice;
 }
 
 CvmString* cvm_string_concat(CvmString const* a, CvmString const* b) {
-    /*
-     * Through the builder, which is off-heap: the scratch never enters the heap,
-     * so the only allocation is the result and the only rooting needed is for the
-     * two sources across it.
-     */
+    if (a->length == 0u) {
+        return (CvmString*)b;
+    }
+    if (b->length == 0u) {
+        return (CvmString*)a;
+    }
+
+    u32 depth =
+        1u + (string_depth(a) > string_depth(b) ? string_depth(a) : string_depth(b));
+    if (depth > CVM_ROPE_MAX_DEPTH) {
+        /* Past the cap the tree would make an index a scan, so the result is
+         * one flat string, built through the builder. */
+        CVM_FRAME_DECL(f, 2);
+        cvm_frame_push(&f_frame, f_roots, 2);
+        f_roots[0] = (opaque_mut)(CvmString*)a;
+        f_roots[1] = (opaque_mut)(CvmString*)b;
+        CvmStrBuf buf;
+        cvm_str_buf_init(&buf);
+        bool ok = cvm_str_buf_put_string(&buf, (CvmString*)f_roots[0]);
+        ok = ok && cvm_str_buf_put_string(&buf, (CvmString*)f_roots[1]);
+        CvmString* out = ok ? cvm_str_buf_finish(&buf) : NULL;
+        cvm_str_buf_free(&buf);
+        cvm_frame_pop(&f_frame);
+        return out;
+    }
+
     CVM_FRAME_DECL(f, 2);
     cvm_frame_push(&f_frame, f_roots, 2);
     f_roots[0] = (opaque_mut)(CvmString*)a;
     f_roots[1] = (opaque_mut)(CvmString*)b;
-
-    CvmStrBuf buf;
-    cvm_str_buf_init(&buf);
-    bool ok = cvm_str_buf_put_string(&buf, (CvmString*)f_roots[0]);
-    ok = ok && cvm_str_buf_put_string(&buf, (CvmString*)f_roots[1]);
-
-    CvmString* out = ok ? cvm_str_buf_finish(&buf) : NULL;
-    cvm_str_buf_free(&buf);
-
+    CvmString* rope = cvm_alloc(&cvm_type_string_rope);
+    rope->length = a->length + b->length;
+    rope->hash = 0;
+    rope->flags = CVM_STRF_ROPE;
+    if (cvm_string_is_wide(a) || cvm_string_is_wide(b)) {
+        rope->flags |= CVM_STRF_WIDE;
+    }
+    rope->reserved = (u16)depth;
+    *(CvmString**)rope->data = (CvmString*)f_roots[0];
+    *(CvmString**)(rope->data + sizeof(CvmString*)) = (CvmString*)f_roots[1];
     cvm_frame_pop(&f_frame);
-    return out;
+    return rope;
 }
