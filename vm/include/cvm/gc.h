@@ -939,7 +939,20 @@ CVM_INLINE void cvm_store_barrier(opaque_mut value) {
  * The form for a container that owns the slot: `&a->items[i]`, say.
  */
 CVM_INLINE void cvm_store_ptr(opaque_mut* slot, opaque_mut value) {
-    *slot = value;
+    /*
+     * A relaxed atomic store, for the same reason the marker's field reads
+     * are relaxed atomic loads: in the concurrent window, the marker may be
+     * reading this slot while the store happens, and mixing atomic and
+     * non-atomic access to one address is a data race by definition.
+     *
+     * Relaxed is sufficient because the ordering that correctness needs is
+     * carried by the barrier below, not by this store: if the marker sees
+     * the new value it will be marked (the barrier ran first), and if it
+     * sees the old one that value is still being kept alive. A relaxed
+     * atomic store is the same instruction as a plain store on every
+     * target this runtime builds for.
+     */
+    atomic_store_explicit((opaque_mut _Atomic*)slot, value, memory_order_relaxed);
     cvm_store_barrier(value);
 }
 

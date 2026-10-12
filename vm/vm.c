@@ -44,7 +44,6 @@ bool cvm_init(CvmOptions const* options) {
         .min_heap_size = 0,
         .max_heap_size = 0,
         .gc_workers = 0,
-        .concurrent_mark = false,
         .finalizer_thread = true,
         .stats_channel = NULL,
         .log_level = {NULL, 0},
@@ -76,25 +75,6 @@ bool cvm_init(CvmOptions const* options) {
             fmt_lit(&m.fmt, "could not reserve the heap");
         }
         return false;
-    }
-
-    /*
-     * The collector mode is the heap's to know, not the pool's or the
-     * world's: cvm_gc_collect reads it once per collection.
-     *
-     * The environment variable is an override on the same terms as
-     * CVM_LOG_LEVEL: the option is the program's to set, and this is the
-     * knob the tests and the benchmark use to run an existing program under
-     * a different collector without touching its code. It lives here rather
-     * than in the world's init because this is the one place the option is
-     * written, and an override read elsewhere would be clobbered by it.
-     */
-    cvm_vm_heap()->mark.concurrent_enabled = o->concurrent_mark;
-    if (!cvm_vm_heap()->mark.concurrent_enabled) {
-        str concurrent = rt_env_get(STR_LITERAL("CVM_CONCURRENT_MARK"));
-        if (concurrent.len == 1 && concurrent.ptr[0] == '1') {
-            cvm_vm_heap()->mark.concurrent_enabled = true;
-        }
     }
 
     /*

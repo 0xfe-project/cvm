@@ -427,7 +427,23 @@ static void trace_type(CvmHeap* heap, u8* base, CvmTypeDescriptor const* type,
     case CVM_TYPE_STRUCT:
         for (u16 i = 0; i < type->num_ptr_fields; i++) {
             u16 offset = type->ptr_fields[i].offset;
-            opaque_mut field = *(opaque_mut*)(base + offset);
+            /*
+             * A relaxed atomic load, and the reason is the concurrent
+             * window: a mutator (or, for a container, an unmanaged thread
+             * under its lock) may be storing this field with an atomic
+             * store while the marker reads it, and mixing atomic and
+             * non-atomic access to one address is a data race by
+             * definition. The load compiles to the same instruction on
+             * every target this runtime builds for; only the compiler and
+             * the sanitizer can tell the two apart.
+             *
+             * Relaxed is sufficient: the marker may see the old value or
+             * the new one, and both are correct -- the old is being retired
+             * through the retire list, the new has been marked by the
+             * barrier that published it.
+             */
+            opaque_mut field = atomic_load_explicit(
+                (opaque_mut const _Atomic*)(base + offset), memory_order_relaxed);
             cvm_mark_field(heap, field, out, out_weak);
         }
         for (u16 i = 0; i < type->num_embed_fields; i++) {
@@ -437,12 +453,21 @@ static void trace_type(CvmHeap* heap, u8* base, CvmTypeDescriptor const* type,
         break;
 
     case CVM_TYPE_PTR_ARRAY: {
-        usize length = *(usize*)(base + type->array_length_offset);
+        usize length = atomic_load_explicit(
+            (usize const _Atomic*)(base + type->array_length_offset),
+            memory_order_relaxed);
         opaque_mut* items = (opaque_mut*)(base + type->array_data_offset);
 
         if (length <= CVM_ARRAY_SPLIT_THRESHOLD) {
             for (usize i = 0; i < length; i++) {
-                cvm_mark_field(heap, items[i], out, out_weak);
+                /* Same relaxed atomic as the struct fields above: a
+                 * mutator may be storing this element while the marker
+                 * reads it in the concurrent window. */
+                cvm_mark_field(
+                    heap,
+                    atomic_load_explicit((opaque_mut const _Atomic*)&items[i],
+                                         memory_order_relaxed),
+                    out, out_weak);
             }
             break;
         }

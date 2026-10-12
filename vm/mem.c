@@ -1,15 +1,13 @@
 /*
  * vm/mem.c
  *
- * The four primitives. See vm/mem.h for why they exist and why they are
- * hidden.
+ * The four symbols the compiler is entitled to call in freestanding C.
+ * See vm/mem.h for why they exist and why they are hidden.
  *
- * Written as plain byte loops. A compiler recognises this shape and turns
- * it back into whatever instruction sequence it wanted to emit in the
- * first place, so there is no need to hand-optimise; and a hand-written
- * word-at-a-time version would need to handle alignment and tails, which
- * is exactly the kind of code that is easy to get subtly wrong in a
- * runtime where a subtle mistake is invisible.
+ * Byte loops, deliberately. __builtin_memcmp is not always inlinable, and
+ * a call it cannot inline is a call to `memcmp` -- which is this function,
+ * which is infinite recursion. The loops cannot recurse: the compiler may
+ * vectorise them, but it will not turn them into a call to themselves.
  */
 
 #include "mem.h"

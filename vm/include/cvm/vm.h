@@ -63,29 +63,6 @@ typedef struct CvmOptions {
     u32 gc_workers;
 
     /*
-     * Whether marking runs alongside the program rather than inside the
-     * stop-the-world window.
-     *
-     * Off (the default) is the collector this tree has always had: the world
-     * stops, marking finishes, the world resumes. Its pause scales with the
-     * live set.
-     *
-     * On splits the stop in two. The first stops the world only long enough
-     * to snapshot the roots and hand marking to the workers; the program
-     * runs while marking drains the grey set, with the write barrier marking
-     * what stores publish and new allocations starting life marked; the
-     * second stop is short -- rescan the roots (frames changed while the
-     * program ran), drain what that finds, nullify weak references, and
-     * prepare the sweep. The pause is the roots and the tail, not the heap.
-     *
-     * Correctness on this path leans on the barrier: a program that stores a
-     * pointer field directly rather than through cvm_store_field is silently
-     * wrong when this is on. See the contract on cvm_store_field in
-     * cvm/gc.h.
-     */
-    bool concurrent_mark;
-
-    /*
      * Whether to run finalizers on their own thread.
      *
      * Off means finalizers are only run by an explicit
