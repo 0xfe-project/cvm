@@ -287,6 +287,75 @@ static CvmJsonMember* object_find(CvmJson* object, CvmString const* key) {
     return index_find(object, key, hash);
 }
 
+/*
+ * Append without checking for a duplicate: the parser's path, where every
+ * member is new and the check is the cost that made a thousand-member object
+ * take eleven milliseconds to parse.
+ *
+ * The duplicate is resolved when the object closes (object_dedup below), not
+ * on the next insert: the find that would resolve it is what rebuilds the
+ * index, and rebuilding per member is the O(n²) the bench found.
+ */
+static void object_append(CvmJson* object, CvmString* key, CvmJson* value) {
+    CvmJsonMember* member = cvm_alloc(&cvm_type_member);
+    member->key = key;
+    member->value = value;
+    member->hash = cvm_string_hash(key);
+    cvm_list_add_tail(&member->link, &object->members);
+    object->size++;
+    object->index_ready = false;
+}
+
+/*
+ * Resolve duplicate keys: keep the last occurrence, as the test and every
+ * implementation that matters does. Called once, when the object's parse
+ * closes, rather than per member.
+ *
+ * The walk is front to back along the member list, and for each member the
+ * rest of the list is checked for the same key. The one that is found later
+ * is the one that stays — "last wins" — and the one being walked is the one
+ * that goes. The scan is O(n) when there are no duplicates, which is the
+ * common case and the reason the index is not used here: the index is sorted
+ * by hash, and the two members with one key are adjacent in it, but which of
+ * them is the later insert is not something the sort knows.
+ */
+static void object_dedup(CvmJson* object) {
+    if (object->size <= 1u) {
+        return;
+    }
+    CvmJsonMember* m = (object->members.next == &object->members)
+                           ? NULL
+                           : cvm_list_entry(object->members.next, CvmJsonMember, link);
+    while (m != NULL) {
+        CvmJsonMember* next = NULL;
+        CvmList* nl = m->link.next;
+        if (nl != &object->members) {
+            next = cvm_list_entry(nl, CvmJsonMember, link);
+        }
+        bool deleted = false;
+        for (CvmJsonMember* later = next; later != NULL;) {
+            if (later->hash == m->hash && cvm_string_equal(later->key, m->key)) {
+                /* A later member has the same key: its value is the one that
+                 * stays, and this member keeps its position. */
+                m->value = later->value;
+                cvm_list_del(&later->link);
+                object->size--;
+                /* The scan restarts from the same `m`: there may be more
+                 * duplicates after the one just removed. */
+                deleted = true;
+                break;
+            }
+            CvmList* ll = later->link.next;
+            later = (ll == &object->members) ? NULL
+                                             : cvm_list_entry(ll, CvmJsonMember, link);
+        }
+        if (!deleted) {
+            m = next;
+        }
+    }
+    object->index_ready = false;
+}
+
 CvmJson* cvm_json_object_put(CvmJson* object, CvmString* key, CvmJson* value) {
     cvm_assert(object->kind == (u32)CVM_JSON_OBJECT);
     cvm_assert(key != NULL);
@@ -961,9 +1030,8 @@ static CvmJson* parse_object(JsonParser* p) {
             return NULL;
         }
 
-        /* Both the object and the value are live across the put. */
-        f_roots[0] =
-            cvm_json_object_put((CvmJson*)f_roots[0], (CvmString*)f_roots[1], value);
+        /* Both the object and the value are live across the append. */
+        object_append((CvmJson*)f_roots[0], (CvmString*)f_roots[1], value);
         CvmJson* object = (CvmJson*)f_roots[0];
 
         skip_whitespace(p);
@@ -974,6 +1042,8 @@ static CvmJson* parse_object(JsonParser* p) {
         if (peek(p) == '}') {
             advance(p);
             p->depth--;
+            /* Duplicates resolved once, at the close, rather than per member. */
+            object_dedup((CvmJson*)f_roots[0]);
             cvm_frame_pop(&f_frame);
             return object;
         }

@@ -111,11 +111,8 @@ static void build_records(Text* t, u32 count) {
     text_add(t, "]", 1u);
 }
 
-/*
- * Strings with escapes: the part of a parser that is a scan, not a tree. The
- * escapes matter — a parser that only copies bytes would not see this work. The
- * text is written through one format string so no length is counted by hand.
- */
+/* Strings with escapes: the part of a parser that is a scan, not a tree. The
+ * text is written through one format string so no length is counted by hand. */
 static void build_strings(Text* t, u32 count) {
     text_add(t, "[", 1u);
     for (u32 i = 0; i < count; i++) {
@@ -125,6 +122,16 @@ static void build_strings(Text* t, u32 count) {
                     i ? "," : "");
     }
     text_add(t, "]", 1u);
+}
+
+/* One object with `count` members: the shape that measures the cost of keeping
+ * the member list sorted by hash, where every insert walks to its position. */
+static void build_big_object(Text* t, u32 count) {
+    text_printf(t, "{");
+    for (u32 i = 0; i < count; i++) {
+        text_printf(t, "%s\"key-%u\":%u", i ? "," : "", i, i);
+    }
+    text_printf(t, "}");
 }
 
 /* ------------------------------------------------------------------ */
@@ -667,6 +674,11 @@ int main(int argc, char** argv) {
     text_init(&t);
     build_strings(&t, 2000u);
     run_corpus("strings", &t, repeats);
+    free(t.data);
+
+    text_init(&t);
+    build_big_object(&t, 1000u);
+    run_corpus("big-object", &t, repeats);
     free(t.data);
 
     cvm_shutdown();

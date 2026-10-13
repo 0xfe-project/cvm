@@ -607,6 +607,35 @@ TEST a_parsed_document_survives_a_collection(void) {
     PASS();
 }
 
+TEST an_object_built_by_put_has_its_members(void) {
+    fixture_enter();
+    FRAME(3);
+    CvmJson* o = cvm_json_object();
+    f_roots[0] = o;
+
+    /* The public put, which a program uses when it is building a document
+     * rather than parsing one. */
+    f_roots[1] = cvm_string_new_ascii(STR_LITERAL("x"));
+    f_roots[2] = cvm_json_int(1);
+    f_roots[0] = cvm_json_object_put((CvmJson*)f_roots[0], (CvmString*)f_roots[1],
+                                     (CvmJson*)f_roots[2]);
+    f_roots[1] = cvm_string_new_ascii(STR_LITERAL("y"));
+    f_roots[2] = cvm_json_int(2);
+    f_roots[0] = cvm_json_object_put((CvmJson*)f_roots[0], (CvmString*)f_roots[1],
+                                     (CvmJson*)f_roots[2]);
+
+    ASSERT_EQ_FMT((usize)2, cvm_json_object_size((CvmJson*)f_roots[0]), "%zu");
+
+    /* And the members are findable. */
+    f_roots[1] = cvm_string_new_ascii(STR_LITERAL("x"));
+    CvmJson* found = cvm_json_object_get((CvmJson*)f_roots[0], (CvmString*)f_roots[1]);
+    ASSERT(found != NULL);
+    ASSERT_EQ_FMT((i64)1, (i64)cvm_json_as_number(found), "%lld");
+
+    fixture_leave();
+    PASS();
+}
+
 SUITE(json_suite) {
     RUN_TEST(scalars_parse_to_their_kinds);
     RUN_TEST(numbers_follow_the_json_grammar);
@@ -620,6 +649,7 @@ SUITE(json_suite) {
     RUN_TEST(syntax_errors_report_where_they_are);
     RUN_TEST(nesting_is_bounded);
     RUN_TEST(a_parsed_document_survives_a_collection);
+    RUN_TEST(an_object_built_by_put_has_its_members);
 }
 
 GREATEST_MAIN_DEFS();
