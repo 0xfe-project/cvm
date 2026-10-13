@@ -502,7 +502,301 @@ TEST entries_can_be_deleted_while_the_collector_runs(void) {
     PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* keys that are not strings                                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Identity-hash keys: a GC object is its own key, hashed by address. The
+ * hash convention says every non-string GC object works this way, and the
+ * tests here are the first time that promise has been exercised.
+ */
+static u32 identity_hash(opaque_mut key) {
+    /* The address itself, mixed: a straight pointer has high bits that cluster
+     * when the heap allocates sequentially, and the bucket takes the high bits
+     * of the hash. */
+    usize addr = (usize)key;
+    addr ^= addr >> 15;
+    return (u32)(addr ^ (addr >> 32));
+}
+
+static bool identity_matches(opaque_mut stored, opaque_mut key) {
+    return stored == key;
+}
+
+static bool identity_valid(opaque_mut stored) {
+    return stored != NULL;
+}
+
+static opaque_mut identity_store(opaque_mut key) {
+    return key;
+}
+
+static CvmMapOps const identity_ops = {
+    .hash = identity_hash,
+    .hash_stored = identity_hash,
+    .matches = identity_matches,
+    .valid = identity_valid,
+    .store = identity_store,
+};
+
+/*
+ * Integer keys: the value is the key. A pointer-sized integer, which is how
+ * every C runtime puts a small value where a pointer is expected.
+ */
+static u32 integer_hash(opaque_mut key) {
+    /* Knuth multiplicative: the low bits of the key are not used by the
+     * Fibonacci bucket map, so spread them up. */
+    return (u32)(((usize)key * 0x9E3779B97F4A7C15ull) >> 32);
+}
+
+static bool integer_matches(opaque_mut stored, opaque_mut key) {
+    return (usize)stored == (usize)key;
+}
+
+static bool integer_valid(opaque_mut stored) {
+    return stored != NULL;
+}
+
+static opaque_mut integer_store(opaque_mut key) {
+    return key;
+}
+
+static CvmMapOps const integer_ops = {
+    .hash = integer_hash,
+    .hash_stored = integer_hash,
+    .matches = integer_matches,
+    .valid = integer_valid,
+    .store = integer_store,
+};
+
+/* A scalar object to use as an identity key. */
+static CvmTypeDescriptor const scratch_desc = {
+    .size = sizeof(u64),
+    .kind = CVM_TYPE_SCALAR,
+};
+
+TEST identity_keys_find_the_object_that_went_in(void) {
+    fixture_enter();
+    FRAME(6);
+    CvmHashMap* m = cvm_map_new_with(&identity_ops, 0x1234u);
+    f_roots[0] = m;
+
+    /* Three objects, each its own key and its own value. */
+    for (u32 i = 0; i < 3; i++) {
+        f_roots[1 + i] = cvm_alloc(&scratch_desc);
+    }
+
+    for (u32 i = 0; i < 3; i++) {
+        (void)cvm_map_put(m, f_roots[1 + i], f_roots[1 + i], NULL);
+    }
+    ASSERT_EQ_FMT((usize)3, cvm_map_count(m), "%zu");
+
+    /* Each is found, and nothing else is. */
+    for (u32 i = 0; i < 3; i++) {
+        ASSERT(cvm_map_has(m, f_roots[1 + i]));
+        ASSERT(cvm_map_get(m, f_roots[1 + i]) == f_roots[1 + i]);
+    }
+
+    /* A fourth object that was never inserted is not found. */
+    f_roots[4] = cvm_alloc(&scratch_desc);
+    ASSERT(!cvm_map_has(m, f_roots[4]));
+
+    /* Deleting one leaves the other two reachable. */
+    ASSERT(cvm_map_del(m, f_roots[1]));
+    ASSERT(!cvm_map_has(m, f_roots[1]));
+    ASSERT(cvm_map_has(m, f_roots[2]));
+    ASSERT(cvm_map_has(m, f_roots[3]));
+    ASSERT_EQ_FMT((usize)2, cvm_map_count(m), "%zu");
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST integer_keys_find_the_value_that_went_in(void) {
+    fixture_enter();
+    FRAME(2);
+    CvmHashMap* m = cvm_map_new_with(&integer_ops, 0x5678u);
+    f_roots[0] = m;
+
+    /*
+     * Integers 1..100, each its own key. Key 0 is not representable: the map
+     * uses a NULL key to mean absent, and 0 as a pointer is NULL, so the
+     * integer keys start at 1 and that is a property of the convention rather
+     * than a choice this test made.
+     */
+    for (u32 i = 1; i <= 100u; i++) {
+        (void)cvm_map_put(m, (opaque_mut)(usize)i, (opaque_mut)(usize)(i + 100u), NULL);
+    }
+    ASSERT_EQ_FMT((usize)100, cvm_map_count(m), "%zu");
+
+    for (u32 i = 1; i <= 100u; i++) {
+        ASSERT((usize)cvm_map_get(m, (opaque_mut)(usize)i) == (usize)(i + 100u));
+    }
+
+    /* Delete the even ones. */
+    for (u32 i = 2; i <= 100u; i += 2u) {
+        ASSERT(cvm_map_del(m, (opaque_mut)(usize)i));
+    }
+    ASSERT_EQ_FMT((usize)50, cvm_map_count(m), "%zu");
+
+    /* The odd ones survived, the even ones are gone. */
+    for (u32 i = 1; i <= 100u; i++) {
+        if (i % 2u == 0u) {
+            ASSERT(!cvm_map_has(m, (opaque_mut)(usize)i));
+        } else {
+            ASSERT(cvm_map_has(m, (opaque_mut)(usize)i));
+        }
+    }
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+/* ------------------------------------------------------------------ */
+/* deletion clusters and probe wraparound                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Delete a contiguous run of keys and verify the rest are still findable.
+ *
+ * This is the case that made prune a whole-table rehash rather than an
+ * in-place delete: backward-shift deletion moves entries back to close the
+ * chain, and a chain that wraps past the end of the array moves an entry that
+ * a scan has not reached yet. The in-place delete leaves dead entries behind;
+ * the rehash does not. This test exercises the same wraparound through the
+ * public API, which goes through cvm_map_del_slot and therefore through the
+ * same backward shift.
+ */
+TEST deleting_a_cluster_leaves_the_rest_reachable(void) {
+    fixture_enter();
+    FRAME(2);
+    /* A fixed seed so the bucket layout is reproducible. */
+    CvmHashMap* m = cvm_map_new_seeded(0xABCDu);
+    f_roots[0] = m;
+
+    /* Enough keys to fill the table past its first growth. */
+    u32 const N = 300;
+    for (u32 i = 0; i < N; i++) {
+        f_roots[1] = key_from_u32(i);
+        (void)cvm_map_put(m, f_roots[1], f_roots[1], NULL);
+        f_roots[1] = NULL;
+    }
+    ASSERT_EQ_FMT((usize)N, cvm_map_count(m), "%zu");
+
+    /* Delete a contiguous band in the middle, where the keys' hashes cluster. */
+    u32 const LO = N / 3;
+    u32 const HI = N / 3 + N / 6;
+    for (u32 i = LO; i < HI; i++) {
+        f_roots[1] = key_from_u32(i);
+        ASSERT(cvm_map_del(m, f_roots[1]));
+        f_roots[1] = NULL;
+    }
+    ASSERT_EQ_FMT((usize)(N - (HI - LO)), cvm_map_count(m), "%zu");
+
+    /* Everything before the band. */
+    for (u32 i = 0; i < LO; i++) {
+        f_roots[1] = key_from_u32(i);
+        ASSERT(cvm_map_has(m, f_roots[1]));
+        f_roots[1] = NULL;
+    }
+    /* Everything after the band. */
+    for (u32 i = HI; i < N; i++) {
+        f_roots[1] = key_from_u32(i);
+        ASSERT(cvm_map_has(m, f_roots[1]));
+        f_roots[1] = NULL;
+    }
+    /* And nothing inside the band. */
+    for (u32 i = LO; i < HI; i++) {
+        f_roots[1] = key_from_u32(i);
+        ASSERT(!cvm_map_has(m, f_roots[1]));
+        f_roots[1] = NULL;
+    }
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+/*
+ * Delete every other key in a table that has grown past several sizes, so the
+ * probe chains have been rebuilt at different bucket counts and some wrap.
+ */
+TEST delete_interleaved_across_growth(void) {
+    fixture_enter();
+    FRAME(2);
+    CvmHashMap* m = cvm_map_new();
+    f_roots[0] = m;
+
+    u32 const N = 500;
+    for (u32 i = 0; i < N; i++) {
+        f_roots[1] = key_from_u32(i * 7u);
+        (void)cvm_map_put(m, f_roots[1], f_roots[1], NULL);
+        f_roots[1] = NULL;
+    }
+    ASSERT_EQ_FMT((usize)N, cvm_map_count(m), "%zu");
+
+    /* Delete every other one. */
+    for (u32 i = 0; i < N; i += 2u) {
+        f_roots[1] = key_from_u32(i * 7u);
+        ASSERT(cvm_map_del(m, f_roots[1]));
+        f_roots[1] = NULL;
+    }
+    ASSERT_EQ_FMT((usize)(N / 2), cvm_map_count(m), "%zu");
+
+    /* Every survivor is findable; every deleted one is not. */
+    for (u32 i = 0; i < N; i++) {
+        f_roots[1] = key_from_u32(i * 7u);
+        if (i % 2u == 0u) {
+            ASSERT(!cvm_map_has(m, f_roots[1]));
+        } else {
+            ASSERT(cvm_map_has(m, f_roots[1]));
+        }
+        f_roots[1] = NULL;
+    }
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+/*
+ * A table that fills, empties, and fills again: the chains are rebuilt at
+ * every size, and the second fill must not find ghosts from the first.
+ */
+TEST fill_empty_refill_finds_no_ghosts(void) {
+    fixture_enter();
+    FRAME(2);
+    CvmHashMap* m = cvm_map_new();
+    f_roots[0] = m;
+
+    for (u32 round = 0; round < 3u; round++) {
+        for (u32 i = 0; i < 200u; i++) {
+            f_roots[1] = key_from_u32(i);
+            (void)cvm_map_put(m, f_roots[1], f_roots[1], NULL);
+            f_roots[1] = NULL;
+        }
+        for (u32 i = 0; i < 200u; i++) {
+            f_roots[1] = key_from_u32(i);
+            ASSERT(cvm_map_del(m, f_roots[1]));
+            f_roots[1] = NULL;
+        }
+        ASSERT_EQ_FMT((usize)0, cvm_map_count(m), "%zu");
+    }
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
 SUITE(hash_suite) {
+    RUN_TEST(identity_keys_find_the_object_that_went_in);
+    RUN_TEST(integer_keys_find_the_value_that_went_in);
+    RUN_TEST(deleting_a_cluster_leaves_the_rest_reachable);
+    RUN_TEST(delete_interleaved_across_growth);
+    RUN_TEST(fill_empty_refill_finds_no_ghosts);
     RUN_TEST(an_empty_table_has_no_buckets_and_answers_nothing);
     RUN_TEST(equal_text_is_the_same_key);
     RUN_TEST(put_replaces_and_says_whether_the_key_was_new);
