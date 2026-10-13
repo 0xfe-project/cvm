@@ -443,7 +443,6 @@ const PROBE_HEADERS = [
     "cvm/buf.h",
     "cvm/hash.h",
     "cvm/intern.h",
-    "cvm/json.h",
     "cvm/str.h",
     "cvm/unicode.h",
     "cvm/vm.h",
