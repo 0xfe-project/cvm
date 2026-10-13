@@ -791,12 +791,98 @@ TEST fill_empty_refill_finds_no_ghosts(void) {
     PASS();
 }
 
+/* resize interrupted by a collection                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The table is nearly full, the candidate string is in a frame slot, and a
+ * collection is forced on the insert that grows it.
+ *
+ * This is the failure mode the bench hit: cvm_intern's growth allocates new
+ * bucket arrays, that allocation can collect, and the candidate string has to
+ * survive it — which it does only if the caller put it in a root slot rather
+ * than holding it in a local. The test asserts the table is consistent after
+ * and the candidate is still there.
+ */
+TEST growth_during_a_collection_keeps_the_table_consistent(void) {
+    fixture_enter();
+    FRAME(3);
+    CvmHashMap* m = cvm_map_new();
+    f_roots[0] = m;
+
+    /* Fill past several growths so the next insert lands in a table near its
+     * load factor. */
+    u32 const N = 1000;
+    for (u32 i = 0; i < N; i++) {
+        f_roots[1] = key_from_u32(i);
+        (void)cvm_map_put(m, f_roots[1], f_roots[1], NULL);
+        f_roots[1] = NULL;
+    }
+
+    /* Force a collection, then insert: the growth's allocation happens with the
+     * heap under pressure. */
+    collect();
+    f_roots[1] = key_from_u32(N);
+    (void)cvm_map_put(m, f_roots[1], f_roots[1], NULL);
+    f_roots[1] = NULL;
+
+    /* The table is self-consistent: count, and every key findable. */
+    ASSERT_EQ_FMT((usize)(N + 1), cvm_map_count(m), "%zu");
+    for (u32 i = 0; i <= N; i++) {
+        f_roots[1] = key_from_u32(i);
+        ASSERT(cvm_map_has(m, f_roots[1]));
+        f_roots[1] = NULL;
+    }
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+/*
+ * Long-run: the capacity and the heap come back down to where they started.
+ *
+ * An exit-time leak check cannot see a container that grows and never shrinks,
+ * because the memory is reachable and the process is ending anyway. This test
+ * asserts the numbers: after rounds of fill-and-empty, the bucket count is
+ * what one entry needs, not what the busiest round used.
+ */
+TEST long_runs_do_not_grow(void) {
+    fixture_enter();
+    FRAME(2);
+    CvmHashMap* m = cvm_map_new();
+    f_roots[0] = m;
+
+    for (u32 round = 0; round < 10u; round++) {
+        for (u32 i = 0; i < 200u; i++) {
+            f_roots[1] = key_from_u32(i);
+            (void)cvm_map_put(m, f_roots[1], f_roots[1], NULL);
+            f_roots[1] = NULL;
+        }
+        /* Drop every entry and shrink. */
+        for (u32 i = 0; i < 200u; i++) {
+            f_roots[1] = key_from_u32(i);
+            (void)cvm_map_del(m, f_roots[1]);
+            f_roots[1] = NULL;
+        }
+        collect();
+        (void)cvm_map_resize(m, 1);
+        ASSERT_EQ_FMT((usize)0, cvm_map_count(m), "%zu");
+    }
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
 SUITE(hash_suite) {
     RUN_TEST(identity_keys_find_the_object_that_went_in);
     RUN_TEST(integer_keys_find_the_value_that_went_in);
     RUN_TEST(deleting_a_cluster_leaves_the_rest_reachable);
     RUN_TEST(delete_interleaved_across_growth);
     RUN_TEST(fill_empty_refill_finds_no_ghosts);
+    RUN_TEST(growth_during_a_collection_keeps_the_table_consistent);
+    RUN_TEST(long_runs_do_not_grow);
     RUN_TEST(an_empty_table_has_no_buckets_and_answers_nothing);
     RUN_TEST(equal_text_is_the_same_key);
     RUN_TEST(put_replaces_and_says_whether_the_key_was_new);
@@ -841,3 +927,5 @@ int main(int argc, char** argv) {
 }
 
 #endif /* !_WIN32 */
+
+/* ------------------------------------------------------------------ */

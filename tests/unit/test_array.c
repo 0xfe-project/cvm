@@ -315,6 +315,27 @@ TEST an_item_dropped_from_a_rooted_array_goes_away(void) {
     PASS();
 }
 
+TEST repeated_push_and_drop_does_not_grow(void) {
+    fixture_enter();
+    FRAME(2);
+    /* Rounds of building up and dropping: the arrays are garbage after each
+     * round, and the heap should come back down after a collection. */
+    for (u32 round = 0; round < 10u; round++) {
+        CvmRefArray* a = cvm_ref_array_new(4);
+        f_roots[0] = a;
+        for (u32 i = 0; i < 100u; i++) {
+            a = cvm_ref_array_push(a, cvm_alloc(&item_desc));
+            f_roots[0] = a;
+        }
+        f_roots[0] = NULL;
+    }
+    collect();
+    /* The heap is back to what it was before the rounds. */
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
 SUITE(array_suite) {
     RUN_TEST(a_new_array_has_empty_slots);
     RUN_TEST(a_zero_capacity_array_is_still_usable);
@@ -327,6 +348,7 @@ SUITE(array_suite) {
     RUN_TEST(the_extent_follows_the_capacity);
     RUN_TEST(a_rooted_array_keeps_its_items_alive);
     RUN_TEST(an_item_dropped_from_a_rooted_array_goes_away);
+    RUN_TEST(repeated_push_and_drop_does_not_grow);
 }
 
 GREATEST_MAIN_DEFS();

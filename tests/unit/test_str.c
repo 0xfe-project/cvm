@@ -465,6 +465,22 @@ TEST a_long_string_crosses_the_inline_allocation_path(void) {
     PASS();
 }
 
+TEST strings_come_and_go_without_growing_the_heap(void) {
+    fixture_enter();
+    FRAME(1);
+    for (u32 round = 0; round < 10u; round++) {
+        for (u32 i = 0; i < 50u; i++) {
+            f_roots[0] = cvm_string_from_utf8(
+                (str){.ptr = (u8 const*)"round text here", .len = 14});
+            f_roots[0] = NULL;
+        }
+    }
+    collect();
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
 SUITE(str_suite) {
     RUN_TEST(a_narrow_string_holds_its_units);
     RUN_TEST(narrow_units_are_code_units_not_utf8_bytes);
@@ -485,6 +501,7 @@ SUITE(str_suite) {
     RUN_TEST(a_rooted_string_survives_collection);
     RUN_TEST(an_unrooted_string_is_reclaimed);
     RUN_TEST(a_long_string_crosses_the_inline_allocation_path);
+    RUN_TEST(strings_come_and_go_without_growing_the_heap);
 }
 
 GREATEST_MAIN_DEFS();
