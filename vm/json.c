@@ -103,6 +103,12 @@ CvmJson* cvm_json_number(f64 value) {
     return v;
 }
 
+CvmJson* cvm_json_int(i64 value) {
+    CvmJson* v = json_alloc(CVM_JSON_INT);
+    v->integer = value;
+    return v;
+}
+
 CvmJson* cvm_json_string(CvmString* s) {
     CvmJson* v = json_alloc(CVM_JSON_STRING);
     v->string = s;
@@ -554,6 +560,12 @@ static bool print_value(CvmJson const* v, CvmStrBuf* out, u32 depth) {
          * them produces text that no parser accepts. */
         return number_is_finite(v->number) ? cvm_str_buf_put_f64(out, v->number)
                                            : printable_cstr(out, "null");
+    case CVM_JSON_INT:
+        /* The integer path: no shortest-round-trip float printing, just the
+         * digits. This is the whole reason the kind exists — a document of
+         * small integers printed as floats costs an order of magnitude more
+         * than the same document printed as integers. */
+        return cvm_str_buf_put_i64(out, v->integer);
     case CVM_JSON_STRING:
         return print_string(v->string, out);
     case CVM_JSON_ARRAY:
@@ -805,6 +817,44 @@ static CvmJson* parse_number(JsonParser* p) {
     }
 
     str number = {.ptr = p->text.ptr + start, .len = p->pos - start};
+
+    /*
+     * An integer with no fraction and no exponent, fitting in 64 bits, is
+     * stored as an integer: the parse is a scan rather than a float
+     * conversion, and the print is digits rather than a shortest-round-trip
+     * float rendering. A document of small integers pays for the float
+     * machinery on both sides without ever needing it, which is why this
+     * branch exists.
+     */
+    bool has_fraction_or_exponent = false;
+    for (usize i = 0; i < number.len; i++) {
+        u8 c = number.ptr[i];
+        if (c == '.' || c == 'e' || c == 'E') {
+            has_fraction_or_exponent = true;
+            break;
+        }
+    }
+    if (!has_fraction_or_exponent) {
+        bool negative = number.ptr[0] == '-';
+        u64 magnitude = 0;
+        bool overflow = false;
+        for (usize i = negative ? 1u : 0u; i < number.len; i++) {
+            u8 digit = number.ptr[i] - (u8)'0';
+            if (magnitude > ((u64)0x7FFFFFFFFFFFFFFFull - digit) / 10u) {
+                overflow = true;
+                break;
+            }
+            magnitude = magnitude * 10u + digit;
+        }
+        /* "-0" stays a float: negative zero is distinguishable in an f64 and
+         * not in an i64, so storing it as an integer would change the text it
+         * prints back as. */
+        if (!overflow && !(negative && magnitude == 0u)) {
+            return cvm_json_int(negative ? -(i64)magnitude : (i64)magnitude);
+        }
+        /* Past i64, or negative zero: fall through to the float. */
+    }
+
     CvmAtodTempMem tmp;
     usize consumed = 0;
     f64 value = cvm_atod(number, &consumed, 10, 0, &tmp);

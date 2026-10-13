@@ -119,7 +119,7 @@ TEST scalars_parse_to_their_kinds(void) {
     /* whitespace around the value is fine, and JSON's whitespace is four
      * characters wide */
     CvmJson* spaced = cvm_json_parse(literal(" \t\r\n 42 \n"), &at);
-    ASSERT(cvm_json_kind(spaced) == CVM_JSON_NUMBER);
+    ASSERT(cvm_json_kind(spaced) == CVM_JSON_INT);
     ASSERT_EQ_FMT(42.0, cvm_json_as_number(spaced), "%.0f");
 
     fixture_leave();
@@ -151,7 +151,8 @@ TEST numbers_follow_the_json_grammar(void) {
 
     for (usize i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
         CvmJson* v = cvm_json_parse(literal(good[i].text), &at);
-        if (v == NULL || cvm_json_kind(v) != CVM_JSON_NUMBER) {
+        if (v == NULL ||
+            (cvm_json_kind(v) != CVM_JSON_NUMBER && cvm_json_kind(v) != CVM_JSON_INT)) {
             fprintf(stderr, "failed on %s at %zu\n", good[i].text, at);
             FAILm("a valid number did not parse");
         }

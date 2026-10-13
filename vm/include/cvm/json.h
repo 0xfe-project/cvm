@@ -77,6 +77,7 @@ typedef enum CvmJsonKind {
     CVM_JSON_NULL = 0,
     CVM_JSON_BOOL,
     CVM_JSON_NUMBER,
+    CVM_JSON_INT,
     CVM_JSON_STRING,
     CVM_JSON_ARRAY,
     CVM_JSON_OBJECT,
@@ -113,8 +114,13 @@ struct CvmJson {
     CvmList members;
     /* OBJECT: the lookup index, built on demand; NULL when absent or stale. */
     CvmRefArray* index;
-    /* NUMBER */
-    f64 number;
+    /* NUMBER: the value. INT: the value, in the same storage — the two kinds
+     * are the same width and the same slot, because a number is one or the
+     * other and never both. */
+    union {
+        f64 number;
+        i64 integer;
+    };
     u32 kind; /* CvmJsonKind */
     /* ARRAY: element count. OBJECT: member count. */
     u32 size;
@@ -131,6 +137,7 @@ struct CvmJson {
 CvmJson* cvm_json_null(void);
 CvmJson* cvm_json_bool(bool value);
 CvmJson* cvm_json_number(f64 value);
+CvmJson* cvm_json_int(i64 value);
 /* Takes a reference to `s`; the string is shared, not copied. */
 CvmJson* cvm_json_string(CvmString* s);
 CvmJson* cvm_json_array(void);
@@ -197,6 +204,9 @@ CVM_INLINE bool cvm_json_as_bool(CvmJson const* v) {
 }
 
 CVM_INLINE f64 cvm_json_as_number(CvmJson const* v) {
+    if (v->kind == (u32)CVM_JSON_INT) {
+        return (f64)v->integer;
+    }
     cvm_assert(v->kind == (u32)CVM_JSON_NUMBER);
     return v->number;
 }
