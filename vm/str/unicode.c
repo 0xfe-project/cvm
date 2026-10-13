@@ -44,6 +44,7 @@
 #include "base/assert.h"
 #include "base/types.h"
 #include "cvm/builder.h"
+#include "cvm/buf.h"
 #include "cvm/str.h"
 #include <stdarg.h>
 
@@ -556,60 +557,17 @@ typedef enum {
  * signature cannot be implemented over alloc and free without being told the old
  * size, and the thing that knows it is the buffer.
  */
-typedef struct UniBuf {
-    u8* data;
-    usize size;      /* bytes used */
-    usize allocated; /* bytes allocated */
-    bool error;
-    CvmUnicodeAlloc alloc;
-} UniBuf;
-
-static void unibuf_init(UniBuf* buf, CvmUnicodeAlloc alloc) {
-    buf->data = NULL;
-    buf->size = 0;
-    buf->allocated = 0;
-    buf->error = false;
-    buf->alloc = alloc;
+static void unicode_put_u32(CvmBuf* buf, u32 value) {
+    u8 tmp[4] = {
+        (u8)(value & 0xffu),
+        (u8)((value >> 8) & 0xffu),
+        (u8)((value >> 16) & 0xffu),
+        (u8)((value >> 24) & 0xffu),
+    };
+    (void)cvm_buf_put(buf, tmp, 4u);
 }
 
-static bool unibuf_reserve(UniBuf* buf, usize bytes) {
-    if (buf->error) {
-        return false;
-    }
-    if (bytes <= buf->allocated) {
-        return true;
-    }
-
-    usize want = buf->allocated == 0u ? 64u : buf->allocated;
-    while (want < bytes) {
-        want *= 2u;
-    }
-
-    /* One call: the contents and the old size are the allocator's business. */
-    u8* fresh = buf->alloc.realloc(buf->alloc.ctx, buf->data, want);
-    if (fresh == NULL) {
-        buf->error = true;
-        return false;
-    }
-    buf->data = fresh;
-    buf->allocated = want;
-    return true;
-}
-
-static void unibuf_put_u32(UniBuf* buf, u32 value) {
-    if (!unibuf_reserve(buf, buf->size + sizeof(u32))) {
-        return;
-    }
-    buf->data[buf->size + 0u] = (u8)(value & 0xffu);
-    buf->data[buf->size + 1u] = (u8)((value >> 8) & 0xffu);
-    buf->data[buf->size + 2u] = (u8)((value >> 16) & 0xffu);
-    buf->data[buf->size + 3u] = (u8)((value >> 24) & 0xffu);
-    buf->size += sizeof(u32);
-}
-
-/* Hand the buffer over: the caller frees it with the same allocator, and the
- * buffer forgets it so nothing frees it twice. */
-static u8* unibuf_release(UniBuf* buf) {
+static u8* unicode_buf_release(CvmBuf* buf) {
     u8* data = buf->data;
     buf->data = NULL;
     buf->allocated = 0;
@@ -2007,7 +1965,7 @@ static void sort_cc(i32* buf, i32 len) {
     }
 }
 
-static void to_nfd_rec(UniBuf* dbuf, const i32* src, i32 src_len, i32 is_compat) {
+static void to_nfd_rec(CvmBuf* dbuf, const i32* src, i32 src_len, i32 is_compat) {
     u32 c, v;
     i32 i, l;
     u32 res[CVM_UNICODE_DECOMP_MAX];
@@ -2017,17 +1975,17 @@ static void to_nfd_rec(UniBuf* dbuf, const i32* src, i32 src_len, i32 is_compat)
         if (c >= 0xac00 && c < 0xd7a4) {
             /* Hangul decomposition */
             c -= 0xac00;
-            unibuf_put_u32(dbuf, 0x1100 + c / 588);
-            unibuf_put_u32(dbuf, 0x1161 + (c % 588) / 28);
+            unicode_put_u32(dbuf, 0x1100 + c / 588);
+            unicode_put_u32(dbuf, 0x1161 + (c % 588) / 28);
             v = c % 28;
             if (v != 0)
-                unibuf_put_u32(dbuf, 0x11a7 + v);
+                unicode_put_u32(dbuf, 0x11a7 + v);
         } else {
             l = unicode_decomp_char(res, c, is_compat);
             if (l) {
                 to_nfd_rec(dbuf, (i32*)res, l, is_compat);
             } else {
-                unibuf_put_u32(dbuf, c);
+                unicode_put_u32(dbuf, c);
             }
         }
     }
@@ -2053,7 +2011,7 @@ i32 cvm_unicode_normalize(rune** pdst, rune const* src, usize src_len,
     i32 i, p, starter_pos, cc, last_cc;
     usize out_len;
     bool is_compat;
-    UniBuf dbuf_s, *dbuf = &dbuf_s;
+    CvmBuf dbuf_s, *dbuf = &dbuf_s;
 
     if (src_len == 0) {
         *pdst = NULL;
@@ -2062,8 +2020,8 @@ i32 cvm_unicode_normalize(rune** pdst, rune const* src, usize src_len,
 
     is_compat = kind >= CVM_UNICODE_NFKC;
 
-    unibuf_init(dbuf, alloc);
-    if (!unibuf_reserve(dbuf, sizeof(i32) * src_len))
+    cvm_buf_init(dbuf, alloc);
+    if (!cvm_buf_reserve(dbuf, sizeof(i32) * src_len))
         goto fail;
 
     /* common case: latin1 is unaffected by NFC */
@@ -2074,7 +2032,7 @@ i32 cvm_unicode_normalize(rune** pdst, rune const* src, usize src_len,
         }
         buf = (i32*)dbuf->data;
         memcpy(buf, src, src_len * sizeof(i32));
-        *pdst = (rune*)unibuf_release(dbuf);
+        *pdst = (rune*)unicode_buf_release(dbuf);
         return (i32)src_len;
 not_latin1:;
     }
@@ -2092,7 +2050,7 @@ fail:
 
     if (buf_len <= 1u || kind == CVM_UNICODE_NFD || kind == CVM_UNICODE_NFKD) {
         /* NFD / NFKD: decomposition only, no composition back */
-        *pdst = (rune*)unibuf_release(dbuf);
+        *pdst = (rune*)unicode_buf_release(dbuf);
         return (i32)buf_len;
     }
 
@@ -2120,7 +2078,7 @@ next:
             buf[out_len++] = buf[i++];
         }
     }
-    *pdst = (rune*)unibuf_release(dbuf);
+    *pdst = (rune*)unicode_buf_release(dbuf);
     return (i32)out_len;
 }
 
