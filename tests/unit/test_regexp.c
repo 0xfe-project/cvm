@@ -316,6 +316,185 @@ TEST a_compiled_pattern_survives_a_collection(void) {
     PASS();
 }
 
+TEST backreference_matches_what_the_group_caught(void) {
+    fixture_enter();
+    FRAME(4);
+    f_roots[0] = cvm_string_from_utf8(literal("(\\w+)\\s\\1"));
+    f_roots[1] = cvm_string_from_utf8(literal("hello hello"));
+    CvmRegExp* re = cvm_regexp_compile((CvmString*)f_roots[0], 0);
+    f_roots[2] = re;
+    ASSERT(re != NULL);
+
+    i32 captures[8];
+    ASSERT_EQ(1, cvm_regexp_exec(re, (CvmString*)f_roots[1], 0, captures, 0));
+    ASSERT_EQ(0, captures[0]); /* the whole "hello hello" */
+    ASSERT_EQ(0, captures[2]); /* group 1: the first "hello" */
+    ASSERT_EQ(5, captures[3]);
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST lookahead_finds_without_consuming(void) {
+    fixture_enter();
+    FRAME(4);
+    f_roots[0] = cvm_string_from_utf8(literal("\\w+(?=;)"));
+    f_roots[1] = cvm_string_from_utf8(literal("abc;def"));
+    CvmRegExp* re = cvm_regexp_compile((CvmString*)f_roots[0], 0);
+    f_roots[2] = re;
+    ASSERT(re != NULL);
+
+    i32 captures[8];
+    ASSERT_EQ(1, cvm_regexp_exec(re, (CvmString*)f_roots[1], 0, captures, 0));
+    /* "abc" matched, the ";" was looked at but not consumed. */
+    ASSERT_EQ(0, captures[0]);
+    ASSERT_EQ(3, captures[1]);
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST negative_lookahead_excludes_its_pattern(void) {
+    fixture_enter();
+    FRAME(4);
+    f_roots[0] = cvm_string_from_utf8(literal("\\d+(?!\\d)"));
+    f_roots[1] = cvm_string_from_utf8(literal("12345"));
+    CvmRegExp* re = cvm_regexp_compile((CvmString*)f_roots[0], 0);
+    f_roots[2] = re;
+    ASSERT(re != NULL);
+
+    i32 captures[8];
+    /* Greedy \d+ takes "12345"; the lookahead then asks whether a digit
+     * follows, and at the end nothing does. The match is the whole string. */
+    ASSERT_EQ(1, cvm_regexp_exec(re, (CvmString*)f_roots[1], 0, captures, 0));
+    ASSERT_EQ(0, captures[0]);
+    ASSERT_EQ(5, captures[1]);
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST sticky_requires_the_start_position(void) {
+    fixture_enter();
+    FRAME(4);
+    f_roots[0] = cvm_string_from_utf8(literal("abc"));
+    f_roots[1] = cvm_string_from_utf8(literal("xxabc"));
+    CvmRegExp* sticky = cvm_regexp_compile((CvmString*)f_roots[0], CVM_RE_FLAG_STICKY);
+    CvmRegExp* plain = cvm_regexp_compile((CvmString*)f_roots[0], 0);
+    f_roots[2] = sticky;
+    f_roots[3] = plain;
+    ASSERT(sticky != NULL && plain != NULL);
+
+    i32 captures[8];
+    /* Sticky at 0: no match, because "abc" does not start there. */
+    ASSERT_EQ(0, cvm_regexp_exec(sticky, (CvmString*)f_roots[1], 0, captures, 0));
+    /* Sticky at 2: match, because it does. */
+    ASSERT_EQ(1, cvm_regexp_exec(sticky, (CvmString*)f_roots[1], 2, captures, 0));
+    /* Plain at 0: match, because it searches. */
+    ASSERT_EQ(1, cvm_regexp_exec(plain, (CvmString*)f_roots[1], 0, captures, 0));
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST multiline_anchors_match_at_line_breaks(void) {
+    fixture_enter();
+    FRAME(4);
+    f_roots[0] = cvm_string_from_utf8(literal("^b"));
+    f_roots[1] = cvm_string_from_utf8(literal("a\nb"));
+    CvmRegExp* ml = cvm_regexp_compile((CvmString*)f_roots[0], CVM_RE_FLAG_MULTILINE);
+    f_roots[2] = ml;
+    ASSERT(ml != NULL);
+
+    i32 captures[8];
+    /* Without multiline, ^ is only at position 0; "a" is there, so no match.
+     * With multiline, ^ is also after the newline, so "b" matches. */
+    ASSERT_EQ(1, cvm_regexp_exec(ml, (CvmString*)f_roots[1], 0, captures, 0));
+    ASSERT_EQ(2, captures[0]); /* after the \n */
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST dotall_lets_the_dot_cross_lines(void) {
+    fixture_enter();
+    FRAME(4);
+    f_roots[0] = cvm_string_from_utf8(literal("a.b"));
+    f_roots[1] = cvm_string_from_utf8(literal("a\nb"));
+    CvmRegExp* da = cvm_regexp_compile((CvmString*)f_roots[0], CVM_RE_FLAG_DOTALL);
+    CvmRegExp* plain = cvm_regexp_compile((CvmString*)f_roots[0], 0);
+    f_roots[2] = da;
+    f_roots[3] = plain;
+    ASSERT(da != NULL && plain != NULL);
+
+    i32 captures[8];
+    /* Without dotall, . does not match \n. */
+    ASSERT_EQ(0, cvm_regexp_exec(plain, (CvmString*)f_roots[1], 0, captures, 0));
+    /* With dotall, it does. */
+    ASSERT_EQ(1, cvm_regexp_exec(da, (CvmString*)f_roots[1], 0, captures, 0));
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST a_word_boundary_is_found(void) {
+    fixture_enter();
+    FRAME(4);
+    f_roots[0] = cvm_string_from_utf8(literal("\\bcat\\b"));
+    f_roots[1] = cvm_string_from_utf8(literal("a cat in a catalog"));
+    CvmRegExp* re = cvm_regexp_compile((CvmString*)f_roots[0], 0);
+    f_roots[2] = re;
+    ASSERT(re != NULL);
+
+    i32 captures[8];
+    /* "cat" is a word by itself at position 2; "catalog" has no boundary
+     * after "cat". */
+    ASSERT_EQ(1, cvm_regexp_exec(re, (CvmString*)f_roots[1], 0, captures, 0));
+    ASSERT_EQ(2, captures[0]);
+    ASSERT_EQ(5, captures[1]);
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST a_group_that_did_not_participate_is_negative_one(void) {
+    fixture_enter();
+    FRAME(4);
+    /* The optional group is not taken when "b" is absent. */
+    f_roots[0] = cvm_string_from_utf8(literal("a(b)?c"));
+    f_roots[1] = cvm_string_from_utf8(literal("ac"));
+    CvmRegExp* re = cvm_regexp_compile((CvmString*)f_roots[0], 0);
+    f_roots[2] = re;
+    ASSERT(re != NULL);
+
+    i32 captures[8];
+    captures[2] = 42; /* poison, to see that it was overwritten */
+    ASSERT_EQ(1, cvm_regexp_exec(re, (CvmString*)f_roots[1], 0, captures, 0));
+    ASSERT_EQ(-1, captures[2]); /* the group did not take part */
+    ASSERT_EQ(-1, captures[3]);
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST non_ascii_case_folding_matches_across_scripts(void) {
+    fixture_enter();
+    FRAME(4);
+    /* Pattern: the regexp's \\u escape names U+03A3. Subject: the actual
+     * UTF-8 bytes of U+03C3 — a string built from text, not a pattern. */
+    f_roots[0] = cvm_string_from_utf8(literal("\\u03A3"));
+    f_roots[1] = cvm_string_from_utf8((str){.ptr = (u8 const*)"\xcf\x83", .len = 2});
+    CvmRegExp* ci = cvm_regexp_compile((CvmString*)f_roots[0], CVM_RE_FLAG_IGNORECASE);
+    f_roots[2] = ci;
+    ASSERT(ci != NULL);
+
+    i32 captures[8];
+    ASSERT_EQ(1, cvm_regexp_exec(ci, (CvmString*)f_roots[1], 0, captures, 0));
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
 SUITE(regexp_suite) {
     RUN_TEST(a_pattern_matches_and_reports_its_groups);
     RUN_TEST(a_match_can_start_where_the_caller_says);
@@ -329,6 +508,15 @@ SUITE(regexp_suite) {
     RUN_TEST(a_deadline_stops_a_pattern_that_would_run_long);
     RUN_TEST(a_pattern_that_does_not_compile_is_null);
     RUN_TEST(a_compiled_pattern_survives_a_collection);
+    RUN_TEST(backreference_matches_what_the_group_caught);
+    RUN_TEST(lookahead_finds_without_consuming);
+    RUN_TEST(negative_lookahead_excludes_its_pattern);
+    RUN_TEST(sticky_requires_the_start_position);
+    RUN_TEST(multiline_anchors_match_at_line_breaks);
+    RUN_TEST(dotall_lets_the_dot_cross_lines);
+    RUN_TEST(a_word_boundary_is_found);
+    RUN_TEST(a_group_that_did_not_participate_is_negative_one);
+    RUN_TEST(non_ascii_case_folding_matches_across_scripts);
 }
 
 GREATEST_MAIN_DEFS();
