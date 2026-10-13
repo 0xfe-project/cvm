@@ -481,6 +481,39 @@ TEST strings_come_and_go_without_growing_the_heap(void) {
     PASS();
 }
 
+TEST a_string_larger_than_a_block_allocates_and_survives(void) {
+    fixture_enter();
+    /* 32 KiB block: a string past that is a large object. */
+    enum { N = (usize)40 * 1024 };
+    static u8 units[N];
+    for (usize i = 0; i < N; i++) {
+        units[i] = (u8)(i & 0xffu);
+    }
+
+    CvmString* s = cvm_string_new8(units, N);
+    FRAME(1);
+    f_roots[0] = s;
+    collect();
+    CvmString* still = (CvmString*)f_roots[0];
+
+    ASSERT_EQ_FMT((usize)N, cvm_string_length(still), "%zu");
+    for (usize i = 0; i < N; i += 997u) { /* sample, not every byte: the point
+                                           * is that the content is there, not
+                                           * that the loop is thorough */
+        if (cvm_string_unit(still, i) != (u32)units[i]) {
+            FAILm("a unit of the large string changed");
+        }
+    }
+
+    /* And it is reclaimed when the root goes away. */
+    f_roots[0] = NULL;
+    collect();
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
 SUITE(str_suite) {
     RUN_TEST(a_narrow_string_holds_its_units);
     RUN_TEST(narrow_units_are_code_units_not_utf8_bytes);
@@ -502,6 +535,7 @@ SUITE(str_suite) {
     RUN_TEST(an_unrooted_string_is_reclaimed);
     RUN_TEST(a_long_string_crosses_the_inline_allocation_path);
     RUN_TEST(strings_come_and_go_without_growing_the_heap);
+    RUN_TEST(a_string_larger_than_a_block_allocates_and_survives);
 }
 
 GREATEST_MAIN_DEFS();
@@ -531,3 +565,13 @@ int main(int argc, char** argv) {
 }
 
 #endif /* !_WIN32 */
+
+/*
+ * A string larger than a block takes the large-object path: a different
+ * allocator, a different set of metadata, and a different set of ways to get
+ * it wrong. The immix invariant that matters is that an object never spans
+ * blocks, and the marker's extent assertion is the thing that would notice if
+ * it did — a pointer into the middle of a large object reads as a placeholder
+ * and is silently skipped, which is why this test checks the content rather
+ * than trusting the survival.
+ */

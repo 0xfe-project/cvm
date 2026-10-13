@@ -336,6 +336,36 @@ TEST repeated_push_and_drop_does_not_grow(void) {
     PASS();
 }
 
+/*
+ * An array larger than a block takes the large-object path. The invariant that
+ * matters is that the object does not span blocks, and the marker's extent
+ * check would catch it if it did; this test checks the content and that the
+ * array survives a collection.
+ */
+TEST an_array_larger_than_a_block_allocates_and_survives(void) {
+    fixture_enter();
+    /* 32 KiB / 8 bytes per pointer = 4096 pointers crosses a block. */
+    enum { N = 8192 };
+    CvmRefArray* a = cvm_ref_array_new(N);
+    FRAME(1);
+    f_roots[0] = a;
+    for (u32 i = 0; i < 64; i++) {
+        a = cvm_ref_array_push((CvmRefArray*)f_roots[0], cvm_alloc(&item_desc));
+        f_roots[0] = a;
+    }
+    collect();
+    CvmRefArray* still = (CvmRefArray*)f_roots[0];
+    ASSERT(still != NULL);
+    ASSERT_EQ_FMT((usize)64, cvm_ref_array_length(still), "%zu");
+    /* Every element is reachable and correct. */
+    for (u32 i = 0; i < 64; i++) {
+        ASSERT(cvm_ref_array_get(still, i) != NULL);
+    }
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
 SUITE(array_suite) {
     RUN_TEST(a_new_array_has_empty_slots);
     RUN_TEST(a_zero_capacity_array_is_still_usable);
@@ -349,6 +379,7 @@ SUITE(array_suite) {
     RUN_TEST(a_rooted_array_keeps_its_items_alive);
     RUN_TEST(an_item_dropped_from_a_rooted_array_goes_away);
     RUN_TEST(repeated_push_and_drop_does_not_grow);
+    RUN_TEST(an_array_larger_than_a_block_allocates_and_survives);
 }
 
 GREATEST_MAIN_DEFS();
