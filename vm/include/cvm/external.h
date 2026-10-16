@@ -60,7 +60,8 @@
  * Called on the finalizer thread with the world running, so it may
  * allocate, block, or call back into the runtime.
  */
-typedef void (*CvmFinalizerFn)(opaque_mut c_ptr);
+/* CvmFinalizerFn is in cvm/gc.h — the type descriptor carries it, so that
+ * is where it belongs. */
 
 typedef struct CvmExternal {
     opaque_mut c_ptr;

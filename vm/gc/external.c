@@ -36,26 +36,41 @@ CvmTypeDescriptor const cvm_type_external = {
     .kind = CVM_TYPE_SCALAR,
 };
 
+/*
+ * The external type has NO type-level finalizer. Its finalizers are
+ * per-instance — chosen at construction, stored in the object's payload —
+ * and the sweep reads them at sweep time, because the object's bytes are
+ * about to stop being its.
+ *
+ * The metadata flag is still set, because the sweep still has to notice the
+ * object. What the flag says is "this object needs attention when it dies",
+ * not "the descriptor knows what to do".
+ */
+static CvmTypeDescriptor const cvm_type_external_with_finalizer = {
+    .size = sizeof(CvmExternal),
+    .kind = CVM_TYPE_SCALAR,
+    /* .finalizer stays NULL: the sweep reads the payload instead. */
+};
+
 opaque_mut cvm_external_new(opaque_mut c_ptr, CvmFinalizerFn finalizer) {
-    CvmExternal* ext = cvm_alloc(&cvm_type_external);
+    CvmTypeDescriptor const* type =
+        finalizer != NULL ? &cvm_type_external_with_finalizer : &cvm_type_external;
+
+    CvmExternal* ext = cvm_alloc(type);
     ext->c_ptr = c_ptr;
     ext->finalizer = finalizer;
 
+    /*
+     * The flag is set here rather than by the allocation path, because the
+     * external type's finalizer is per-instance: the descriptor says NULL,
+     * and the allocation path only flags what the descriptor names. The
+     * object still needs the flag, or the sweep never looks at it.
+     */
     if (finalizer != NULL) {
         CvmGcHeader* header = cvm_header_of_mut(ext);
-        object_meta_set_has_finalizer(
-            bytemap_get(cvm_world()->heap.bytemap, (u8 const*)header));
-
-        /*
-         * Flag the block, so the sweeper knows to look for finalizers in
-         * it. Without this a block whose objects all die takes the bulk
-         * clear path and the finalizer is never seen.
-         */
-        CvmHeap* heap = &cvm_world()->heap;
-        BlockMeta* block =
-            block_meta_of_word(heap->block_meta_start, heap->heap_start, (u8*)header);
-        block_meta_set_has_finalizers(block, true);
+        cvm_note_finalizer(header);
     }
+
     return ext;
 }
 

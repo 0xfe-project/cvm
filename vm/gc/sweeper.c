@@ -78,17 +78,40 @@ static void extract_finalizers(Bytemap* bytemap, u8* start, u8* limit) {
         if (object_meta_is_allocated(slot)) {
             CvmGcHeader* header = (CvmGcHeader*)p;
 
-            /* The flag rides in the slot byte, which this loop is already
-             * holding: see the note on CvmGcHeader. */
+            /*
+             * The flag rides in the slot byte, which this loop is already
+             * holding: see the note on CvmGcHeader.
+             *
+             * Two paths, because there are two kinds of finalizer:
+             *
+             *   the type's (desc->finalizer): the queue holds the payload
+             *   pointer and the function. The payload may have been reused
+             *   by the time the finalizer thread runs, so the function must
+             *   not depend on the object's contents — it knows what to do
+             *   from its own code and the type it belongs to.
+             *
+             *   the instance's (external, the only one today): the sweep
+             *   reads the payload NOW, because the object is about to be
+             *   freed and its bytes are the only place the C pointer and the
+             *   per-instance function live. The queue holds what was read,
+             *   not a pointer to where it was read from.
+             *
+             * This is why the descriptor's finalizer cannot read the object:
+             * not because it is forbidden, but because the memory may be
+             * someone else's by then. An external handle is exactly the case
+             * that cannot use the type-level form, because its finalizer and
+             * its payload are chosen per instance.
+             */
             if (object_meta_has_finalizer(slot)) {
-                CvmExternal* ext = (CvmExternal*)(p + sizeof(CvmGcHeader));
-                /*
-                 * A failure means the queue is full, which is counted and
-                 * read as cvm_finalizer_dropped_count rather than logged
-                 * per object: a sweep can produce thousands, and a line
-                 * each would bury the collection's own output.
-                 */
-                (void)cvm_finalizer_enqueue(ext->c_ptr, ext->finalizer);
+                if (header->type->finalizer != NULL) {
+                    (void)cvm_finalizer_enqueue(p + sizeof(CvmGcHeader),
+                                                header->type->finalizer);
+                } else {
+                    /* External: per-instance, extracted here because the
+                     * object's bytes are about to stop being its. */
+                    CvmExternal* ext = (CvmExternal*)(p + sizeof(CvmGcHeader));
+                    (void)cvm_finalizer_enqueue(ext->c_ptr, ext->finalizer);
+                }
             }
             p += cvm_object_size(header);
         } else {
@@ -121,8 +144,14 @@ static void sweep_line_with_finalizers(ObjectMeta* line_cursor, u8* line_start) 
             u8* addr = line_start + i * CVM_ALLOC_ALIGNMENT;
 
             if (object_meta_has_finalizer(slot)) {
-                CvmExternal* ext = (CvmExternal*)(addr + sizeof(CvmGcHeader));
-                (void)cvm_finalizer_enqueue(ext->c_ptr, ext->finalizer);
+                CvmGcHeader* header = (CvmGcHeader*)addr;
+                if (header->type->finalizer != NULL) {
+                    (void)cvm_finalizer_enqueue(addr + sizeof(CvmGcHeader),
+                                                header->type->finalizer);
+                } else {
+                    CvmExternal* ext = (CvmExternal*)(addr + sizeof(CvmGcHeader));
+                    (void)cvm_finalizer_enqueue(ext->c_ptr, ext->finalizer);
+                }
             }
             object_meta_set_free(slot);
         } else if (object_meta_is_marked(slot)) {

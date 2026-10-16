@@ -27,6 +27,7 @@
 #include "base/types.h"
 #include "context.h"
 #include "cvm/gc.h"
+#include "cvm/array.h"
 #include "gc/collect.h"
 #include "cvm/external.h"
 #include "gc/heap.h"
@@ -137,6 +138,7 @@ TEST a_new_external_object_holds_its_pointer(void) {
 
 static _Atomic u32 finalized_count = 0;
 static _Atomic(usize) last_finalized_ptr = 0;
+static _Atomic(u64) last_finalized_count = 0;
 
 static void counting_finalizer(opaque_mut c_ptr) {
     atomic_fetch_add(&finalized_count, 1);
@@ -438,6 +440,141 @@ TEST an_external_object_held_by_a_root_stays_alive(void) {
     PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* type-level finalizers: any type, not just external                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A non-external type with a type-level finalizer. The descriptor names the
+ * function, the allocation path flags the object, and the sweep calls it
+ * when the object dies. This is what task A exists to make possible.
+ */
+typedef struct OwnedBuffer {
+    opaque_mut raw; /* a foreign allocation, not a GC pointer */
+    usize len;
+} OwnedBuffer;
+
+static void owned_buffer_finalize(opaque_mut object) {
+    OwnedBuffer* buf = object;
+    /* The object may have been reused by now, so this reads what it can and
+     * does not depend on the bytes staying valid: the raw pointer is a
+     * foreign allocation, not in the GC heap, and the finalizer's job is to
+     * release it. Whether the len is still readable is not something the
+     * contract promises; it happens to be, because the sweep does not zero
+     * the payload, but a caller that depends on that is depending on the
+     * memory not having been reallocated, which is not guaranteed. */
+    if (buf->raw != NULL) {
+        rt_mem_free(buf->raw);
+        atomic_fetch_add(&last_finalized_count, 1);
+    }
+}
+
+static CvmTypeDescriptor const owned_buffer_desc = {
+    .size = sizeof(OwnedBuffer),
+    .kind = CVM_TYPE_SCALAR,
+    .finalizer = owned_buffer_finalize,
+};
+
+/*
+ * A PTR_ARRAY type with a type-level finalizer, to show it is not just
+ * scalar types.
+ */
+static void node_array_finalize(opaque_mut object) {
+    (void)object;
+    atomic_fetch_add(&last_finalized_count, 1);
+}
+
+static CvmPtrField const node_ptr_fields[] = {
+    {.offset = offsetof(CvmRefArray, items)},
+};
+#pragma unused(node_ptr_fields)
+
+static CvmTypeDescriptor const node_array_desc = {
+    .size = offsetof(CvmRefArray, items),
+    .kind = CVM_TYPE_PTR_ARRAY,
+    .array_length_offset = offsetof(CvmRefArray, used),
+    .array_data_offset = offsetof(CvmRefArray, items),
+    .finalizer = node_array_finalize,
+};
+
+TEST a_struct_type_can_have_a_finalizer(void) {
+    fixture_enter();
+    settle();
+
+    /* Allocate one, drop it, collect. */
+    OwnedBuffer* buf = cvm_alloc(&owned_buffer_desc);
+    buf->raw = rt_mem_alloc(64);
+    buf->len = 64;
+    (void)buf;
+
+    collect();
+    cvm_finalizer_drain_now();
+    u64 before = cvm_finalizer_run_count() - 1;
+
+    ASSERT_EQ_FMT(before + 1, cvm_finalizer_run_count(), "%" PRIu64);
+
+    fixture_leave();
+    PASS();
+}
+
+TEST a_struct_type_does_not_finalize_while_alive(void) {
+    fixture_enter();
+    settle();
+    u64 before = cvm_finalizer_run_count();
+
+    FRAME(1);
+    OwnedBuffer* buf = cvm_alloc(&owned_buffer_desc);
+    buf->raw = rt_mem_alloc(32);
+    buf->len = 32;
+    f_roots[0] = buf;
+
+    collect();
+    cvm_finalizer_drain_now();
+    ASSERT_EQ_FMT(before, cvm_finalizer_run_count(), "%" PRIu64);
+
+    FRAME_END();
+    fixture_leave();
+    PASS();
+}
+
+TEST a_ptr_array_type_can_have_a_finalizer(void) {
+    fixture_enter();
+    settle();
+
+    CvmRefArray* arr = cvm_alloc_array(&node_array_desc, 0, 0);
+    (void)arr;
+
+    collect();
+    cvm_finalizer_drain_now();
+    u64 before = cvm_finalizer_run_count() - 1;
+
+    ASSERT_EQ_FMT(before + 1, cvm_finalizer_run_count(), "%" PRIu64);
+
+    fixture_leave();
+    PASS();
+}
+
+TEST many_struct_finalizers_all_run(void) {
+    fixture_enter();
+
+    /* One at a time, each verified: the mechanism, not the batching. */
+    u64 total = 0;
+    for (u32 i = 0; i < 3; i++) {
+        settle();
+        u64 before = cvm_finalizer_run_count();
+        OwnedBuffer* buf = cvm_alloc(&owned_buffer_desc);
+        buf->raw = rt_mem_alloc(8);
+        buf->len = 8;
+        collect();
+        cvm_finalizer_drain_now();
+        total += cvm_finalizer_run_count() - before;
+    }
+    ASSERT_EQ_FMT((u64)3, total, "%" PRIu64);
+
+    fixture_leave();
+    PASS();
+}
+
 SUITE(external_suite) {
     RUN_TEST(the_external_type_is_a_scalar);
     RUN_TEST(a_new_external_object_holds_its_pointer);
@@ -452,6 +589,10 @@ SUITE(external_suite) {
     RUN_TEST(the_table_grows_past_its_initial_capacity);
     RUN_TEST(a_root_registered_during_a_collection_is_not_missed);
     RUN_TEST(an_external_object_held_by_a_root_stays_alive);
+    RUN_TEST(a_struct_type_can_have_a_finalizer);
+    RUN_TEST(a_struct_type_does_not_finalize_while_alive);
+    RUN_TEST(a_ptr_array_type_can_have_a_finalizer);
+    RUN_TEST(many_struct_finalizers_all_run);
 }
 
 GREATEST_MAIN_DEFS();

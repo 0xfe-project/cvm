@@ -36,6 +36,7 @@
 #include "gc/heap.h"
 #include "gc/marker.h"
 #include "gc/meta.h"
+#include "gc/world.h"
 #include "context.h"
 #include "log.h"
 #include "rt.h"
@@ -144,6 +145,14 @@ static opaque_mut publish(CvmAllocator* alloc, u8* start, usize size,
 
     ObjectMeta* meta = bytemap_get(alloc->bytemap, start);
     object_meta_set_allocated(meta);
+
+    /*
+     * The type's finalizer, if it has one: same as the inlined path, and
+     * this is the path that sees large objects the inlined one never does.
+     */
+    if (type->finalizer != NULL) {
+        cvm_note_finalizer(header);
+    }
 
     /*
      * The object's extent, in the table: see the note on CVM_OM_END. The
@@ -457,6 +466,26 @@ static u8* try_alloc(CvmAllocator* alloc, usize size) {
  * small object — it is at most a line, and a block holds 128 lines — so
  * growing by one is always sufficient to make progress.
  */
+/*
+ * Set the metadata flag and the block flag that make the sweep notice a
+ * finalizer when the object dies.
+ *
+ * Called from both allocation paths — the inlined one in gc.h and the slow
+ * one here — because the types it touches (ObjectMeta, BlockMeta) are not
+ * visible to the header. A call rather than an inline because the branch
+ * in the caller is the only cost for types without a finalizer, and the body
+ * is two stores.
+ */
+void cvm_note_finalizer(CvmGcHeader* header) {
+    CvmHeap* heap = &cvm_world()->heap;
+    ObjectMeta* meta = bytemap_get(heap->bytemap, (u8 const*)header);
+    object_meta_set_has_finalizer(meta);
+
+    BlockMeta* block =
+        block_meta_of_word(heap->block_meta_start, heap->heap_start, (u8*)header);
+    block_meta_set_has_finalizers(block, true);
+}
+
 opaque_mut cvm_alloc_slow(CvmTypeDescriptor const* type, usize size) {
     /*
      * Objects at or above the large-object threshold are chunk-allocated,

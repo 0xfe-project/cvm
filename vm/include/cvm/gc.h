@@ -24,6 +24,10 @@
 #include "base/assert.h"
 #include "base/types.h"
 
+/* A finalizer: called with the dying object's payload pointer. See
+ * CvmTypeDescriptor.finalizer for the contract. */
+typedef void (*CvmFinalizerFn)(opaque_mut object);
+
 /* ------------------------------------------------------------------ */
 /* TypeDescriptor                                                      */
 /* ------------------------------------------------------------------ */
@@ -92,6 +96,21 @@ struct CvmTypeDescriptor {
     u16 array_length_offset;                  /* offset of usize length */
     u16 array_data_offset;                    /* offset of first element */
     CvmTypeDescriptor const* array_elem_type; /* STRUCT_ARRAY only */
+
+    /*
+     * Called when any object of this type dies, if non-NULL. The argument is
+     * the object's payload pointer, not a field inside it, and the object is
+     * dead: a finalizer may not read the object's GC-pointer fields, because
+     * they may already have been collected. What it may do is release a
+     * resource the object holds directly — close a handle, free a buffer —
+     * and return.
+     *
+     * NULL (the default) means the type has no finalizer, and the sweep's
+     * fast path does not even look. That is why the default is NULL rather
+     * than a no-op: the difference is a branch the collector takes on every
+     * dying object or doesn't.
+     */
+    CvmFinalizerFn finalizer;
 };
 
 /* ------------------------------------------------------------------ */
@@ -626,6 +645,11 @@ CVM_INLINE void cvm_frame_pop(CvmFrameHandle* frame) {
 
 /* Slow paths live in vm (out of line). */
 opaque_mut cvm_alloc_slow(CvmTypeDescriptor const* type, usize size);
+
+/* Set the metadata and block flags that make the sweep notice a finalizer.
+ * Called from the allocation paths; lives in the GC's own compilation unit
+ * because the metadata types it touches are internal. */
+void cvm_note_finalizer(CvmGcHeader* header);
 opaque_mut cvm_alloc_large(CvmTypeDescriptor const* type, usize size);
 
 /* Mark a just-allocated object as surviving, while marking runs. */
@@ -690,6 +714,16 @@ CVM_INLINE opaque_mut cvm_alloc_sized(CvmTypeDescriptor const* type,
 
     CvmGcHeader* hdr = (CvmGcHeader*)p;
     hdr->type = type;
+
+    /*
+     * A type-level finalizer means the collector has to notice this object
+     * when it dies. The metadata and the block flag live in headers that are
+     * not visible here, so this is a call into the GC's own compilation unit
+     * — and the branch is the only cost for types without a finalizer.
+     */
+    if (type->finalizer != NULL) {
+        cvm_note_finalizer(hdr);
+    }
 
     /*
      * Mark the slot. Without this the object exists but the collector
